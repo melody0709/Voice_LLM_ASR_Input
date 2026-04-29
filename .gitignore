@@ -1,0 +1,9 @@
+build/
+models/
+*.user
+*.suo
+*.obj
+*.res
+*.pdb
+*.ilk
+*.log
