@@ -39,6 +39,8 @@ constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kReloadMessage = WM_APP + 2;
 constexpr UINT kAsrResultMessage = WM_APP + 3;
 constexpr UINT kTrayId = 1;
+constexpr UINT_PTR kCapsLockLongPressTimer = 2;
+constexpr UINT kCapsLockLongPressMs = 300;
 constexpr int kWorkerPort = 18088;
 
 constexpr UINT ID_TRAY_VERSION = 1001;
@@ -84,6 +86,9 @@ HBRUSH g_controlBgBrush = nullptr;
 Config g_config;
 bool g_recording = false;
 UINT g_activeHotkeyKey = 0;
+bool g_capsLockHotkeyPending = false;
+bool g_capsLockLongPressActive = false;
+bool g_capsLockWasOn = false;
 std::wstring g_hudText = L"Ready";
 HWAVEIN g_waveIn = nullptr;
 WAVEHDR g_waveHeaders[4] = {};
@@ -567,6 +572,26 @@ void SendCtrlV() {
     SendInput(4, inputs, sizeof(INPUT));
 }
 
+bool IsCapsLockOn() {
+    return (GetKeyState(VK_CAPITAL) & 0x0001) != 0;
+}
+
+void SendCapsLockTap() {
+    INPUT inputs[2] = {};
+    inputs[0].type = INPUT_KEYBOARD;
+    inputs[0].ki.wVk = VK_CAPITAL;
+    inputs[1].type = INPUT_KEYBOARD;
+    inputs[1].ki.wVk = VK_CAPITAL;
+    inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
+    SendInput(2, inputs, sizeof(INPUT));
+}
+
+void RestoreCapsLockState() {
+    if (IsCapsLockOn() != g_capsLockWasOn) {
+        SendCapsLockTap();
+    }
+}
+
 void CALLBACK WaveInProc(HWAVEIN waveIn, UINT msg, DWORD_PTR, DWORD_PTR param1, DWORD_PTR) {
     if (msg != WIM_DATA || waveIn != g_waveIn) return;
     auto* header = reinterpret_cast<WAVEHDR*>(param1);
@@ -946,17 +971,67 @@ void StopRecordingSession() {
     RecognizeAsync(wavPath);
 }
 
+void ResetCapsLockHotkeyState() {
+    if (g_mainWindow) KillTimer(g_mainWindow, kCapsLockLongPressTimer);
+    g_activeHotkeyKey = 0;
+    g_capsLockHotkeyPending = false;
+    g_capsLockLongPressActive = false;
+}
+
+void StartCapsLockHotkeyPress() {
+    if (g_activeHotkeyKey == VK_CAPITAL) return;
+    g_activeHotkeyKey = VK_CAPITAL;
+    g_capsLockHotkeyPending = true;
+    g_capsLockLongPressActive = false;
+    g_capsLockWasOn = IsCapsLockOn();
+    if (g_mainWindow) SetTimer(g_mainWindow, kCapsLockLongPressTimer, kCapsLockLongPressMs, nullptr);
+}
+
+void ActivateCapsLockLongPress() {
+    if (g_activeHotkeyKey != VK_CAPITAL || !g_capsLockHotkeyPending || g_capsLockLongPressActive) return;
+    g_capsLockHotkeyPending = false;
+    g_capsLockLongPressActive = true;
+    StartRecordingSession();
+}
+
+void FinishCapsLockHotkeyPress() {
+    if (g_activeHotkeyKey != VK_CAPITAL) return;
+    if (g_mainWindow) KillTimer(g_mainWindow, kCapsLockLongPressTimer);
+
+    const bool wasLongPress = g_capsLockLongPressActive;
+    const bool wasShortPress = g_capsLockHotkeyPending && !g_capsLockLongPressActive;
+    ResetCapsLockHotkeyState();
+
+    if (wasLongPress) {
+        StopRecordingSession();
+        RestoreCapsLockState();
+    } else if (wasShortPress) {
+        SendCapsLockTap();
+    }
+}
+
 LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wParam, LPARAM lParam) {
     if (code == HC_ACTION) {
         const auto* event = reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
         const HotkeyConfig hotkey = CurrentConfiguredHotkey();
+        if (event && event->vkCode == VK_CAPITAL && (event->flags & LLKHF_INJECTED)) {
+            return CallNextHookEx(g_keyboardHook, code, wParam, lParam);
+        }
         if (event && event->vkCode == hotkey.key && (ModifiersMatch(hotkey) || g_activeHotkeyKey == event->vkCode)) {
             if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
+                if (hotkey.key == VK_CAPITAL) {
+                    StartCapsLockHotkeyPress();
+                    return 1;
+                }
                 g_activeHotkeyKey = event->vkCode;
                 StartRecordingSession();
                 return 1;
             }
             if (wParam == WM_KEYUP || wParam == WM_SYSKEYUP) {
+                if (hotkey.key == VK_CAPITAL) {
+                    FinishCapsLockHotkeyPress();
+                    return 1;
+                }
                 g_activeHotkeyKey = 0;
                 StopRecordingSession();
                 return 1;
@@ -977,7 +1052,7 @@ void UninstallKeyboardHook() {
         UnhookWindowsHookEx(g_keyboardHook);
         g_keyboardHook = nullptr;
     }
-    g_activeHotkeyKey = 0;
+    ResetCapsLockHotkeyState();
 }
 
 void ApplyUiFont(HWND hwnd, HFONT font = nullptr) {
@@ -1499,7 +1574,7 @@ void ShowTrayMenu(HWND hwnd) {
     POINT pt;
     GetCursorPos(&pt);
     HMENU menu = CreatePopupMenu();
-    AppendMenuW(menu, MF_STRING | MF_GRAYED | MF_DISABLED, ID_TRAY_VERSION, L"Version: v0.1.1");
+    AppendMenuW(menu, MF_STRING | MF_GRAYED | MF_DISABLED, ID_TRAY_VERSION, L"Version: v0.1.2");
     AppendMenuW(menu, MF_STRING, ID_TRAY_SETTINGS, L"Settings...");
     AppendMenuW(menu, MF_STRING, ID_TRAY_RELOAD, L"Reload ASR Worker");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -1555,6 +1630,13 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         return 0;
     }
+    case WM_TIMER:
+        if (wParam == kCapsLockLongPressTimer) {
+            KillTimer(hwnd, kCapsLockLongPressTimer);
+            ActivateCapsLockLongPress();
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
         case ID_TRAY_SETTINGS:

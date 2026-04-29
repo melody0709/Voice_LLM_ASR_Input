@@ -9,3 +9,4 @@ models/
 *.log
 .bak
 __pycache__/
+.serena/

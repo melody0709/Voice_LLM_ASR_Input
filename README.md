@@ -2,11 +2,14 @@
 
 Windows 11 本地 CPU 语音输入工具。当前 v1 目标不是完整 TSF/IME，而是一个托盘常驻程序：按住快捷键录音，松开后本地 ASR 识别，把最终文本粘贴到当前输入位置。
 
+当前版本：`v0.1.2`
+
 ## 当前能力
 
 - Win32 托盘常驻程序，带托盘图标、程序图标、进程图标。
 - Settings 支持切换 ASR 模型、模型目录、线程数、VAD、Partial、Postprocess。
 - Shortcut tab 支持录入长按快捷键，默认 `CapsLock`。
+- 默认 `CapsLock` 短按正常切换大小写，长按 300ms 后才开始语音输入；语音输入结束后不会改变原来的大小写状态。
 - 打开 Settings 时暂停全局快捷键监听，方便重新录入 `CapsLock`。
 - 常驻 `asr_worker.py`，避免每次录音后重新启动 Python 和加载模型。
 - 本地 TCP JSON line 通信：`127.0.0.1:18088`。
@@ -48,14 +51,14 @@ models/
 .\build\VoiceLLMASRInput.exe
 ```
 
-运行后右键托盘图标打开 `Settings...`。按住设置的快捷键开始录音，松开后识别并粘贴。
+运行后右键托盘图标打开 `Settings...`。按住设置的快捷键开始录音，松开后识别并粘贴。默认 `CapsLock` 需要长按约 300ms 才会触发录音，短按仍用于大小写切换。
 
 ## Settings
 
 - `Recognition` tab：
   - `ASR model`: FireRedASR2 CTC / FireRedASR2 AED / SenseVoiceSmall
   - `Model folder`: 当前模型目录
-  - `Threads`: `auto`, `1`, `2`, `3`, `4`
+  - `Threads`: `auto`, `1` ... `8`
   - `Enable VAD`: 使用 Silero VAD 保守裁剪头尾静音，无人声时跳过 ASR
   - `Partial result`: 当前 UI 预留，后续做流式/模拟流式
   - `Postprocess`: `none`, `itn`, `llm`
@@ -63,6 +66,7 @@ models/
   - 点击输入框后按快捷键。
   - `Esc` 取消本次录入。
   - `Backspace/Delete` 清空快捷键。
+  - 默认 `CapsLock` 支持短按大小写切换、长按语音输入。
 
 当前 `itn` 会启用本地 CT-Transformer 标点模型。`llm` 暂时按本地标点处理，真正的保守 LLM 纠错还没有接入。
 
@@ -97,4 +101,5 @@ models/
 - 模型、线程数、音频时长。
 - 首次加载耗时和第二次复用耗时。
 - 松开快捷键到文本上屏耗时。
+- `CapsLock` 短按/长按是否符合预期，长按前后的大小写状态是否保持一致。
 - 标点质量、长句断句、专有名词识别。

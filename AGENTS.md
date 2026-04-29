@@ -58,6 +58,7 @@ Get-Process VoiceLLMASRInput -ErrorAction SilentlyContinue | Stop-Process -Force
 - 自绘 hotkey edit 控件。
 - 打开 Settings 时暂停全局键盘 hook，关闭后恢复。
 - `WH_KEYBOARD_LL` 长按快捷键录音。
+- 默认 `CapsLock` 使用 300ms 长按判定：短按交还系统切换大小写，长按录音，结束后恢复按下前 Caps Lock 状态。
 - `waveIn` 采集 16kHz mono PCM。
 - WAV 写入 `%APPDATA%\VoiceLLMASRInput\last_recording.wav`。
 - 启动/停止/重载 `asr_worker.py`。
@@ -142,3 +143,5 @@ Get-Process VoiceLLMASRInput -ErrorAction SilentlyContinue | Stop-Process -Force
 ## 踩坑规则
 
 > AI 在完成重大修改或解决复杂报错后，可追加规则。
+
+- 改 `CapsLock` 热键逻辑时不要吞掉短按的系统大小写切换；短按需要补发 `CapsLock`，长按录音结束后必须保持原来的 Caps Lock 状态。

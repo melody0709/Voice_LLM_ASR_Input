@@ -20,15 +20,15 @@
 - 应用无任务栏图标，仅存在于系统托盘。
 - 托盘右键触发传统 Win32 菜单 (`CreatePopupMenu`)。*(注：参考 ../zencrop 项目的实现方式)*
 - 菜单项包含：
-  - `Version: v0.1.0` (灰色不可点击状态)
+  - `Version: v0.1.2` (灰色不可点击状态)
   - `Settings...` (点击打开设置窗口)
   - 分割线
   - `Quit`
 
 **2. 全局自定义快捷键与录音控制 (WH_KEYBOARD_LL)**
-- 使用低级键盘钩子全局监听。默认按下 `CapsLock` 键开始录音，松开停止。
+- 使用低级键盘钩子全局监听。默认长按 `CapsLock` 300ms 后开始录音，松开停止；短按 `CapsLock` 保留系统大小写切换。
 - 必须支持在 Settings 中自定义快捷键（如长按 CapsLock，或长按 Shift+CapsLock 等）。
-- 钩子拦截到配置的快捷键时，必须 return 1 抑制事件向系统传递，防止打字干扰或触发系统原有功能。
+- 钩子拦截到配置的快捷键时，必须 return 1 抑制事件向系统传递，防止打字干扰或触发系统原有功能；`CapsLock` 短按场景需要补发系统按键事件，长按结束后不得改变原 Caps Lock 状态。
 
 **3. Direct2D 悬浮胶囊波形窗 (The HUD)**
 - 录音时在屏幕底部居中弹出无边框悬浮窗 (`WS_POPUP | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED`)。

@@ -63,7 +63,7 @@ worker 的存在是为了避免每次录音都重新启动 Python 和加载 ONNX
 Settings 是普通 Win32 窗口，目前分两个 tab：
 
 - `Recognition`: 模型、模型目录、线程、VAD、Partial、Postprocess。
-- `Shortcut`: 长按录音快捷键。
+- `Shortcut`: 长按录音快捷键，默认 `CapsLock`。
 
 打开 Settings 时：
 
@@ -77,12 +77,19 @@ Settings 是普通 Win32 窗口，目前分两个 tab：
 
 使用 `WH_KEYBOARD_LL`。
 
-当前行为：
+普通热键当前行为：
 
 - `WM_KEYDOWN` / `WM_SYSKEYDOWN`: 开始录音。
 - `WM_KEYUP` / `WM_SYSKEYUP`: 停止录音并提交 ASR。
 - 匹配配置中的主键和修饰键。
 - 录音期间保存 `g_activeHotkeyKey`，避免松开主键时因修饰键已释放导致无法停止。
+
+`CapsLock` 是特殊默认热键：
+
+- 物理 `CapsLock` 按下时先拦截，不立即触发系统大小写切换。
+- 300ms 内松开视为短按，程序补发一次 `CapsLock`，让系统正常切换大小写。
+- 按住超过 300ms 视为长按，开始录音；松开后停止录音并恢复按下前的 Caps Lock 状态。
+- 补发的 `CapsLock` 注入事件会被 hook 放行，避免递归拦截。
 
 ### 录音
 

@@ -48,7 +48,7 @@
   - 托盘图标使用同一个资源图标，通过 `Shell_NotifyIconW` 注册。
   - v1 可先使用占位图标；发布前替换为专属麦克风/语音输入图标。
 - 托盘右键菜单：
-  - `Version: v0.1.0`，灰色不可点击。
+  - `Version: v0.1.2`，灰色不可点击。
   - `Settings...`，打开设置窗口。
   - `Reload ASR Worker`，保存设置后重启/重载后端。
   - 分割线。
@@ -56,11 +56,11 @@
 - Settings 必须支持更改模型：
   - `ASR Model` 下拉框：`FireRedASR2 CTC`, `FireRedASR2 AED`, `SenseVoiceSmall`。
   - `Model Directory`：模型目录选择框。
-  - `Threads`：1/2/3/4/Auto。
+  - `Threads`：1..8/Auto。
   - `VAD`：启用/关闭，默认启用。
   - `Partial Result`：启用/关闭，默认启用；若模型模拟流式效果差，可关闭只显示音量和最终文本。
   - `Text Postprocess`：`None`, `ITN/Punctuation`, `Conservative LLM`；v1 的 `ITN/Punctuation` 使用本地 CT-Transformer 标点模型。
-  - `Hotkey`：默认长按 `CapsLock`，支持录制组合键。
+  - `Hotkey`：默认长按 `CapsLock`，支持录制组合键；短按 `CapsLock` 保留系统大小写切换。
   - `LLM`：启用开关、API Base URL、API Key、Model。
 - 保存路径：`%APPDATA%\VoiceLLMASRInput\config.json`。
 
@@ -150,7 +150,7 @@
 
 ## 前端实现计划
 - 单实例启动，无任务栏图标，只保留托盘图标。
-- 使用 `WH_KEYBOARD_LL` 实现长按热键录音；拦截配置热键，避免触发 CapsLock 或输入法副作用。
+- 使用 `WH_KEYBOARD_LL` 实现长按热键录音；默认 `CapsLock` 以 300ms 区分短按/长按，短按切换大小写，长按才录音。
 - WASAPI Shared Mode 采集系统默认麦克风，转换为 16kHz mono s16le 后发给 worker。
 - HUD 使用 Direct2D 渲染：
   - 底部居中胶囊窗，56px 高，圆角 28px。
@@ -174,7 +174,7 @@
   - `sensevoice`: `model.int8.onnx` + `tokens.txt`，可传 `language` 和 `use_itn`。
 - VAD：
   - v1 使用 sherpa-onnx 的 Silero VAD int8。
-  - 短按少于 300ms 时不送 ASR，直接取消。
+  - `CapsLock` 短按少于 300ms 时不送 ASR，补发系统 `CapsLock` 用于大小写切换。
   - 输入法场景先采用保守 VAD：只裁头尾静音，不删除中间停顿；长音频切段留到流式方案中处理。
 
 ## 性能测试计划
@@ -202,17 +202,17 @@
 - 管理员权限窗口可能阻止普通权限进程注入输入；v1 记录失败并提示，不强行提权。
 - 剪贴板恢复要延迟一点执行，避免目标应用还没 paste 完就被恢复。
 - 多显示器和 DPI 缩放会影响 HUD 位置，必须用当前光标/前台窗口所在显示器计算。
-- CapsLock 热键要处理键盘状态恢复，避免系统 Caps 状态被误切换。
+- CapsLock 热键要处理键盘状态恢复，避免系统 Caps 状态被误切换；短按必须保留大小写切换，长按录音结束后保持原状态。
 - LLM 纠错必须默认关闭；开启时必须超时短、可取消、失败直接使用 ASR 原文。
 - 模型许可证和分发方式要单独确认，尤其如果未来把模型打包进安装器。
 
 ## 当前建议默认值
 - 默认模型：`FireRedASR2 CTC int8`
-- 默认线程：`auto`，worker 内部先映射为 `min(4, physical_cores / 2)`，后续由测试数据调整。
+- 默认线程：`auto`，worker 内部先映射为 `min(8, cpu_count)`，后续由测试数据调整。
 - 默认 VAD：启用。
 - 默认 partial：启用，但 Settings 允许关闭。
 - 默认后处理：`ITN/Punctuation`，LLM 关闭。
-- 默认热键：长按 `CapsLock`。
+- 默认热键：长按 `CapsLock`，300ms 后触发语音输入；短按切换大小写。
 
 ## 待确认问题
 - 你更看重“松开后最快上屏”，还是“宁可慢一点也要更准”？这个会决定 CTC 和 SenseVoice 谁更适合作为最终默认。
