@@ -2,7 +2,7 @@
 
 Windows 11 本地 CPU 语音输入工具。当前 v1 目标不是完整 TSF/IME，而是一个托盘常驻程序：按住快捷键录音，松开后本地 ASR 识别，把最终文本粘贴到当前输入位置。
 
-当前版本：`v0.1.2`
+当前版本：`v0.1.3`
 
 ## 当前能力
 
@@ -13,6 +13,7 @@ Windows 11 本地 CPU 语音输入工具。当前 v1 目标不是完整 TSF/IME�
 - 打开 Settings 时暂停全局快捷键监听，方便重新录入 `CapsLock`。
 - 常驻 `asr_worker.py`，避免每次录音后重新启动 Python 和加载模型。
 - 本地 TCP JSON line 通信：`127.0.0.1:18088`。
+- Direct2D/DirectWrite HUD：录音时显示底部胶囊悬浮窗，5 根音量条由实时 PCM RMS 驱动，并按 DPI 正确缩放。
 - Silero VAD int8：启用后先做人声检测，保守裁掉整段头尾静音；无人声时不加载/不运行 ASR。
 - 支持三种 ASR 模型：
   - FireRedASR2 CTC int8 ONNX
@@ -72,7 +73,7 @@ models/
 
 ## 重要文件
 
-- `main.cpp`: Win32 托盘、Settings、快捷键监听、录音、worker 通信、文本粘贴。
+- `main.cpp`: Win32 托盘、Settings、Direct2D HUD、快捷键监听、录音、worker 通信、文本粘贴。
 - `asr_worker.py`: 常驻 ASR worker，负责模型加载、识别、标点后处理。
 - `asr_cli.py`: 旧的一次性 ASR CLI，主要用于调试/对照。
 - `PLAN.md`: 研究计划、模型取舍和后续路线。
@@ -84,6 +85,7 @@ models/
 ## 当前限制
 
 - 录音后才识别，尚未实现真正流式 partial。
+- HUD 已有实时音量动画，但 partial 文本仍未接入真实流式 ASR。
 - 文本注入当前以剪贴板 + `Ctrl+V` 为主。
 - 管理员权限窗口可能拦截普通权限程序输入。
 - Partial 设置目前主要是 UI 和配置预留。
@@ -101,5 +103,6 @@ models/
 - 模型、线程数、音频时长。
 - 首次加载耗时和第二次复用耗时。
 - 松开快捷键到文本上屏耗时。
+- HUD 是否随音量跳动、默认文本是否完整显示、DPI 缩放下是否有裁切或黑边。
 - `CapsLock` 短按/长按是否符合预期，长按前后的大小写状态是否保持一致。
 - 标点质量、长句断句、专有名词识别。

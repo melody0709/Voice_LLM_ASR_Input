@@ -108,6 +108,18 @@ Settings 是普通 Win32 窗口，目前分两个 tab：
 
 短于约 8000 bytes 的录音会被判定为 `Too short`。
 
+### HUD
+
+录音时显示底部居中的无边框胶囊 HUD。当前实现使用 Direct2D/DirectWrite：
+
+- `WS_POPUP | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED` 创建悬浮窗。
+- Direct2D 绘制胶囊背景、细边框和 5 根音量条。
+- DirectWrite 绘制状态文本，并用 DIP 进行测量和布局。
+- Win32 窗口尺寸使用当前窗口 DPI 将 DIP 转为物理像素，避免高 DPI 下文本裁切。
+- 录音回调每个 `waveIn` buffer 计算 PCM RMS，归一化后驱动音量条。
+- 音量条使用 attack/release 平滑，录音期间通过约 33ms 定时器重绘。
+- 目前显示 `Listening...`、`Recognizing...`、最终文本或错误状态；真实 partial 文本尚未接入。
+
 ### VAD
 
 `Enable VAD` 开启时，worker 在 ASR 前运行 Silero VAD：
@@ -251,7 +263,7 @@ LLM 必须默认关闭，并加入：
 
 ## 风险点
 
-- Win32 UI 在高 DPI 下容易裁切文字，布局要留足高度。
+- Win32 UI 在高 DPI 下容易裁切文字；HUD 使用 DIP 测量并转物理像素，Settings 控件仍要留足高度。
 - 模型加载必须永远在 worker 里，不能阻塞 UI 线程。
 - 模型大，内存占用需要实测。
 - 全局快捷键不能在 Settings 打开时拦截用户录入。

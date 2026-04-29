@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.1.3 (2026-04-29)
+
+### Changed
+
+- 版本号更新为 `v0.1.3`
+- HUD 从 GDI 固定绘制升级为 Direct2D/DirectWrite 渲染
+- HUD 尺寸改为 DPI-aware 的 DIP 计算，按实际文本宽度动态调整
+- 5 根录音音量条改为由实时 PCM RMS 驱动，并调大可视尺寸
+- 构建链接同步加入 `d2d1.lib` / `dwrite.lib`
+
+### Fixed
+
+- 修复高 DPI 下 HUD 文本被裁切的问题
+- 修复 HUD 文本垂直居中不稳定的问题
+- 修复 layered window 圆角边缘可能出现黑边的问题
+
 ## v0.1.2 (2026-04-29)
 
 ### Changed

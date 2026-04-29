@@ -32,6 +32,7 @@
 - Win32 include 顺序要小心：
   - `winsock2.h` 和 `ws2tcpip.h` 必须在 `windows.h` 前。
 - UI 修改后必须重新编译，并尽量实际打开 Settings 看是否裁切/重叠。
+- HUD 修改后要特别检查高 DPI 缩放：DirectWrite/Direct2D 使用 DIP，Win32 `SetWindowPos` 使用物理像素，二者不能混用。
 
 ## 构建
 
@@ -60,6 +61,7 @@ Get-Process VoiceLLMASRInput -ErrorAction SilentlyContinue | Stop-Process -Force
 - `WH_KEYBOARD_LL` 长按快捷键录音。
 - 默认 `CapsLock` 使用 300ms 长按判定：短按交还系统切换大小写，长按录音，结束后恢复按下前 Caps Lock 状态。
 - `waveIn` 采集 16kHz mono PCM。
+- Direct2D/DirectWrite 绘制底部 HUD，5 根音量条由 `waveIn` buffer 的 RMS 实时驱动。
 - WAV 写入 `%APPDATA%\VoiceLLMASRInput\last_recording.wav`。
 - 启动/停止/重载 `asr_worker.py`。
 - 通过 TCP 发送 JSON 请求到 worker。
@@ -87,6 +89,7 @@ Get-Process VoiceLLMASRInput -ErrorAction SilentlyContinue | Stop-Process -Force
 - 底部 `Status / Save / Close` 通过 `LayoutSettingsWindow()` 按客户区底部动态定位。
 - 高 DPI 下 Win32 控件容易裁字；控件高度宁可留大一点。
 - tab 字体已故意设小，避免占用空间。
+- HUD 尺寸先按 DirectWrite 测量 DIP，再按当前窗口 DPI 转物理像素；不要直接把 DIP 当作 `SetWindowPos` 的宽高。
 
 ## Worker 协议
 
@@ -145,3 +148,4 @@ Get-Process VoiceLLMASRInput -ErrorAction SilentlyContinue | Stop-Process -Force
 > AI 在完成重大修改或解决复杂报错后，可追加规则。
 
 - 改 `CapsLock` 热键逻辑时不要吞掉短按的系统大小写切换；短按需要补发 `CapsLock`，长按录音结束后必须保持原来的 Caps Lock 状态。
+- 改 HUD 尺寸/文字布局时注意 DPI 单位：DirectWrite 文本测量和 Direct2D 绘制是 DIP，Win32 窗口大小是物理像素；高 DPI 下需要显式换算。

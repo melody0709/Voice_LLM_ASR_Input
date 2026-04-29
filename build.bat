@@ -14,7 +14,7 @@ if not exist build mkdir build
 rc /nologo /fo build\app.res resources.rc
 if errorlevel 1 exit /b 1
 
-cl /nologo /O2 /EHsc /MT /std:c++17 /DUNICODE /D_UNICODE /Fobuild\ /Fe:build\VoiceLLMASRInput.exe main.cpp build\app.res user32.lib gdi32.lib shell32.lib ole32.lib comctl32.lib shlwapi.lib winmm.lib ws2_32.lib
+cl /nologo /O2 /EHsc /MT /std:c++17 /DUNICODE /D_UNICODE /Fobuild\ /Fe:build\VoiceLLMASRInput.exe main.cpp build\app.res user32.lib gdi32.lib shell32.lib ole32.lib comctl32.lib d2d1.lib dwrite.lib shlwapi.lib winmm.lib ws2_32.lib
 if errorlevel 1 exit /b 1
 
 echo Build Success: build\VoiceLLMASRInput.exe

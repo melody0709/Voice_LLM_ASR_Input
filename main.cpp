@@ -1,13 +1,21 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <commctrl.h>
+#include <d2d1.h>
+#include <dwrite.h>
 #include <windowsx.h>
 #include <mmsystem.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cwctype>
 #include <fstream>
@@ -25,6 +33,8 @@
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "d2d1.lib")
+#pragma comment(lib, "dwrite.lib")
 #pragma comment(lib, "winmm.lib")
 #pragma comment(lib, "ws2_32.lib")
 
@@ -39,9 +49,20 @@ constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kReloadMessage = WM_APP + 2;
 constexpr UINT kAsrResultMessage = WM_APP + 3;
 constexpr UINT kTrayId = 1;
+constexpr UINT_PTR kHudHideTimer = 1;
 constexpr UINT_PTR kCapsLockLongPressTimer = 2;
+constexpr UINT_PTR kHudAnimationTimer = 3;
 constexpr UINT kCapsLockLongPressMs = 300;
 constexpr int kWorkerPort = 18088;
+constexpr int kHudMinWidth = 300;
+constexpr int kHudMinHeight = 56;
+constexpr int kHudScreenMarginX = 80;
+constexpr int kHudScreenMarginY = 96;
+constexpr float kHudLeftPad = 22.0f;
+constexpr float kHudWaveWidth = 52.0f;
+constexpr float kHudGap = 14.0f;
+constexpr float kHudRightPad = 22.0f;
+constexpr float kHudTextSlack = 18.0f;
 
 constexpr UINT ID_TRAY_VERSION = 1001;
 constexpr UINT ID_TRAY_SETTINGS = 1002;
@@ -83,6 +104,11 @@ HFONT g_sectionFont = nullptr;
 HBRUSH g_settingsBgBrush = nullptr;
 HBRUSH g_cardBrush = nullptr;
 HBRUSH g_controlBgBrush = nullptr;
+ID2D1Factory* g_d2dFactory = nullptr;
+IDWriteFactory* g_dwriteFactory = nullptr;
+ID2D1HwndRenderTarget* g_hudRenderTarget = nullptr;
+ID2D1SolidColorBrush* g_hudBrush = nullptr;
+IDWriteTextFormat* g_hudTextFormat = nullptr;
 Config g_config;
 bool g_recording = false;
 UINT g_activeHotkeyKey = 0;
@@ -96,6 +122,8 @@ std::vector<std::vector<BYTE>> g_waveBuffers;
 std::vector<BYTE> g_audioData;
 CRITICAL_SECTION g_audioLock;
 bool g_captureActive = false;
+std::atomic<float> g_audioLevel{ 0.0f };
+float g_hudSmoothedLevel = 0.0f;
 std::mutex g_workerMutex;
 PROCESS_INFORMATION g_workerProcess = {};
 bool g_workerStarted = false;
@@ -117,6 +145,19 @@ struct HotkeyEditState {
     HotkeyConfig original;
     bool capturing = false;
 };
+
+struct HudSize {
+    float widthDip = static_cast<float>(kHudMinWidth);
+    float heightDip = static_cast<float>(kHudMinHeight);
+};
+
+template <typename T>
+void SafeRelease(T*& value) {
+    if (value) {
+        value->Release();
+        value = nullptr;
+    }
+}
 
 std::string WideToUtf8(const std::wstring& value) {
     if (value.empty()) return {};
@@ -455,9 +496,36 @@ void CreateUiResources() {
     if (!g_settingsBgBrush) g_settingsBgBrush = CreateSolidBrush(RGB(246, 248, 251));
     if (!g_cardBrush) g_cardBrush = CreateSolidBrush(RGB(255, 255, 255));
     if (!g_controlBgBrush) g_controlBgBrush = CreateSolidBrush(RGB(255, 255, 255));
+    if (!g_d2dFactory) {
+        D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &g_d2dFactory);
+    }
+    if (!g_dwriteFactory) {
+        DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+                            reinterpret_cast<IUnknown**>(&g_dwriteFactory));
+    }
+    if (g_dwriteFactory && !g_hudTextFormat) {
+        if (SUCCEEDED(g_dwriteFactory->CreateTextFormat(
+                L"Segoe UI",
+                nullptr,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                15.0f,
+                L"",
+                &g_hudTextFormat))) {
+            g_hudTextFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+            g_hudTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            g_hudTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        }
+    }
 }
 
 void DeleteUiResources() {
+    SafeRelease(g_hudBrush);
+    SafeRelease(g_hudRenderTarget);
+    SafeRelease(g_hudTextFormat);
+    SafeRelease(g_dwriteFactory);
+    SafeRelease(g_d2dFactory);
     if (g_uiFont) DeleteObject(g_uiFont);
     if (g_titleFont) DeleteObject(g_titleFont);
     if (g_sectionFont) DeleteObject(g_sectionFont);
@@ -490,6 +558,89 @@ void AddTrayIcon(HWND hwnd) {
     Shell_NotifyIconW(NIM_SETVERSION, &nid);
 }
 
+float CalculateAudioLevel(const BYTE* data, DWORD bytes) {
+    if (!data || bytes < sizeof(int16_t)) return 0.0f;
+
+    const auto* samples = reinterpret_cast<const int16_t*>(data);
+    const size_t count = bytes / sizeof(int16_t);
+    double sum = 0.0;
+    for (size_t i = 0; i < count; ++i) {
+        const double v = static_cast<double>(samples[i]) / 32768.0;
+        sum += v * v;
+    }
+
+    const double rms = std::sqrt(sum / static_cast<double>(count));
+    const double db = 20.0 * std::log10(std::max(rms, 1e-6));
+    const double normalized = (db + 50.0) / 40.0;
+    return static_cast<float>(std::clamp(normalized, 0.0, 1.0));
+}
+
+float CurrentHudLevel() {
+    const float raw = g_recording ? g_audioLevel.load() : 0.0f;
+    const float factor = raw > g_hudSmoothedLevel ? 0.4f : 0.15f;
+    g_hudSmoothedLevel += (raw - g_hudSmoothedLevel) * factor;
+    return std::clamp(g_hudSmoothedLevel, 0.0f, 1.0f);
+}
+
+float DpiScaleForWindow(HWND hwnd) {
+    UINT dpi = hwnd ? GetDpiForWindow(hwnd) : 0;
+    if (dpi == 0) dpi = GetDpiForSystem();
+    return static_cast<float>(dpi) / 96.0f;
+}
+
+int DipToPx(float value, float scale) {
+    return static_cast<int>(std::ceil(value * scale));
+}
+
+DWRITE_TEXT_METRICS MeasureHudText(const std::wstring& text, float maxWidth, DWRITE_WORD_WRAPPING wrapping) {
+    DWRITE_TEXT_METRICS metrics = {};
+    if (!g_dwriteFactory || !g_hudTextFormat || text.empty()) return metrics;
+
+    IDWriteTextLayout* layout = nullptr;
+    const HRESULT hr = g_dwriteFactory->CreateTextLayout(
+        text.c_str(),
+        static_cast<UINT32>(text.size()),
+        g_hudTextFormat,
+        maxWidth,
+        1000.0f,
+        &layout);
+    if (FAILED(hr) || !layout) return metrics;
+
+    layout->SetWordWrapping(wrapping);
+    layout->GetMetrics(&metrics);
+    layout->Release();
+    return metrics;
+}
+
+HudSize IdealHudSize(const std::wstring& text, const RECT& workArea, float scale) {
+    const float textX = kHudLeftPad + kHudWaveWidth + kHudGap;
+    const float workWidthDip = static_cast<float>(std::max(1L, workArea.right - workArea.left)) / scale;
+    const float workHeightDip = static_cast<float>(std::max(1L, workArea.bottom - workArea.top)) / scale;
+    const float maxWidthDip = std::max(static_cast<float>(kHudMinWidth), workWidthDip - static_cast<float>(kHudScreenMarginX));
+    const float maxHeightDip = std::max(static_cast<float>(kHudMinHeight), workHeightDip - static_cast<float>(kHudScreenMarginY));
+    const float maxTextWidth = maxWidthDip - textX - kHudRightPad;
+    const DWRITE_TEXT_METRICS singleLineMetrics =
+        MeasureHudText(text, 4096.0f, DWRITE_WORD_WRAPPING_NO_WRAP);
+    const float singleLineWidthDip =
+        textX + singleLineMetrics.widthIncludingTrailingWhitespace + kHudRightPad + kHudTextSlack;
+
+    if (singleLineWidthDip <= maxWidthDip) {
+        return {
+            std::clamp(singleLineWidthDip, static_cast<float>(kHudMinWidth), maxWidthDip),
+            static_cast<float>(kHudMinHeight),
+        };
+    }
+
+    const DWRITE_TEXT_METRICS metrics = MeasureHudText(text, maxTextWidth, DWRITE_WORD_WRAPPING_WRAP);
+
+    const float measuredWidthDip = std::max(static_cast<float>(kHudMinWidth), maxWidthDip);
+    const float measuredHeightDip = metrics.height + 30.0f;
+    return {
+        std::clamp(measuredWidthDip, static_cast<float>(kHudMinWidth), maxWidthDip),
+        std::clamp(measuredHeightDip, static_cast<float>(kHudMinHeight), maxHeightDip),
+    };
+}
+
 void RemoveTrayIcon(HWND hwnd) {
     NOTIFYICONDATAW nid = {};
     nid.cbSize = sizeof(nid);
@@ -504,10 +655,16 @@ void PositionHud(HWND hwnd) {
     HMONITOR monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
     MONITORINFO mi = { sizeof(mi) };
     GetMonitorInfoW(monitor, &mi);
-    const int width = 360;
-    const int height = 56;
+    const float scale = DpiScaleForWindow(hwnd);
+    const HudSize hud = IdealHudSize(g_hudText, mi.rcWork, scale);
+    const int width = DipToPx(hud.widthDip, scale);
+    const int height = DipToPx(hud.heightDip, scale);
     const int x = mi.rcWork.left + ((mi.rcWork.right - mi.rcWork.left) - width) / 2;
     const int y = mi.rcWork.bottom - height - 48;
+    HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, height, height);
+    if (region && !SetWindowRgn(hwnd, region, TRUE)) {
+        DeleteObject(region);
+    }
     SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, SWP_SHOWWINDOW | SWP_NOACTIVATE);
 }
 
@@ -521,20 +678,26 @@ void ShowHud(const std::wstring& text) {
             WS_POPUP,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            360,
-            56,
+            kHudMinWidth,
+            kHudMinHeight,
             nullptr,
             nullptr,
             g_instance,
             nullptr);
-        SetLayeredWindowAttributes(g_hudWindow, 0, 232, LWA_ALPHA);
+        SetLayeredWindowAttributes(g_hudWindow, 0, 242, LWA_ALPHA);
     }
     PositionHud(g_hudWindow);
+    if (g_recording) {
+        SetTimer(g_hudWindow, kHudAnimationTimer, 33, nullptr);
+    } else {
+        KillTimer(g_hudWindow, kHudAnimationTimer);
+    }
     InvalidateRect(g_hudWindow, nullptr, TRUE);
 }
 
 void HideHud() {
     if (g_hudWindow) {
+        KillTimer(g_hudWindow, kHudAnimationTimer);
         ShowWindow(g_hudWindow, SW_HIDE);
     }
 }
@@ -598,8 +761,10 @@ void CALLBACK WaveInProc(HWAVEIN waveIn, UINT msg, DWORD_PTR, DWORD_PTR param1, 
     if (!header) return;
 
     if (header->dwBytesRecorded > 0) {
-        EnterCriticalSection(&g_audioLock);
         const BYTE* begin = reinterpret_cast<const BYTE*>(header->lpData);
+        g_audioLevel.store(CalculateAudioLevel(begin, header->dwBytesRecorded));
+
+        EnterCriticalSection(&g_audioLock);
         g_audioData.insert(g_audioData.end(), begin, begin + header->dwBytesRecorded);
         LeaveCriticalSection(&g_audioLock);
     }
@@ -613,6 +778,8 @@ void CALLBACK WaveInProc(HWAVEIN waveIn, UINT msg, DWORD_PTR, DWORD_PTR param1, 
 bool StartAudioCapture(std::wstring& error) {
     if (g_waveIn) return true;
 
+    g_audioLevel.store(0.0f);
+    g_hudSmoothedLevel = 0.0f;
     EnterCriticalSection(&g_audioLock);
     g_audioData.clear();
     LeaveCriticalSection(&g_audioLock);
@@ -668,6 +835,7 @@ std::vector<BYTE> StopAudioCapture() {
         waveInClose(g_waveIn);
         g_waveIn = nullptr;
     }
+    g_audioLevel.store(0.0f);
 
     std::vector<BYTE> data;
     EnterCriticalSection(&g_audioLock);
@@ -943,7 +1111,7 @@ void StartRecordingSession() {
     std::wstring error;
     if (!StartAudioCapture(error)) {
         ShowHud(error);
-        if (g_hudWindow) SetTimer(g_hudWindow, 1, 1800, nullptr);
+        if (g_hudWindow) SetTimer(g_hudWindow, kHudHideTimer, 1800, nullptr);
         return;
     }
     g_recording = true;
@@ -956,14 +1124,14 @@ void StopRecordingSession() {
     const std::vector<BYTE> pcm = StopAudioCapture();
     if (pcm.size() < 8000) {
         ShowHud(L"Too short");
-        SetTimer(g_hudWindow, 1, 1200, nullptr);
+        SetTimer(g_hudWindow, kHudHideTimer, 1200, nullptr);
         return;
     }
 
     const std::wstring wavPath = TempWavPath();
     if (!WriteWavFile(wavPath, pcm)) {
         ShowHud(L"Failed to save recording");
-        SetTimer(g_hudWindow, 1, 1800, nullptr);
+        SetTimer(g_hudWindow, kHudHideTimer, 1800, nullptr);
         return;
     }
 
@@ -1341,52 +1509,135 @@ void SaveSettingsControls(HWND hwnd) {
     PostMessageW(g_mainWindow, kReloadMessage, 0, 0);
 }
 
+bool EnsureHudRenderTarget(HWND hwnd) {
+    if (!g_d2dFactory) return false;
+
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    const D2D1_SIZE_U size = D2D1::SizeU(
+        static_cast<UINT32>(std::max(1L, rc.right - rc.left)),
+        static_cast<UINT32>(std::max(1L, rc.bottom - rc.top)));
+
+    if (!g_hudRenderTarget) {
+        const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            D2D1::PixelFormat(DXGI_FORMAT_UNKNOWN, D2D1_ALPHA_MODE_IGNORE));
+        const D2D1_HWND_RENDER_TARGET_PROPERTIES hwndProps =
+            D2D1::HwndRenderTargetProperties(hwnd, size, D2D1_PRESENT_OPTIONS_NONE);
+        if (FAILED(g_d2dFactory->CreateHwndRenderTarget(props, hwndProps, &g_hudRenderTarget))) {
+            return false;
+        }
+    } else if (g_hudRenderTarget->GetPixelSize().width != size.width ||
+               g_hudRenderTarget->GetPixelSize().height != size.height) {
+        g_hudRenderTarget->Resize(size);
+    }
+
+    if (!g_hudBrush && g_hudRenderTarget) {
+        if (FAILED(g_hudRenderTarget->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), &g_hudBrush))) {
+            return false;
+        }
+    }
+    return g_hudRenderTarget && g_hudBrush && g_hudTextFormat;
+}
+
+void DrawHudDirect2D(HWND hwnd) {
+    if (!EnsureHudRenderTarget(hwnd)) {
+        ValidateRect(hwnd, nullptr);
+        return;
+    }
+
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    const D2D1_SIZE_F renderSize = g_hudRenderTarget->GetSize();
+    const float width = renderSize.width;
+    const float height = renderSize.height;
+    const float radius = height / 2.0f;
+
+    g_hudRenderTarget->BeginDraw();
+    const D2D1_COLOR_F bgColor = D2D1::ColorF(0.105f, 0.118f, 0.145f, 0.96f);
+    g_hudRenderTarget->Clear(bgColor);
+
+    D2D1_ROUNDED_RECT capsule = D2D1::RoundedRect(
+        D2D1::RectF(0.5f, 0.5f, width - 0.5f, height - 0.5f),
+        radius,
+        radius);
+
+    g_hudBrush->SetColor(bgColor);
+    g_hudRenderTarget->FillRoundedRectangle(capsule, g_hudBrush);
+    g_hudBrush->SetColor(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.11f));
+    g_hudRenderTarget->DrawRoundedRectangle(capsule, g_hudBrush, 1.0f);
+
+    const float level = g_recording ? CurrentHudLevel() : 0.18f;
+    const float centerY = height / 2.0f;
+    const float barWidth = 6.0f;
+    const float barGap = 4.5f;
+    const float barAreaHeight = std::min(40.0f, height - 16.0f);
+    const float barStartX = kHudLeftPad + 2.0f;
+    const float weights[] = { 0.5f, 0.8f, 1.0f, 0.75f, 0.55f };
+    const float minFraction = 0.24f;
+    const double tick = static_cast<double>(GetTickCount64());
+
+    g_hudBrush->SetColor(g_recording
+        ? D2D1::ColorF(0.32f, 0.82f, 1.0f, 0.95f)
+        : D2D1::ColorF(0.62f, 0.66f, 0.72f, 0.72f));
+
+    for (int i = 0; i < 5; ++i) {
+        const float motion = g_recording ? static_cast<float>(std::sin(tick * 0.012 + i * 1.9) * 0.035) : 0.0f;
+        const float fraction = std::clamp(minFraction + (1.0f - minFraction) * level * weights[i] + motion,
+                                          minFraction, 1.0f);
+        const float h = barAreaHeight * fraction;
+        const float x = barStartX + i * (barWidth + barGap);
+        const D2D1_ROUNDED_RECT bar = D2D1::RoundedRect(
+            D2D1::RectF(x, centerY - h / 2.0f, x + barWidth, centerY + h / 2.0f),
+            barWidth / 2.0f,
+            barWidth / 2.0f);
+        g_hudRenderTarget->FillRoundedRectangle(bar, g_hudBrush);
+    }
+
+    g_hudBrush->SetColor(D2D1::ColorF(0.965f, 0.975f, 0.99f, 0.96f));
+    const float textX = kHudLeftPad + kHudWaveWidth + kHudGap;
+    const D2D1_RECT_F textRect = D2D1::RectF(textX, 0.0f, width - kHudRightPad, height);
+    g_hudRenderTarget->DrawTextW(
+        g_hudText.c_str(),
+        static_cast<UINT32>(g_hudText.size()),
+        g_hudTextFormat,
+        textRect,
+        g_hudBrush,
+        D2D1_DRAW_TEXT_OPTIONS_CLIP,
+        DWRITE_MEASURING_MODE_NATURAL);
+
+    const HRESULT hr = g_hudRenderTarget->EndDraw();
+    if (hr == D2DERR_RECREATE_TARGET) {
+        SafeRelease(g_hudBrush);
+        SafeRelease(g_hudRenderTarget);
+    }
+    ValidateRect(hwnd, nullptr);
+}
+
 LRESULT CALLBACK HudWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_TIMER:
-        KillTimer(hwnd, static_cast<UINT_PTR>(wParam));
-        HideHud();
-        return 0;
-    case WM_PAINT: {
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hwnd, &ps);
-        RECT rc;
-        GetClientRect(hwnd, &rc);
-
-        HBRUSH bg = CreateSolidBrush(RGB(32, 34, 38));
-        HPEN border = CreatePen(PS_SOLID, 1, RGB(78, 84, 96));
-        HGDIOBJ oldBrush = SelectObject(hdc, bg);
-        HGDIOBJ oldPen = SelectObject(hdc, border);
-        RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 28, 28);
-        SelectObject(hdc, oldBrush);
-        SelectObject(hdc, oldPen);
-        DeleteObject(bg);
-        DeleteObject(border);
-
-        HBRUSH accent = CreateSolidBrush(g_recording ? RGB(88, 198, 255) : RGB(150, 155, 165));
-        const int bars[] = { 16, 26, 34, 24, 18 };
-        for (int i = 0; i < 5; ++i) {
-            const int x = 28 + i * 12;
-            const int h = bars[i];
-            RECT bar = { x, 28 - h / 2, x + 6, 28 + h / 2 };
-            FillRect(hdc, &bar, accent);
+        if (wParam == kHudAnimationTimer) {
+            InvalidateRect(hwnd, nullptr, FALSE);
+        } else {
+            KillTimer(hwnd, static_cast<UINT_PTR>(wParam));
+            HideHud();
         }
-        DeleteObject(accent);
-
-        SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, RGB(245, 247, 250));
-        HFONT font = CreateFontW(-16, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                 DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-        HGDIOBJ oldFont = SelectObject(hdc, font);
-        RECT textRect = { 104, 0, rc.right - 24, rc.bottom };
-        DrawTextW(hdc, g_hudText.c_str(), -1, &textRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
-        SelectObject(hdc, oldFont);
-        DeleteObject(font);
-
-        EndPaint(hwnd, &ps);
         return 0;
-    }
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_SIZE:
+        if (g_hudRenderTarget) {
+            const UINT width = LOWORD(lParam);
+            const UINT height = HIWORD(lParam);
+            if (width > 0 && height > 0) {
+                g_hudRenderTarget->Resize(D2D1::SizeU(width, height));
+            }
+        }
+        return 0;
+    case WM_PAINT:
+        DrawHudDirect2D(hwnd);
+        return 0;
     default:
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
@@ -1574,7 +1825,7 @@ void ShowTrayMenu(HWND hwnd) {
     POINT pt;
     GetCursorPos(&pt);
     HMENU menu = CreatePopupMenu();
-    AppendMenuW(menu, MF_STRING | MF_GRAYED | MF_DISABLED, ID_TRAY_VERSION, L"Version: v0.1.2");
+    AppendMenuW(menu, MF_STRING | MF_GRAYED | MF_DISABLED, ID_TRAY_VERSION, L"Version: v0.1.3");
     AppendMenuW(menu, MF_STRING, ID_TRAY_SETTINGS, L"Settings...");
     AppendMenuW(menu, MF_STRING, ID_TRAY_RELOAD, L"Reload ASR Worker");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -1613,7 +1864,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             }).detach();
         }
         ShowHud(L"Reloading ASR worker...");
-        SetTimer(g_hudWindow, 1, 1200, nullptr);
+        SetTimer(g_hudWindow, kHudHideTimer, 1200, nullptr);
         return 0;
     case kAsrResultMessage: {
         std::unique_ptr<std::wstring> result(reinterpret_cast<std::wstring*>(lParam));
@@ -1626,7 +1877,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (g_hudWindow) {
             const bool isError = text.rfind(L"ASR failed:", 0) == 0;
             const bool isStatusOnly = wParam != 0;
-            SetTimer(g_hudWindow, 1, isError ? 2200 : (isStatusOnly ? 1100 : 200), nullptr);
+            SetTimer(g_hudWindow, kHudHideTimer, isError ? 2200 : (isStatusOnly ? 1100 : 200), nullptr);
         }
         return 0;
     }

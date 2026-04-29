@@ -22,6 +22,8 @@ target_link_libraries(VoiceLLMASRInput
     shell32
     ole32
     comctl32
+    d2d1
+    dwrite
     shlwapi
     winmm
     ws2_32

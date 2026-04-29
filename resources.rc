@@ -23,12 +23,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "melody0709"
             VALUE "FileDescription", "Voice LLM ASR Input"
-            VALUE "FileVersion", "0.1.0.0"
+            VALUE "FileVersion", "0.1.3.0"
             VALUE "InternalName", "VoiceLLMASRInput.exe"
             VALUE "LegalCopyright", "Copyright (C) 2026"
             VALUE "OriginalFilename", "VoiceLLMASRInput.exe"
             VALUE "ProductName", "Voice LLM ASR Input"
-            VALUE "ProductVersion", "0.1.0.0"
+            VALUE "ProductVersion", "0.1.3.0"
         END
     END
     BLOCK "VarFileInfo"
