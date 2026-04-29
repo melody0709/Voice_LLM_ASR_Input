@@ -77,6 +77,7 @@ models/
 - `asr_worker.py`: 常驻 ASR worker，负责模型加载、识别、标点后处理。
 - `asr_cli.py`: 旧的一次性 ASR CLI，主要用于调试/对照。
 - `PLAN.md`: 研究计划、模型取舍和后续路线。
+- `OPTIMIZATION_PLAN.md`: v0.1.3 之后的优化路线、完成勾选和推荐顺序。
 - `ARCHITECTURE.md`: 当前架构说明。
 - `AGENTS.md`: 后续开发代理/协作者注意事项。
 - `build.bat`: Visual Studio 2022 编译脚本。
