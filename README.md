@@ -10,6 +10,7 @@ Windows 11 本地 CPU 语音输入工具。当前 v1 目标不是完整 TSF/IME�
 - 打开 Settings 时暂停全局快捷键监听，方便重新录入 `CapsLock`。
 - 常驻 `asr_worker.py`，避免每次录音后重新启动 Python 和加载模型。
 - 本地 TCP JSON line 通信：`127.0.0.1:18088`。
+- Silero VAD int8：启用后先做人声检测，保守裁掉整段头尾静音；无人声时不加载/不运行 ASR。
 - 支持三种 ASR 模型：
   - FireRedASR2 CTC int8 ONNX
   - FireRedASR2 AED int8 ONNX
@@ -55,7 +56,7 @@ models/
   - `ASR model`: FireRedASR2 CTC / FireRedASR2 AED / SenseVoiceSmall
   - `Model folder`: 当前模型目录
   - `Threads`: `auto`, `1`, `2`, `3`, `4`
-  - `Enable VAD`: 当前 UI 预留，后续做录音切段/VAD
+  - `Enable VAD`: 使用 Silero VAD 保守裁剪头尾静音，无人声时跳过 ASR
   - `Partial result`: 当前 UI 预留，后续做流式/模拟流式
   - `Postprocess`: `none`, `itn`, `llm`
 - `Shortcut` tab：
@@ -81,7 +82,7 @@ models/
 - 录音后才识别，尚未实现真正流式 partial。
 - 文本注入当前以剪贴板 + `Ctrl+V` 为主。
 - 管理员权限窗口可能拦截普通权限程序输入。
-- VAD/Partial 设置目前主要是 UI 和配置预留。
+- Partial 设置目前主要是 UI 和配置预留。
 - 保守 LLM 纠错尚未实现。
 - 模型文件较大，默认不纳入 git。
 

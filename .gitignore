@@ -7,3 +7,5 @@ models/
 *.pdb
 *.ilk
 *.log
+.bak
+__pycache__/

@@ -873,6 +873,7 @@ std::string BuildRecognizeRequest(const Config& config, const std::wstring& wavP
         ",\"model_id\":\"" + EscapeJson(config.modelId) + "\"" +
         ",\"model_dir\":\"" + EscapeJson(modelDir) + "\"" +
         ",\"threads\":\"" + EscapeJson(config.threads) + "\"" +
+        ",\"enable_vad\":" + std::string(config.enableVad ? "true" : "false") +
         ",\"postprocess\":\"" + EscapeJson(config.postprocess) + "\"" +
         ",\"wav\":\"" + EscapeJson(wavPath) + "\"}";
 }
@@ -1529,7 +1530,11 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             SetClipboardText(text);
             SendCtrlV();
         }
-        if (g_hudWindow) SetTimer(g_hudWindow, 1, 3200, nullptr);
+        if (g_hudWindow) {
+            const bool isError = text.rfind(L"ASR failed:", 0) == 0;
+            const bool isStatusOnly = wParam != 0;
+            SetTimer(g_hudWindow, 1, isError ? 2200 : (isStatusOnly ? 1100 : 200), nullptr);
+        }
         return 0;
     }
     case WM_COMMAND:

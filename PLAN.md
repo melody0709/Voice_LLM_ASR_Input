@@ -40,6 +40,7 @@
 - v1 前后端通过本机 TCP JSON line 通信；后续需要真实流式 partial 时再升级为 WebSocket/二进制音频流。
 - 模型文件不打进主程序安装包，Settings 里配置模型目录；后续再做模型下载器。
 - 标点后处理采用 `sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8`，`model.int8.onnx` 约 72 MB，常驻 worker 内缓存，适配 FireRedASR2 AED/CTC 无标点输出。
+- VAD 采用 `silero_vad.int8.onnx`，约 208 KB；启用时 worker 先检测并裁剪语音段，无人声则跳过 ASR。
 
 ## 托盘与 Settings
 - 程序图标要求：
@@ -172,9 +173,9 @@
   - `firered_aed`: `encoder.int8.onnx` + `decoder.int8.onnx` + `tokens.txt`。
   - `sensevoice`: `model.int8.onnx` + `tokens.txt`，可传 `language` 和 `use_itn`。
 - VAD：
-  - v1 使用 sherpa-onnx 的 Silero VAD 或 worker 内部 VAD。
+  - v1 使用 sherpa-onnx 的 Silero VAD int8。
   - 短按少于 300ms 时不送 ASR，直接取消。
-  - 长音频按 VAD 切段，避免单段过长导致尾部延迟。
+  - 输入法场景先采用保守 VAD：只裁头尾静音，不删除中间停顿；长音频切段留到流式方案中处理。
 
 ## 性能测试计划
 - 每次测试记录：

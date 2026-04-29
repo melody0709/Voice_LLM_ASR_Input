@@ -1,6 +1,6 @@
 # AGENTS.md
 
-本文件给后续继续开发本项目的 Codex/开发者使用。请优先阅读 `README.md`、`ARCHITECTURE.md`、`PLAN.md`，再改代码。
+本文件给后续继续开发本项目的 Codex/开发者使用。请优先阅读 `README.md`、`ARCHITECTURE.md` 再改代码。
 
 ## 项目目标
 
@@ -23,7 +23,6 @@
 ## 开发约定
 
 - 手工编辑文件时优先使用 `apply_patch`。
-- 不要删除用户已有改动；工作区可能是 dirty 的。
 - 不要把 `models/`、`build/`、`__pycache__/` 加入 git。
 - 不要把模型文件打进 exe 或资源文件。
 - C++ 新增依赖时同步更新：
@@ -75,6 +74,7 @@ Get-Process VoiceLLMASRInput -ErrorAction SilentlyContinue | Stop-Process -Force
 - 缓存标点模型。
 - 根据 `model_id` 创建对应 `sherpa_onnx.OfflineRecognizer`。
 - 对 `<sil>`、`<blk>` 做空文本过滤。
+- 启用 VAD 时先调用 Silero VAD；只保守裁剪从第一段人声到最后一段人声之外的头尾静音。不要删除中间停顿，否则长句会漏字。无人声则直接返回空文本，不加载 ASR。
 - `postprocess in {"itn", "punct", "llm"}` 时调用本地标点模型。
 
 ## 已知 UI 注意点
@@ -124,7 +124,7 @@ Get-Process VoiceLLMASRInput -ErrorAction SilentlyContinue | Stop-Process -Force
 
 1. 做稳定的 Settings UI 和快捷键体验。
 2. 加性能日志：load/decode/punct/total latency。
-3. 补 VAD，减少长录音尾部等待和空音频识别。
+3. 记录 VAD/ASR/标点耗时到可查看日志，方便性能压测。
 4. 研究 partial：先模拟流式，再评估是否换 streaming 模型。
 5. 做用户词库/术语替换。
 6. 再接保守 LLM 纠错，必须默认关闭并带超时/回退。
@@ -136,3 +136,9 @@ Get-Process VoiceLLMASRInput -ErrorAction SilentlyContinue | Stop-Process -Force
 - 不要在 Settings 打开时继续拦截录音快捷键。
 - 不要依赖固定窗口高度放底部按钮。
 - 不要为了美观牺牲控件可读性，高 DPI 下要优先留空间。
+
+
+  
+## 踩坑规则
+
+> AI 在完成重大修改或解决复杂报错后，可追加规则。

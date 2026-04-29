@@ -11,7 +11,8 @@ flowchart LR
     Recorder --> Wav["last_recording.wav"]
     Frontend --> Worker["asr_worker.py<br/>127.0.0.1:18088"]
     Wav --> Worker
-    Worker --> ASR["sherpa-onnx ASR<br/>FireRed/SenseVoice"]
+    Worker --> VAD["Silero VAD<br/>trim/no speech"]
+    VAD --> ASR["sherpa-onnx ASR<br/>FireRed/SenseVoice"]
     ASR --> Punct["CT-Transformer 标点"]
     Punct --> Worker
     Worker --> Frontend
@@ -99,6 +100,23 @@ Settings 是普通 Win32 窗口，目前分两个 tab：
 ```
 
 短于约 8000 bytes 的录音会被判定为 `Too short`。
+
+### VAD
+
+`Enable VAD` 开启时，worker 在 ASR 前运行 Silero VAD：
+
+```text
+models/silero_vad.int8.onnx
+```
+
+当前策略：
+
+- 只处理 16kHz 音频。
+- 检出语音段后，只使用第一段开始到最后一段结束的包围区间，并保留 padding。
+- 中间停顿不会被删除，避免长句被裁碎导致漏字。
+- 如果长录音中 VAD 检出的语音占比异常小，会自动回退使用原始音频。
+- 没检测到语音时直接返回空文本，不加载 ASR 模型。
+- 响应里包含 `vad_ms`、`vad_segments`、`speech_ms`，用于性能测试。
 
 ### Worker 通信
 
