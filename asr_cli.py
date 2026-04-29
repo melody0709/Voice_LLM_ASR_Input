@@ -16,7 +16,7 @@ if hasattr(sys.stderr, "reconfigure"):
 
 def threads_value(value: str) -> int:
     if value == "auto":
-        return max(1, min(4, (os.cpu_count() or 2) // 2))
+        return max(1, min(8, os.cpu_count() or 8))
     try:
         return max(1, int(value))
     except ValueError:

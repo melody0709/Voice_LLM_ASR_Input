@@ -1195,17 +1195,22 @@ void LoadSettingsControls(HWND hwnd) {
     SetWindowTextW(GetDlgItem(hwnd, IDC_MODEL_DIR), g_config.modelDir.c_str());
 
     HWND threads = GetDlgItem(hwnd, IDC_THREADS);
-    ComboBox_AddString(threads, L"auto");
-    ComboBox_AddString(threads, L"1");
-    ComboBox_AddString(threads, L"2");
-    ComboBox_AddString(threads, L"3");
-    ComboBox_AddString(threads, L"4");
-    int threadIndex = 0;
-    if (g_config.threads == L"1") threadIndex = 1;
-    else if (g_config.threads == L"2") threadIndex = 2;
-    else if (g_config.threads == L"3") threadIndex = 3;
-    else if (g_config.threads == L"4") threadIndex = 4;
-    ComboBox_SetCurSel(threads, threadIndex);
+    {
+        int physical = std::thread::hardware_concurrency();
+        if (physical < 1) physical = 4;
+        int auto_threads = (std::min)(8, physical);
+        std::wstring auto_label = L"auto (" + std::to_wstring(auto_threads) + L")";
+        ComboBox_AddString(threads, auto_label.c_str());
+        for (int i = 1; i <= 8; i++)
+            ComboBox_AddString(threads, std::to_wstring(i).c_str());
+        int threadIndex = 0;
+        if (g_config.threads == L"auto") threadIndex = 0;
+        else {
+            int val = _wtoi(g_config.threads.c_str());
+            if (val >= 1 && val <= 8) threadIndex = val;
+        }
+        ComboBox_SetCurSel(threads, threadIndex);
+    }
 
     Button_SetCheck(GetDlgItem(hwnd, IDC_VAD), g_config.enableVad ? BST_CHECKED : BST_UNCHECKED);
     Button_SetCheck(GetDlgItem(hwnd, IDC_PARTIAL), g_config.enablePartial ? BST_CHECKED : BST_UNCHECKED);
@@ -1247,6 +1252,7 @@ void SaveSettingsControls(HWND hwnd) {
 
     g_config.threads = ComboText(GetDlgItem(hwnd, IDC_THREADS));
     if (g_config.threads.empty()) g_config.threads = L"auto";
+    if (g_config.threads.substr(0, 4) == L"auto") g_config.threads = L"auto";
     g_config.enableVad = Button_GetCheck(GetDlgItem(hwnd, IDC_VAD)) == BST_CHECKED;
     g_config.enablePartial = Button_GetCheck(GetDlgItem(hwnd, IDC_PARTIAL)) == BST_CHECKED;
     g_config.postprocess = ComboText(GetDlgItem(hwnd, IDC_POSTPROCESS));
@@ -1484,12 +1490,15 @@ void ShowTrayMenu(HWND hwnd) {
     POINT pt;
     GetCursorPos(&pt);
     HMENU menu = CreatePopupMenu();
-    AppendMenuW(menu, MF_STRING | MF_GRAYED | MF_DISABLED, ID_TRAY_VERSION, L"Version: v0.1.0");
+    AppendMenuW(menu, MF_STRING | MF_GRAYED | MF_DISABLED, ID_TRAY_VERSION, L"Version: v0.1.1");
     AppendMenuW(menu, MF_STRING, ID_TRAY_SETTINGS, L"Settings...");
     AppendMenuW(menu, MF_STRING, ID_TRAY_RELOAD, L"Reload ASR Worker");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, ID_TRAY_QUIT, L"Quit");
     SetForegroundWindow(hwnd);
+    RECT work;
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    if (pt.y > work.bottom) pt.y = work.bottom;
     TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_LEFTALIGN, pt.x, pt.y, 0, hwnd, nullptr);
     DestroyMenu(menu);
 }
