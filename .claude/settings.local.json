@@ -1,7 +1,26 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cmake --build build)"
+      "Bash(cmake --build build)",
+      "Bash(python -c \"import sherpa_onnx; print\\([m for m in dir\\(sherpa_onnx\\) if 'Online' in m or 'online' in m]\\)\")",
+      "Bash(python -c \"import sherpa_onnx; print\\([m for m in dir\\(sherpa_onnx.OnlineRecognizer\\) if 'fire' in m.lower\\(\\) or 'from' in m.lower\\(\\)]\\)\")",
+      "Bash(python -c \"import sherpa_onnx; print\\([m for m in dir\\(sherpa_onnx.OfflineRecognizer\\) if 'fire' in m.lower\\(\\) or 'from' in m.lower\\(\\)]\\)\")",
+      "Bash(git checkout *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(cmake -B build -G \"Visual Studio 17 2022\" -A x64)",
+      "Bash(where cmake *)",
+      "Read(//c/Program Files/Microsoft Visual Studio/**)",
+      "Read(//c/Program Files/CMake/bin/**)",
+      "Bash(cmd.exe /c \"build.bat\")",
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Community/VC/Auxiliary/Build/vcvars64.bat\")",
+      "Bash(cl /nologo /O2 /EHsc /MT /std:c++17 /DUNICODE /D_UNICODE /I\"runtime/Lib/site-packages/sherpa_onnx/include\" /Fobuild/ /Fe:build/VoiceLLMASRInput.exe main.cpp build/app.res user32.lib gdi32.lib shell32.lib ole32.lib comctl32.lib d2d1.lib dwrite.lib shlwapi.lib winmm.lib \"runtime/Lib/site-packages/sherpa_onnx/lib/sherpa-onnx-cxx-api.lib\")",
+      "Bash(powershell.exe *)",
+      "Bash(cmd.exe *)",
+      "Bash(cat build_stdout.txt)",
+      "Bash(cat build_stderr.txt)",
+      "WebFetch(domain:github.com)",
+      "WebSearch"
     ]
   }
 }

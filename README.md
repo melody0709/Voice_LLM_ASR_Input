@@ -7,7 +7,7 @@ Windows 11 本地 CPU 语音输入工具。当前 v1 目标不是完整 TSF/IME�
 ## 当前能力
 
 - Win32 托盘常驻程序，带托盘图标、程序图标、进程图标。
-- Settings 支持切换 ASR 模型、模型目录、线程数、VAD、Partial、Postprocess。
+- Settings 支持切换 ASR 模型、模型目录、线程数、VAD、Partial、Punctuation。
 - Shortcut tab 支持录入长按快捷键，默认 `CapsLock`。
 - 默认 `CapsLock` 短按正常切换大小写，长按 300ms 后才开始语音输入；语音输入结束后不会改变原来的大小写状态。
 - 打开 Settings 时暂停全局快捷键监听，方便重新录入 `CapsLock`。
@@ -55,14 +55,14 @@ models/
   - `Threads`: `auto`, `1` ... `8`
   - `Enable VAD`: 使用 Silero VAD 保守裁剪头尾静音，无人声时跳过 ASR
   - `Partial result`: 当前 UI 预留，后续做流式/模拟流式
-  - `Postprocess`: `none`, `itn`, `llm`
+  - `Punctuation`: `Disabled`, `Auto punctuate`, `Auto punctuate + LLM`
 - `Shortcut` tab：
   - 点击输入框后按快捷键。
   - `Esc` 取消本次录入。
   - `Backspace/Delete` 清空快捷键。
   - 默认 `CapsLock` 支持短按大小写切换、长按语音输入。
 
-当前 `itn` 会启用本地 CT-Transformer 标点模型。`llm` 暂时按本地标点处理，真正的保守 LLM 纠错还没有接入。
+当前 `Auto punctuate` 会启用本地 CT-Transformer 标点模型。`Auto punctuate + LLM` 暂时按本地标点处理，真正的保守 LLM 纠错还没有接入。
 
 ## 重要文件
 
@@ -87,7 +87,7 @@ models/
 
 ## 推荐测试
 
-- FireRedASR2 AED：质量较好，长句无标点时建议开启 `Postprocess = itn`。
+- FireRedASR2 AED：质量较好，长句无标点时建议开启 `Punctuation = Auto punctuate`。
 - FireRedASR2 CTC：速度更快，适合默认输入体验测试。
 - SenseVoiceSmall：轻量 fallback，适合低资源机器测试。
 

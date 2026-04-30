@@ -1356,9 +1356,9 @@ void LoadSettingsControls(HWND hwnd) {
     Button_SetCheck(GetDlgItem(hwnd, IDC_PARTIAL), g_config.enablePartial ? BST_CHECKED : BST_UNCHECKED);
 
     HWND post = GetDlgItem(hwnd, IDC_POSTPROCESS);
-    ComboBox_AddString(post, L"none");
-    ComboBox_AddString(post, L"itn");
-    ComboBox_AddString(post, L"llm");
+    ComboBox_AddString(post, L"Disabled");
+    ComboBox_AddString(post, L"Auto punctuate");
+    ComboBox_AddString(post, L"Auto punctuate + LLM");
     int postIndex = 1;
     if (g_config.postprocess == L"none") postIndex = 0;
     else if (g_config.postprocess == L"llm") postIndex = 2;
@@ -1395,8 +1395,12 @@ void SaveSettingsControls(HWND hwnd) {
     if (g_config.threads.substr(0, 4) == L"auto") g_config.threads = L"auto";
     g_config.enableVad = Button_GetCheck(GetDlgItem(hwnd, IDC_VAD)) == BST_CHECKED;
     g_config.enablePartial = Button_GetCheck(GetDlgItem(hwnd, IDC_PARTIAL)) == BST_CHECKED;
-    g_config.postprocess = ComboText(GetDlgItem(hwnd, IDC_POSTPROCESS));
-    if (g_config.postprocess.empty()) g_config.postprocess = L"itn";
+    {
+        int postIdx = (int)SendMessageW(GetDlgItem(hwnd, IDC_POSTPROCESS), CB_GETCURSEL, 0, 0);
+        if (postIdx == 0) g_config.postprocess = L"none";
+        else if (postIdx == 2) g_config.postprocess = L"llm";
+        else g_config.postprocess = L"itn";
+    }
 
     HotkeyConfig hotkey = GetHotkeyFromEdit(hwnd, IDC_HOTKEY);
     g_config.hotkey = HotkeyToString(hotkey);
@@ -1628,7 +1632,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         AddRecognitionControl(vad);
         AddRecognitionControl(partial);
 
-        control = CreateLabel(hwnd, 54, 238, 130, 30, L"Postprocess");
+        control = CreateLabel(hwnd, 54, 238, 130, 30, L"Punctuation");
         AddRecognitionControl(control);
         AddRecognitionControl(CreateCombo(hwnd, IDC_POSTPROCESS, 200, 232, 250, 150));
 

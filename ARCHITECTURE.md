@@ -48,7 +48,7 @@ flowchart LR
 
 Settings 是普通 Win32 窗口，目前分两个 tab：
 
-- `Recognition`: 模型、模型目录、线程、VAD、Partial、Postprocess。
+- `Recognition`: 模型、模型目录、线程、VAD、Partial、Punctuation。
 - `Shortcut`: 长按录音快捷键，默认 `CapsLock`。
 
 打开 Settings 时：
@@ -158,7 +158,7 @@ FireRedASR2 AED/CTC 输出常常没有标点，因此 worker 增加本地标点�
 models/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8/model.int8.onnx
 ```
 
-当请求中的 `postprocess` 为 `itn`、`punct` 或 `llm` 时启用。当前 `llm` 还没有真正接 LLM，只复用本地标点。
+当 Settings 中 `Punctuation` 设为 `Auto punctuate` 或 `Auto punctuate + LLM` 时启用。当前 `LLM` 选项还没有真正接 LLM，只复用本地标点。
 
 ### 文本注入
 
