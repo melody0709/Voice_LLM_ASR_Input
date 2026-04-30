@@ -1,6 +1,32 @@
 # Changelog
 
-## v0.1.5 (2026-04-30)
+## v0.2.1 (2026-04-30)
+
+### Added
+
+- **多供应商预设系统**：Settings LLM tab 新增 Provider 下拉框，内置 DeepSeek / OpenRouter / SiliconFlow 三个预设
+  - 选择预设自动填充 API Base URL、Model、Extra Params（关闭思考模式参数）
+  - 每个供应商独立保存 API Key（DPAPI 加密），切换时自动恢复
+  - 支持添加/删除自定义供应商（[+] / [−] 按钮）
+- **LLM Prompt 独立 Tab**：System Prompt 从 LLM tab 拆出到独立的 "LLM Prompt" tab
+  - System Prompt 多行编辑器高度增加到 340px
+  - Basic Fix / Deep Fix 预设按钮保留在 Prompt tab 顶部
+- **Extra Params 字段**：LLM tab 新增 Extra Params 单行编辑框
+  - 用户可输入 JSON 片段，合并到 LLM API 请求体
+  - 预设供应商自动注入关闭思考模式参数
+  - 下方提示文字说明用途和示例格式
+- **统一关闭思考模式**：`BuildRequestBody` 动态合并 `extraParams`，不再硬编码
+  - DeepSeek: `"thinking":{"type":"disabled"}`
+  - OpenRouter: `"reasoning":{"effort":"none"}`
+  - SiliconFlow/Qwen3.6: `"chat_template_kwargs":{"enable_thinking":false}`
+
+### Changed
+
+- Settings tab 从 2 个扩展到 4 个：`Recognition` / `Shortcut` / `LLM` / `LLM Prompt`
+- `config.json` 结构升级：新增 `llm_provider`、`llm_providers_json`，移除旧的 `llm_endpoint`/`llm_api_key`/`llm_model`
+- 向后兼容：首次启动自动将旧配置迁移为 "Custom" 供应商
+
+## v0.2.0 (2026-04-30)
 
 ### Added
 

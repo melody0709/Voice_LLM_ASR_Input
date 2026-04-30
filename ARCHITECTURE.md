@@ -46,10 +46,12 @@ flowchart LR
 
 ### Settings
 
-Settings 是普通 Win32 窗口，目前分两个 tab：
+Settings 是普通 Win32 窗口，目前分 4 个 tab：
 
 - `Recognition`: 模型、模型目录、线程、VAD、Partial、Punctuation。
 - `Shortcut`: 长按录音快捷键，默认 `CapsLock`。
+- `LLM`: 供应商选择（Provider dropdown + [+] / [−]）、API Base URL、API Key、Model、Test Connection、Debug log、Extra Params。
+- `LLM Prompt`: System Prompt 编辑（多行）、Basic Fix / Deep Fix 预设按钮。
 
 打开 Settings 时：
 
@@ -162,7 +164,7 @@ FireRedASR2 AED/CTC 输出常常没有标点，因此 worker 增加本地标点�
 models/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8/model.int8.onnx
 ```
 
-当 Settings 中 `Punctuation` 设为 `Auto punctuate` 或 `Auto punctuate + LLM` 时启用。当前 `LLM` 选项还没有真正接 LLM，只复用本地标点。
+当 Settings 中 `Punctuation` 设为 `Auto punctuate` 或 `Auto punctuate + LLM` 时启用。`LLM` 选项会调用云端 LLM API 进行文本纠错（见 LLM 纠错模块）。
 
 ### 文本注入
 
@@ -197,11 +199,18 @@ models/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8/model.
   "vad_model": "silero",
   "enable_partial": true,
   "postprocess": "itn",
-  "hotkey": "CapsLock"
+  "hotkey": "CapsLock",
+  "llm_provider": "DeepSeek",
+  "llm_providers_json": "{\"DeepSeek\":{\"endpoint\":\"https://api.deepseek.com\",\"api_key\":\"<encrypted>\",\"model\":\"deepseek-v4-flash\"}}",
+  "llm_prompt": "",
+  "enable_llm_debug": false
 }
 ```
 
-`PLAN.md` 中有更完整的未来配置结构，但当前代码使用上面的 v1 扁平结构。
+- `llm_provider`：当前选中的供应商名称。
+- `llm_providers_json`：JSON 字符串，存储所有供应商的 endpoint、api_key（DPAPI 加密）、model。
+- `llm_prompt`：自定义 System Prompt（留空使用内置默认）。
+- `enable_llm_debug`：开启后记录 ASR 前后对比到 `log/llm_refine_YYYYMMDD.log`。
 
 ## 后续架构演进
 
@@ -226,11 +235,12 @@ flowchart LR
 
 ### 保守纠错
 
-建议顺序：
+v0.2.0 起已接入云端 LLM 纠错（`llm_refine.h`）。默认关闭，需在 Settings 中将 Punctuation 设为 `Auto punctuate + LLM` 并配置供应商 API Key。
 
-1. 用户词库/术语替换。
-2. 中文拼写纠错模型。
-3. 可选本地小 LLM。
+建议后续补充：
+
+- 用户词库/术语替换。
+- 中文拼写纠错模型。
 
 LLM 必须默认关闭，并加入：
 

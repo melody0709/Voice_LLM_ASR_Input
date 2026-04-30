@@ -26,6 +26,7 @@
 
 #include "sherpa-onnx/c-api/cxx-api.h"
 #include "firered_vad.h"
+#include "llm_refine.h"
 
 #include "resource.h"
 
@@ -48,6 +49,7 @@ constexpr wchar_t kHotkeyEditClass[] = L"VoiceLLMASRInput.HotkeyEdit";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kReloadMessage = WM_APP + 2;
 constexpr UINT kAsrResultMessage = WM_APP + 3;
+constexpr UINT kLlmResultMessage = WM_APP + 4;
 constexpr UINT kTrayId = 1;
 constexpr UINT_PTR kHudHideTimer = 1;
 constexpr UINT_PTR kCapsLockLongPressTimer = 2;
@@ -81,6 +83,20 @@ constexpr int IDC_CANCEL = 2010;
 constexpr int IDC_STATUS = 2011;
 constexpr int IDC_SETTINGS_TAB = 2012;
 constexpr int IDC_VAD_MODEL = 2013;
+constexpr int IDC_LLM_ENDPOINT = 2020;
+constexpr int IDC_LLM_KEY = 2021;
+constexpr int IDC_LLM_MODEL = 2022;
+constexpr int IDC_LLM_TEST = 2023;
+constexpr int IDC_LLM_SHOW_KEY = 2024;
+constexpr int IDC_LLM_DEBUG = 2025;
+constexpr int IDC_LLM_PROMPT = 2026;
+constexpr int IDC_LLM_PRESET1 = 2027;
+constexpr int IDC_LLM_PRESET2 = 2028;
+constexpr int IDC_LLM_PROVIDER = 2029;
+constexpr int IDC_LLM_EXTRA = 2030;
+constexpr int IDC_LLM_PROVIDER_ADD = 2031;
+constexpr int IDC_LLM_PROVIDER_DEL = 2032;
+constexpr int IDC_LLM_EXTRA_RESET = 2033;
 
 struct Config {
     std::wstring modelId = L"firered_ctc";
@@ -91,6 +107,14 @@ struct Config {
     bool enablePartial = true;
     std::wstring postprocess = L"itn";
     std::wstring hotkey = L"CapsLock";
+    std::wstring llmProvider = L"DeepSeek";
+    std::wstring llmEndpoint = L"https://api.deepseek.com";
+    std::wstring llmApiKey;
+    std::wstring llmModel = L"deepseek-v4-flash";
+    std::wstring llmPrompt;
+    std::wstring llmExtraParams;
+    bool enableLlmDebug = false;
+    std::wstring llmProvidersJson;
 };
 
 HINSTANCE g_instance = nullptr;
@@ -127,6 +151,10 @@ std::atomic<float> g_audioLevel{ 0.0f };
 float g_hudSmoothedLevel = 0.0f;
 std::vector<HWND> g_recognitionControls;
 std::vector<HWND> g_shortcutControls;
+std::vector<HWND> g_llmControls;
+std::vector<HWND> g_promptControls;
+bool g_hudIsRefining = false;
+bool g_llmKeyVisible = false;
 
 struct HotkeyConfig {
     bool ctrl = false;
@@ -416,6 +444,69 @@ bool ExtractJsonBool(const std::string& json, const std::string& key, bool fallb
     return fallback;
 }
 
+void SaveCurrentProvider() {
+    const std::wstring& name = g_config.llmProvider;
+    if (name.empty()) return;
+    std::string key = llm::WideToUtf8(name);
+    std::string json = llm::WideToUtf8(g_config.llmProvidersJson);
+    if (json.empty()) json = "{}";
+    std::string encKey = llm::WideToUtf8(llm::EncryptString(g_config.llmApiKey));
+    std::string entry = "{" 
+        "\"endpoint\":\"" + EscapeJson(g_config.llmEndpoint) + "\","
+        "\"api_key\":\"" + encKey + "\","
+        "\"model\":\"" + EscapeJson(g_config.llmModel) + "\"}";
+    std::string marker = "\"" + key + "\"";
+    size_t pos = json.find(marker);
+    if (pos != std::string::npos) {
+        size_t objStart = json.find('{', pos);
+        if (objStart != std::string::npos) {
+            int depth = 0;
+            size_t objEnd = objStart;
+            for (; objEnd < json.size(); ++objEnd) {
+                if (json[objEnd] == '{') depth++;
+                else if (json[objEnd] == '}') { depth--; if (depth == 0) break; }
+            }
+            json.replace(objStart, objEnd - objStart + 1, entry);
+        }
+    } else {
+        if (json == "{}") {
+            json = "{" + marker + ":" + entry + "}";
+        } else {
+            json.pop_back();
+            json += "," + marker + ":" + entry + "}";
+        }
+    }
+    g_config.llmProvidersJson = llm::Utf8ToWide(json);
+}
+
+void LoadProviderFromStore(const std::wstring& name) {
+    std::string json = llm::WideToUtf8(g_config.llmProvidersJson);
+    std::string key = llm::WideToUtf8(name);
+    size_t pos = json.find("\"" + key + "\"");
+    if (pos == std::string::npos) return;
+    std::string section = json.substr(pos);
+    g_config.llmEndpoint = ExtractJsonString(section, "endpoint", g_config.llmEndpoint);
+    g_config.llmApiKey = llm::DecryptString(ExtractJsonString(section, "api_key", L""));
+    g_config.llmModel = ExtractJsonString(section, "model", g_config.llmModel);
+}
+
+int FindPresetIndex(const std::wstring& name) {
+    for (int i = 0; i < llm::kProviderPresetCount; ++i) {
+        if (name == llm::kProviderPresets[i].name) return i;
+    }
+    return -1;
+}
+
+void ApplyPreset(int index) {
+    if (index < 0 || index >= llm::kProviderPresetCount) return;
+    const auto& p = llm::kProviderPresets[index];
+    g_config.llmProvider = p.name;
+    g_config.llmEndpoint = p.url;
+    g_config.llmModel = p.defaultModel;
+    g_config.llmExtraParams = p.extraParams;
+    LoadProviderFromStore(p.name);
+}
+
 void LoadConfig() {
     std::ifstream file(ConfigPath(), std::ios::binary);
     if (!file) return;
@@ -430,12 +521,35 @@ void LoadConfig() {
     g_config.enablePartial = ExtractJsonBool(json, "enable_partial", g_config.enablePartial);
     g_config.postprocess = ExtractJsonString(json, "postprocess", g_config.postprocess);
     g_config.hotkey = ExtractJsonString(json, "hotkey", g_config.hotkey);
+    g_config.llmProvider = ExtractJsonString(json, "llm_provider", L"");
+    g_config.llmProvidersJson = ExtractJsonString(json, "llm_providers_json", L"");
+    g_config.llmEndpoint = ExtractJsonString(json, "llm_endpoint", g_config.llmEndpoint);
+    g_config.llmApiKey = llm::DecryptString(ExtractJsonString(json, "llm_api_key", L""));
+    g_config.llmModel = ExtractJsonString(json, "llm_model", g_config.llmModel);
+    g_config.llmPrompt = ExtractJsonString(json, "llm_prompt", L"");
+    g_config.enableLlmDebug = ExtractJsonBool(json, "enable_llm_debug", false);
     if (g_config.modelDir.empty()) {
         g_config.modelDir = DefaultModelDir(g_config.modelId);
+    }
+    if (g_config.llmProvider.empty()) {
+        if (!g_config.llmEndpoint.empty()) {
+            g_config.llmProvider = L"Custom";
+            SaveCurrentProvider();
+        } else {
+            ApplyPreset(0);
+        }
+    } else {
+        int pi = FindPresetIndex(g_config.llmProvider);
+        if (pi >= 0) {
+            ApplyPreset(pi);
+        } else {
+            LoadProviderFromStore(g_config.llmProvider);
+        }
     }
 }
 
 void SaveConfig() {
+    SaveCurrentProvider();
     std::ofstream file(ConfigPath(), std::ios::binary | std::ios::trunc);
     file << "{\n"
          << "  \"model_id\": \"" << EscapeJson(g_config.modelId) << "\",\n"
@@ -445,7 +559,11 @@ void SaveConfig() {
          << "  \"vad_model\": \"" << EscapeJson(g_config.vadModel) << "\",\n"
          << "  \"enable_partial\": " << (g_config.enablePartial ? "true" : "false") << ",\n"
          << "  \"postprocess\": \"" << EscapeJson(g_config.postprocess) << "\",\n"
-         << "  \"hotkey\": \"" << EscapeJson(g_config.hotkey) << "\"\n"
+         << "  \"hotkey\": \"" << EscapeJson(g_config.hotkey) << "\",\n"
+         << "  \"llm_provider\": \"" << EscapeJson(g_config.llmProvider) << "\",\n"
+         << "  \"llm_providers_json\": \"" << EscapeJson(g_config.llmProvidersJson) << "\",\n"
+         << "  \"llm_prompt\": \"" << EscapeJson(g_config.llmPrompt) << "\",\n"
+         << "  \"enable_llm_debug\": " << (g_config.enableLlmDebug ? "true" : "false") << "\n"
          << "}\n";
 }
 
@@ -1031,6 +1149,48 @@ std::vector<float> PcmToFloat(const std::vector<BYTE>& pcm) {
     return samples;
 }
 
+void WriteLlmLog(const std::wstring& asrText, const std::wstring& llmText) {
+    std::wstring logDir = AppRootDir() + L"\\log";
+    CreateDirectoryW(logDir.c_str(), nullptr);
+
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    wchar_t dateStr[16];
+    swprintf_s(dateStr, L"%04d%02d%02d", st.wYear, st.wMonth, st.wDay);
+    std::wstring logPath = logDir + L"\\llm_refine_" + dateStr + L".log";
+
+    wchar_t timeStr[32];
+    swprintf_s(timeStr, L"[%04d-%02d-%02d %02d:%02d:%02d]", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+
+    std::ofstream file(logPath, std::ios::app | std::ios::binary);
+    if (!file) return;
+    std::string ts = llm::WideToUtf8(timeStr);
+    std::string asr = llm::WideToUtf8(asrText);
+    std::string llmS = llm::WideToUtf8(llmText);
+    file << ts << "\n"
+         << "[ASR]  " << asr << "\n"
+         << "[LLM]  " << llmS << "\n"
+         << "---\n";
+    file.flush();
+}
+
+void RefineWithLlmAsync(const std::wstring& asrText, const Config& config) {
+    llm::RequestConfig cfg;
+    cfg.endpoint = config.llmEndpoint;
+    cfg.apiKey = config.llmApiKey;
+    cfg.model = config.llmModel;
+    cfg.systemPrompt = config.llmPrompt;
+    cfg.extraParams = config.llmExtraParams;
+    bool debug = config.enableLlmDebug;
+    std::thread([asrText, cfg, debug]() {
+        std::wstring result = llm::Refine(asrText, cfg);
+        if (debug) {
+            WriteLlmLog(asrText, result);
+        }
+        PostMessageW(g_mainWindow, kLlmResultMessage, 0, reinterpret_cast<LPARAM>(new std::wstring(result)));
+    }).detach();
+}
+
 void RecognizeAsync(const std::vector<BYTE>& pcm) {
     const Config config = g_config;
     std::thread([config, pcm]() {
@@ -1039,7 +1199,19 @@ void RecognizeAsync(const std::vector<BYTE>& pcm) {
         if (text.empty()) {
             text = L"(empty result)";
         }
-        PostMessageW(g_mainWindow, kAsrResultMessage, 0, reinterpret_cast<LPARAM>(new std::wstring(text)));
+
+        bool needLlm = (config.postprocess == L"llm")
+                     && !config.llmEndpoint.empty()
+                     && !config.llmApiKey.empty()
+                     && !text.empty()
+                     && text.rfind(L"ASR failed:", 0) != 0;
+
+        if (needLlm) {
+            PostMessageW(g_mainWindow, kAsrResultMessage, 1, reinterpret_cast<LPARAM>(new std::wstring(text)));
+            RefineWithLlmAsync(text, config);
+        } else {
+            PostMessageW(g_mainWindow, kAsrResultMessage, 0, reinterpret_cast<LPARAM>(new std::wstring(text)));
+        }
     }).detach();
 }
 
@@ -1284,12 +1456,26 @@ void AddShortcutControl(HWND hwnd) {
     if (hwnd) g_shortcutControls.push_back(hwnd);
 }
 
+void AddLlmControl(HWND hwnd) {
+    if (hwnd) g_llmControls.push_back(hwnd);
+}
+
+void AddPromptControl(HWND hwnd) {
+    if (hwnd) g_promptControls.push_back(hwnd);
+}
+
 void ShowSettingsPage(HWND hwnd, int page) {
     for (HWND control : g_recognitionControls) {
         ShowWindow(control, page == 0 ? SW_SHOW : SW_HIDE);
     }
     for (HWND control : g_shortcutControls) {
         ShowWindow(control, page == 1 ? SW_SHOW : SW_HIDE);
+    }
+    for (HWND control : g_llmControls) {
+        ShowWindow(control, page == 2 ? SW_SHOW : SW_HIDE);
+    }
+    for (HWND control : g_promptControls) {
+        ShowWindow(control, page == 3 ? SW_SHOW : SW_HIDE);
     }
     InvalidateRect(hwnd, nullptr, TRUE);
 }
@@ -1299,7 +1485,7 @@ void LayoutSettingsWindow(HWND hwnd) {
     GetClientRect(hwnd, &rc);
     const int margin = 24;
     const int footerHeight = 78;
-    const int footerTop = (rc.bottom - footerHeight > 390) ? rc.bottom - footerHeight : 390;
+    const int footerTop = (rc.bottom - footerHeight > 460) ? rc.bottom - footerHeight : 460;
     const int tabBottom = footerTop - 24;
     HWND tab = GetDlgItem(hwnd, IDC_SETTINGS_TAB);
     if (tab) {
@@ -1353,6 +1539,8 @@ void BrowseModelDirectory(HWND hwnd) {
     }
     CoTaskMemFree(pidl);
 }
+
+void RefreshProviderDropdown(HWND hwnd);
 
 void LoadSettingsControls(HWND hwnd) {
     if (g_config.modelDir.empty()) {
@@ -1411,6 +1599,28 @@ void LoadSettingsControls(HWND hwnd) {
         hotkeyState->original = hotkeyState->hotkey;
         InvalidateRect(hotkeyEdit, nullptr, TRUE);
     }
+
+    SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_ENDPOINT), g_config.llmEndpoint.c_str());
+    SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_KEY), g_config.llmApiKey.c_str());
+    SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_MODEL), g_config.llmModel.c_str());
+    SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_PROMPT), g_config.llmPrompt.c_str());
+    RefreshProviderDropdown(hwnd);
+    {
+        wchar_t extra[1024] = {};
+        GetWindowTextW(GetDlgItem(hwnd, IDC_LLM_EXTRA), extra, 1024);
+        if (g_config.llmExtraParams.empty()) {
+            int pi = FindPresetIndex(g_config.llmProvider);
+            if (pi >= 0) g_config.llmExtraParams = llm::kProviderPresets[pi].extraParams;
+        }
+        SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_EXTRA), g_config.llmExtraParams.c_str());
+    }
+    g_llmKeyVisible = false;
+    HWND showKeyBtn = GetDlgItem(hwnd, IDC_LLM_SHOW_KEY);
+    if (showKeyBtn) SetWindowTextW(showKeyBtn, L"Show");
+    HWND keyEdit = GetDlgItem(hwnd, IDC_LLM_KEY);
+    if (keyEdit) SendMessageW(keyEdit, EM_SETPASSWORDCHAR, L'•', 0);
+    Button_SetCheck(GetDlgItem(hwnd, IDC_LLM_DEBUG), g_config.enableLlmDebug ? BST_CHECKED : BST_UNCHECKED);
+
     SetStatus(hwnd, L"Ready.");
 }
 
@@ -1449,9 +1659,58 @@ void SaveSettingsControls(HWND hwnd) {
     HotkeyConfig hotkey = GetHotkeyFromEdit(hwnd, IDC_HOTKEY);
     g_config.hotkey = HotkeyToString(hotkey);
 
+    wchar_t llmEndpoint[512] = {};
+    GetWindowTextW(GetDlgItem(hwnd, IDC_LLM_ENDPOINT), llmEndpoint, 512);
+    g_config.llmEndpoint = llmEndpoint;
+
+    wchar_t llmKey[512] = {};
+    GetWindowTextW(GetDlgItem(hwnd, IDC_LLM_KEY), llmKey, 512);
+    g_config.llmApiKey = llmKey;
+
+    wchar_t llmModel[256] = {};
+    GetWindowTextW(GetDlgItem(hwnd, IDC_LLM_MODEL), llmModel, 256);
+    g_config.llmModel = llmModel;
+
+    wchar_t llmPrompt[2048] = {};
+    GetWindowTextW(GetDlgItem(hwnd, IDC_LLM_PROMPT), llmPrompt, 2048);
+    g_config.llmPrompt = llmPrompt;
+
+    wchar_t llmExtra[1024] = {};
+    GetWindowTextW(GetDlgItem(hwnd, IDC_LLM_EXTRA), llmExtra, 1024);
+    g_config.llmExtraParams = llmExtra;
+
+    g_config.llmProvider = ComboText(GetDlgItem(hwnd, IDC_LLM_PROVIDER));
+
+    g_config.enableLlmDebug = Button_GetCheck(GetDlgItem(hwnd, IDC_LLM_DEBUG)) == BST_CHECKED;
+
     SaveConfig();
     SetStatus(hwnd, L"Saved. ASR engine reloaded.");
     PostMessageW(g_mainWindow, kReloadMessage, 0, 0);
+}
+
+void TestLlmConnection(HWND hwnd) {
+    wchar_t endpoint[512] = {};
+    GetWindowTextW(GetDlgItem(hwnd, IDC_LLM_ENDPOINT), endpoint, 512);
+    wchar_t apiKey[512] = {};
+    GetWindowTextW(GetDlgItem(hwnd, IDC_LLM_KEY), apiKey, 512);
+    wchar_t model[256] = {};
+    GetWindowTextW(GetDlgItem(hwnd, IDC_LLM_MODEL), model, 256);
+
+    if (wcslen(endpoint) == 0 || wcslen(apiKey) == 0 || wcslen(model) == 0) {
+        SetStatus(hwnd, L"Please fill in all LLM fields.");
+        return;
+    }
+
+    SetStatus(hwnd, L"Testing connection...");
+    llm::RequestConfig cfg;
+    cfg.endpoint = endpoint;
+    cfg.apiKey = apiKey;
+    cfg.model = model;
+    std::thread([hwnd, cfg]() {
+        llm::TestResult result = llm::TestConnection(cfg);
+        PostMessageW(hwnd, WM_APP + 10, result.ok ? 0 : 1,
+            reinterpret_cast<LPARAM>(new std::wstring(result.message)));
+    }).detach();
 }
 
 bool EnsureHudRenderTarget(HWND hwnd) {
@@ -1539,7 +1798,9 @@ void DrawHudDirect2D(HWND hwnd) {
         g_hudRenderTarget->FillRoundedRectangle(bar, g_hudBrush);
     }
 
-    g_hudBrush->SetColor(D2D1::ColorF(0.965f, 0.975f, 0.99f, 0.96f));
+    g_hudBrush->SetColor(g_hudIsRefining
+        ? D2D1::ColorF(0.6f, 0.6f, 0.6f, 0.96f)
+        : D2D1::ColorF(0.965f, 0.975f, 0.99f, 0.96f));
     const float textX = kHudLeftPad + kHudWaveWidth + kHudGap;
     const D2D1_RECT_F textRect = D2D1::RectF(textX, 0.0f, width - kHudRightPad, height);
     g_hudRenderTarget->DrawTextW(
@@ -1586,6 +1847,172 @@ LRESULT CALLBACK HudWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     default:
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
+}
+
+constexpr int IDC_INPUT_EDIT = 3001;
+
+struct InputDlgData {
+    const wchar_t* title;
+    std::wstring result;
+    bool ok = false;
+};
+
+LRESULT CALLBACK InputWndProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_CREATE: {
+        auto* cs = reinterpret_cast<CREATESTRUCT*>(lParam);
+        auto* data = reinterpret_cast<InputDlgData*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hDlg, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(data));
+        if (data && data->title) SetWindowTextW(hDlg, data->title);
+        CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr,
+                        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
+                        12, 12, 260, 28, hDlg,
+                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_INPUT_EDIT)),
+                        g_instance, nullptr);
+        HWND okBtn = CreateWindowW(L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP,
+                                   12, 50, 80, 28, hDlg, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), g_instance, nullptr);
+        CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                      104, 50, 80, 28, hDlg, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)), g_instance, nullptr);
+        ApplyUiFont(GetDlgItem(hDlg, IDC_INPUT_EDIT));
+        ApplyUiFont(okBtn);
+        ApplyUiFont(GetDlgItem(hDlg, IDCANCEL));
+        SendMessageW(GetDlgItem(hDlg, IDC_INPUT_EDIT), EM_SETSEL, 0, -1);
+        SetFocus(GetDlgItem(hDlg, IDC_INPUT_EDIT));
+        return 0;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDOK) {
+            auto* data = reinterpret_cast<InputDlgData*>(GetWindowLongPtrW(hDlg, GWLP_USERDATA));
+            if (data) {
+                wchar_t buf[256] = {};
+                GetWindowTextW(GetDlgItem(hDlg, IDC_INPUT_EDIT), buf, 256);
+                data->result = buf;
+                data->ok = !data->result.empty();
+            }
+            DestroyWindow(hDlg);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDCANCEL) {
+            DestroyWindow(hDlg);
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        DestroyWindow(hDlg);
+        return 0;
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProcW(hDlg, msg, wParam, lParam);
+}
+
+bool ShowInputDialog(HWND parent, const wchar_t* title, std::wstring& out) {
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc = {};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = InputWndProc;
+        wc.hInstance = g_instance;
+        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+        wc.lpszClassName = L"VoiceLLMInputDlg";
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        RegisterClassExW(&wc);
+        registered = true;
+    }
+    InputDlgData data;
+    data.title = title;
+    RECT work;
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    int w = 296, h = 130;
+    int x = work.left + (work.right - work.left - w) / 2;
+    int y = work.top + (work.bottom - work.top - h) / 2;
+    HWND dlg = CreateWindowExW(WS_EX_APPWINDOW | WS_EX_DLGMODALFRAME,
+                               L"VoiceLLMInputDlg", title,
+                               WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                               x, y, w, h, parent, nullptr, g_instance, &data);
+    if (!dlg) return false;
+    ShowWindow(dlg, SW_SHOW);
+    SetForegroundWindow(dlg);
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0)) {
+        if (IsDialogMessageW(dlg, &msg)) continue;
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    if (data.ok) { out = data.result; return true; }
+    return false;
+}
+
+void RefreshProviderDropdown(HWND hwnd) {
+    HWND combo = GetDlgItem(hwnd, IDC_LLM_PROVIDER);
+    std::wstring current = ComboText(combo);
+    SendMessageW(combo, CB_RESETCONTENT, 0, 0);
+    for (int i = 0; i < llm::kProviderPresetCount; ++i) {
+        ComboBox_AddString(combo, llm::kProviderPresets[i].name);
+    }
+    std::string provJson = llm::WideToUtf8(g_config.llmProvidersJson);
+    size_t pos = 1;
+    while (pos < provJson.size()) {
+        size_t q1 = provJson.find('"', pos);
+        if (q1 == std::string::npos) break;
+        size_t q2 = provJson.find('"', q1 + 1);
+        if (q2 == std::string::npos) break;
+        std::string name = provJson.substr(q1 + 1, q2 - q1 - 1);
+        bool isPreset = false;
+        for (int i = 0; i < llm::kProviderPresetCount; ++i) {
+            if (name == llm::WideToUtf8(llm::kProviderPresets[i].name)) { isPreset = true; break; }
+        }
+        if (!isPreset) {
+            ComboBox_AddString(combo, llm::Utf8ToWide(name).c_str());
+        }
+        size_t objStart = provJson.find('{', q2);
+        if (objStart == std::string::npos) break;
+        int depth = 0;
+        size_t objEnd = objStart;
+        for (; objEnd < provJson.size(); ++objEnd) {
+            if (provJson[objEnd] == '{') depth++;
+            else if (provJson[objEnd] == '}') { depth--; if (depth == 0) break; }
+        }
+        pos = objEnd + 1;
+    }
+    int sel = 0;
+    int count = (int)SendMessageW(combo, CB_GETCOUNT, 0, 0);
+    for (int i = 0; i < count; ++i) {
+        wchar_t buf[128] = {};
+        ComboBox_GetLBText(combo, i, buf);
+        if (current == buf) { sel = i; break; }
+    }
+    ComboBox_SetCurSel(combo, sel);
+    bool isPresetSel = FindPresetIndex(ComboText(combo)) >= 0;
+    HWND delBtn = GetDlgItem(hwnd, IDC_LLM_PROVIDER_DEL);
+    if (delBtn) EnableWindow(delBtn, !isPresetSel);
+    HWND resetBtn = GetDlgItem(hwnd, IDC_LLM_EXTRA_RESET);
+    if (resetBtn) EnableWindow(resetBtn, isPresetSel);
+}
+
+void DeleteProviderFromStore(const std::wstring& name) {
+    std::string json = llm::WideToUtf8(g_config.llmProvidersJson);
+    std::string key = llm::WideToUtf8(name);
+    std::string marker = "\"" + key + "\"";
+    size_t pos = json.find(marker);
+    if (pos == std::string::npos) return;
+    size_t colon = json.find(':', pos + marker.size());
+    if (colon == std::string::npos) return;
+    size_t objStart = json.find('{', colon);
+    if (objStart == std::string::npos) return;
+    int depth = 0;
+    size_t objEnd = objStart;
+    for (; objEnd < json.size(); ++objEnd) {
+        if (json[objEnd] == '{') depth++;
+        else if (json[objEnd] == '}') { depth--; if (depth == 0) break; }
+    }
+    size_t eraseStart = pos;
+    if (eraseStart > 0 && json[eraseStart - 1] == ',') eraseStart--;
+    size_t eraseEnd = objEnd + 1;
+    json.erase(eraseStart, eraseEnd - eraseStart);
+    if (json == "{}" || json.empty()) json = "{}";
+    g_config.llmProvidersJson = llm::Utf8ToWide(json);
 }
 
 LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -1641,6 +2068,8 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(g_appIcon));
         g_recognitionControls.clear();
         g_shortcutControls.clear();
+        g_llmControls.clear();
+        g_promptControls.clear();
 
         HWND tab = CreateWindowW(WC_TABCONTROLW, nullptr, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
                                 24, 28, 786, 330, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_TAB)), g_instance, nullptr);
@@ -1651,6 +2080,10 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         TabCtrl_InsertItem(tab, 0, &item);
         item.pszText = const_cast<LPWSTR>(L"Shortcut");
         TabCtrl_InsertItem(tab, 1, &item);
+        item.pszText = const_cast<LPWSTR>(L"LLM");
+        TabCtrl_InsertItem(tab, 2, &item);
+        item.pszText = const_cast<LPWSTR>(L"LLM Prompt");
+        TabCtrl_InsertItem(tab, 3, &item);
 
         HWND control = CreateLabel(hwnd, 54, 82, 130, 30, L"ASR model");
         AddRecognitionControl(control);
@@ -1692,11 +2125,71 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         control = CreateLabel(hwnd, 54, 174, 640, 30, L"Esc cancels recording a shortcut. Backspace/Delete clears it.");
         AddShortcutControl(control);
 
+        control = CreateLabel(hwnd, 54, 82, 130, 30, L"Provider");
+        AddLlmControl(control);
+        AddLlmControl(CreateCombo(hwnd, IDC_LLM_PROVIDER, 200, 76, 480, 400));
+        AddLlmControl(CreateButton(hwnd, IDC_LLM_PROVIDER_ADD, 694, 75, 44, 34, L"+"));
+        AddLlmControl(CreateButton(hwnd, IDC_LLM_PROVIDER_DEL, 742, 75, 44, 34, L"\u2212"));
+
+        control = CreateLabel(hwnd, 54, 146, 130, 30, L"API Base URL");
+        AddLlmControl(control);
+        HWND llmEndpoint = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                                           200, 140, 580, 32, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_ENDPOINT)), g_instance, nullptr);
+        ApplyUiFont(llmEndpoint);
+        AddLlmControl(llmEndpoint);
+
+        control = CreateLabel(hwnd, 54, 192, 130, 30, L"API Key");
+        AddLlmControl(control);
+        HWND llmKey = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD,
+                                      200, 186, 480, 32, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_KEY)), g_instance, nullptr);
+        ApplyUiFont(llmKey);
+        AddLlmControl(llmKey);
+        AddLlmControl(CreateButton(hwnd, IDC_LLM_SHOW_KEY, 694, 185, 92, 34, L"Show"));
+
+        control = CreateLabel(hwnd, 54, 238, 130, 30, L"Model");
+        AddLlmControl(control);
+        HWND llmModel = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                                        200, 232, 580, 32, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_MODEL)), g_instance, nullptr);
+        ApplyUiFont(llmModel);
+        AddLlmControl(llmModel);
+
+        AddLlmControl(CreateButton(hwnd, IDC_LLM_TEST, 200, 280, 140, 36, L"Test Connection"));
+        HWND llmDebug = CreateWindowW(L"BUTTON", L"Log refine before/after", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                      360, 286, 220, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_DEBUG)), g_instance, nullptr);
+        ApplyUiFont(llmDebug);
+        AddLlmControl(llmDebug);
+
+        control = CreateLabel(hwnd, 54, 336, 130, 30, L"Extra Params");
+        AddLlmControl(control);
+        HWND llmExtra = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                                        200, 330, 480, 32, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_EXTRA)), g_instance, nullptr);
+        ApplyUiFont(llmExtra);
+        AddLlmControl(llmExtra);
+        AddLlmControl(CreateButton(hwnd, IDC_LLM_EXTRA_RESET, 694, 329, 92, 34, L"Reset"));
+        {
+            HWND hint = CreateWindowW(L"STATIC",
+                L"JSON snippet merged into request body. e.g. \"thinking\":{\"type\":\"disabled\"}",
+                WS_CHILD | WS_VISIBLE, 200, 364, 480, 20, hwnd, nullptr, g_instance, nullptr);
+            ApplyUiFont(hint);
+            AddLlmControl(hint);
+        }
+
+        AddPromptControl(CreateButton(hwnd, IDC_LLM_PRESET1, 200, 76, 120, 32, L"Basic Fix"));
+        AddPromptControl(CreateButton(hwnd, IDC_LLM_PRESET2, 340, 76, 120, 32, L"Deep Fix"));
+
+        control = CreateLabel(hwnd, 54, 126, 130, 30, L"System Prompt");
+        AddPromptControl(control);
+        HWND llmPrompt = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr,
+                                          WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_WANTRETURN,
+                                          200, 120, 580, 340, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_PROMPT)), g_instance, nullptr);
+        ApplyUiFont(llmPrompt);
+        AddPromptControl(llmPrompt);
+
         HWND status = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE,
-                                    24, 460, 520, 30, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), g_instance, nullptr);
+                                    24, 530, 520, 30, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), g_instance, nullptr);
         ApplyUiFont(status);
-        CreateButton(hwnd, IDC_SAVE, 626, 452, 84, 36, L"Save");
-        CreateButton(hwnd, IDC_CANCEL, 726, 452, 84, 36, L"Close");
+        CreateButton(hwnd, IDC_SAVE, 626, 522, 84, 36, L"Save");
+        CreateButton(hwnd, IDC_CANCEL, 726, 522, 84, 36, L"Close");
         LoadSettingsControls(hwnd);
         ShowSettingsPage(hwnd, 0);
         LayoutSettingsWindow(hwnd);
@@ -1711,6 +2204,72 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 return 0;
             }
             break;
+        case IDC_LLM_PROVIDER:
+            if (HIWORD(wParam) == CBN_SELCHANGE) {
+                std::wstring prov = ComboText(GetDlgItem(hwnd, IDC_LLM_PROVIDER));
+                if (!prov.empty()) {
+                    g_config.llmProvider = prov;
+                    int pi = FindPresetIndex(prov);
+                    if (pi >= 0) {
+                        ApplyPreset(pi);
+                    } else {
+                        LoadProviderFromStore(prov);
+                    }
+                    SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_ENDPOINT), g_config.llmEndpoint.c_str());
+                    SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_KEY), g_config.llmApiKey.c_str());
+                    SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_MODEL), g_config.llmModel.c_str());
+                    SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_EXTRA), g_config.llmExtraParams.c_str());
+                    HWND delBtn = GetDlgItem(hwnd, IDC_LLM_PROVIDER_DEL);
+                    if (delBtn) EnableWindow(delBtn, FindPresetIndex(prov) < 0);
+                    HWND resetBtn = GetDlgItem(hwnd, IDC_LLM_EXTRA_RESET);
+                    if (resetBtn) EnableWindow(resetBtn, FindPresetIndex(prov) >= 0);
+                }
+                return 0;
+            }
+            break;
+        case IDC_LLM_PROVIDER_ADD: {
+            std::wstring name;
+            if (ShowInputDialog(hwnd, L"Add Provider", name)) {
+                bool exists = FindPresetIndex(name) >= 0;
+                if (!exists) {
+                    std::string json = llm::WideToUtf8(g_config.llmProvidersJson);
+                    std::string key = llm::WideToUtf8(name);
+                    if (json.find("\"" + key + "\"") != std::string::npos) exists = true;
+                }
+                if (exists) {
+                    SetStatus(hwnd, L"Provider name already exists.");
+                } else {
+                    g_config.llmEndpoint.clear();
+                    g_config.llmApiKey.clear();
+                    g_config.llmModel.clear();
+                    g_config.llmExtraParams.clear();
+                    g_config.llmProvider = name;
+                    SaveCurrentProvider();
+                    RefreshProviderDropdown(hwnd);
+                    SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_ENDPOINT), L"");
+                    SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_KEY), L"");
+                    SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_MODEL), L"");
+                    SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_EXTRA), L"");
+                    EnableWindow(GetDlgItem(hwnd, IDC_LLM_PROVIDER_DEL), TRUE);
+                    SetStatus(hwnd, (L"Added provider: " + name).c_str());
+                }
+            }
+            return 0;
+        }
+        case IDC_LLM_PROVIDER_DEL: {
+            std::wstring prov = ComboText(GetDlgItem(hwnd, IDC_LLM_PROVIDER));
+            if (prov.empty() || FindPresetIndex(prov) >= 0) return 0;
+            DeleteProviderFromStore(prov);
+            ApplyPreset(0);
+            RefreshProviderDropdown(hwnd);
+            SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_ENDPOINT), g_config.llmEndpoint.c_str());
+            SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_KEY), g_config.llmApiKey.c_str());
+            SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_MODEL), g_config.llmModel.c_str());
+            SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_EXTRA), g_config.llmExtraParams.c_str());
+            EnableWindow(GetDlgItem(hwnd, IDC_LLM_PROVIDER_DEL), FALSE);
+            SetStatus(hwnd, (L"Deleted provider: " + prov).c_str());
+            return 0;
+        }
         case IDC_BROWSE:
             BrowseModelDirectory(hwnd);
             return 0;
@@ -1720,6 +2279,33 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         case IDC_CANCEL:
             HideSettingsWindow(hwnd);
             return 0;
+        case IDC_LLM_TEST:
+            TestLlmConnection(hwnd);
+            return 0;
+        case IDC_LLM_SHOW_KEY: {
+            g_llmKeyVisible = !g_llmKeyVisible;
+            HWND keyEdit = GetDlgItem(hwnd, IDC_LLM_KEY);
+            if (keyEdit) {
+                SendMessageW(keyEdit, EM_SETPASSWORDCHAR, g_llmKeyVisible ? 0 : L'•', 0);
+                InvalidateRect(keyEdit, nullptr, TRUE);
+            }
+            HWND btn = GetDlgItem(hwnd, IDC_LLM_SHOW_KEY);
+            if (btn) SetWindowTextW(btn, g_llmKeyVisible ? L"Hide" : L"Show");
+            return 0;
+        }
+        case IDC_LLM_PRESET1:
+            SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_PROMPT), llm::kPresetBasicFix);
+            return 0;
+        case IDC_LLM_PRESET2:
+            SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_PROMPT), llm::kPresetDeepFix);
+            return 0;
+        case IDC_LLM_EXTRA_RESET: {
+            int pi = FindPresetIndex(g_config.llmProvider);
+            if (pi >= 0) {
+                SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_EXTRA), llm::kProviderPresets[pi].extraParams);
+            }
+            return 0;
+        }
         default:
             break;
         }
@@ -1729,6 +2315,17 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         if (hdr && hdr->idFrom == IDC_SETTINGS_TAB && hdr->code == TCN_SELCHANGE) {
             ShowSettingsPage(hwnd, TabCtrl_GetCurSel(GetDlgItem(hwnd, IDC_SETTINGS_TAB)));
             return 0;
+        }
+        return 0;
+    }
+    case WM_APP + 10: {
+        std::unique_ptr<std::wstring> msg(reinterpret_cast<std::wstring*>(lParam));
+        if (wParam == 0) {
+            SetStatus(hwnd, msg ? msg->c_str() : L"OK");
+        } else {
+            std::wstring err = L"Connection failed: ";
+            if (msg) err += *msg;
+            SetStatus(hwnd, err.c_str());
         }
         return 0;
     }
@@ -1751,7 +2348,7 @@ void ShowSettingsWindow(HWND owner) {
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             850,
-            580,
+            640,
             owner,
             nullptr,
             g_instance,
@@ -1774,7 +2371,7 @@ void ShowTrayMenu(HWND hwnd) {
     POINT pt;
     GetCursorPos(&pt);
     HMENU menu = CreatePopupMenu();
-    AppendMenuW(menu, MF_STRING | MF_GRAYED | MF_DISABLED, ID_TRAY_VERSION, L"Version: v0.1.5");
+    AppendMenuW(menu, MF_STRING | MF_GRAYED | MF_DISABLED, ID_TRAY_VERSION, L"Version: v0.2.1");
     AppendMenuW(menu, MF_STRING, ID_TRAY_SETTINGS, L"Settings...");
     AppendMenuW(menu, MF_STRING, ID_TRAY_RELOAD, L"Reload ASR Engine");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -1808,15 +2405,34 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     case kAsrResultMessage: {
         std::unique_ptr<std::wstring> result(reinterpret_cast<std::wstring*>(lParam));
         const std::wstring text = result ? *result : L"ASR failed";
-        ShowHud(text.empty() ? L"(empty result)" : text);
-        if (wParam == 0 && !text.empty() && text.rfind(L"ASR failed:", 0) != 0) {
+        if (wParam == 1 && !text.empty() && text.rfind(L"ASR failed:", 0) != 0) {
+            g_hudIsRefining = true;
+            ShowHud(L"Refining...");
+        } else {
+            g_hudIsRefining = false;
+            ShowHud(text.empty() ? L"(empty result)" : text);
+            if (!text.empty() && text.rfind(L"ASR failed:", 0) != 0) {
+                SetClipboardText(text);
+                SendCtrlV();
+            }
+            if (g_hudWindow) {
+                const bool isError = text.rfind(L"ASR failed:", 0) == 0;
+                SetTimer(g_hudWindow, kHudHideTimer, isError ? 2200 : 200, nullptr);
+            }
+        }
+        return 0;
+    }
+    case kLlmResultMessage: {
+        std::unique_ptr<std::wstring> result(reinterpret_cast<std::wstring*>(lParam));
+        const std::wstring text = result ? *result : L"LLM failed";
+        g_hudIsRefining = false;
+        ShowHud(text);
+        if (!text.empty() && text.rfind(L"LLM failed:", 0) != 0) {
             SetClipboardText(text);
             SendCtrlV();
         }
         if (g_hudWindow) {
-            const bool isError = text.rfind(L"ASR failed:", 0) == 0;
-            const bool isStatusOnly = wParam != 0;
-            SetTimer(g_hudWindow, kHudHideTimer, isError ? 2200 : (isStatusOnly ? 1100 : 200), nullptr);
+            SetTimer(g_hudWindow, kHudHideTimer, 200, nullptr);
         }
         return 0;
     }
