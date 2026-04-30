@@ -1,14 +1,14 @@
 # Optimization Plan
 
-本文用于记录 v0.1.3 之后的优化路线。每完成一项就在对应 checkbox 打勾，并在“完成后推荐”里继续追加下一步建议。
+本文用于记录优化路线。每完成一项就在对应 checkbox 打勾，并在”完成后推荐”里继续追加下一步建议。
 
 ## 当前基线
 
-- 当前版本：`v0.1.3`
+- 当前版本：`v0.1.4`
 - 前端：单文件 Win32 C++，核心在 `main.cpp`
 - 录音：`waveIn`，16kHz mono PCM，约 100ms buffer
-- Worker：Python `asr_worker.py`，TCP JSON line，`127.0.0.1:18088`
-- 识别：录音结束后写 WAV，再请求 offline ASR
+- ASR：C++ 直接调用 sherpa-onnx（`OfflineRecognizer`、`VoiceActivityDetector`、`OfflinePunctuation`）
+- 识别：录音结束后直接调用 C++ API，无中间进程和网络开销
 - HUD：Direct2D/DirectWrite 胶囊窗，PCM RMS 驱动 5 根音量条
 - 主要限制：尚无真实 partial，剪贴板未恢复，缺少完整性能日志和可视化日志
 

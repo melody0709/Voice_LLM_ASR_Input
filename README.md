@@ -2,7 +2,7 @@
 
 Windows 11 本地 CPU 语音输入工具。当前 v1 目标不是完整 TSF/IME，而是一个托盘常驻程序：按住快捷键录音，松开后本地 ASR 识别，把最终文本粘贴到当前输入位置。
 
-当前版本：`v0.1.3`
+当前版本：`v0.1.4`
 
 ## 当前能力
 
@@ -11,8 +11,7 @@ Windows 11 本地 CPU 语音输入工具。当前 v1 目标不是完整 TSF/IME�
 - Shortcut tab 支持录入长按快捷键，默认 `CapsLock`。
 - 默认 `CapsLock` 短按正常切换大小写，长按 300ms 后才开始语音输入；语音输入结束后不会改变原来的大小写状态。
 - 打开 Settings 时暂停全局快捷键监听，方便重新录入 `CapsLock`。
-- 常驻 `asr_worker.py`，避免每次录音后重新启动 Python 和加载模型。
-- 本地 TCP JSON line 通信：`127.0.0.1:18088`。
+- **C++ 直接调用 sherpa-onnx**：无需 Python 环境，ASR/VAD/标点全部在进程内完成。
 - Direct2D/DirectWrite HUD：录音时显示底部胶囊悬浮窗，5 根音量条由实时 PCM RMS 驱动，并按 DPI 正确缩放。
 - Silero VAD int8：启用后先做人声检测，保守裁掉整段头尾静音；无人声时不加载/不运行 ASR。
 - 支持三种 ASR 模型：
@@ -24,13 +23,7 @@ Windows 11 本地 CPU 语音输入工具。当前 v1 目标不是完整 TSF/IME�
 
 ## 快速开始
 
-1. 安装 Python 依赖：
-
-```powershell
-pip install sherpa-onnx numpy
-```
-
-2. 确认模型放在 `models/` 下：
+1. 确认模型放在 `models/` 下：
 
 ```text
 models/
@@ -40,13 +33,13 @@ models/
   sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8/
 ```
 
-3. 构建：
+2. 构建：
 
 ```powershell
 .\build.bat
 ```
 
-4. 运行：
+3. 运行：
 
 ```powershell
 .\build\VoiceLLMASRInput.exe
@@ -73,11 +66,10 @@ models/
 
 ## 重要文件
 
-- `main.cpp`: Win32 托盘、Settings、Direct2D HUD、快捷键监听、录音、worker 通信、文本粘贴。
-- `asr_worker.py`: 常驻 ASR worker，负责模型加载、识别、标点后处理。
-- `asr_cli.py`: 旧的一次性 ASR CLI，主要用于调试/对照。
+- `main.cpp`: Win32 托盘、Settings、Direct2D HUD、快捷键监听、录音、ASR 引擎（sherpa-onnx C++ API）、文本粘贴。
+- `SHERPA_ONNX_CPP_RESEARCH.md`: sherpa-onnx C++ API 集成研究报告。
 - `PLAN.md`: 研究计划、模型取舍和后续路线。
-- `OPTIMIZATION_PLAN.md`: v0.1.3 之后的优化路线、完成勾选和推荐顺序。
+- `OPTIMIZATION_PLAN.md`: 优化路线、完成勾选和推荐顺序。
 - `ARCHITECTURE.md`: 当前架构说明。
 - `AGENTS.md`: 后续开发代理/协作者注意事项。
 - `build.bat`: Visual Studio 2022 编译脚本。

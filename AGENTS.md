@@ -15,9 +15,9 @@
 ## 当前技术栈
 
 - 前端：单文件 Win32 C++，主要在 `main.cpp`。
-- 后端：Python `asr_worker.py`，使用 `sherpa-onnx` 和 `numpy`。
-- 通信：本机 TCP JSON line，默认 `127.0.0.1:18088`。
+- ASR：C++ 直接调用 `sherpa-onnx-cxx-api`（`OfflineRecognizer`、`VoiceActivityDetector`、`OfflinePunctuation`）。
 - 构建：`build.bat` 调用 Visual Studio 2022 `cl` 和 `rc`。
+- 运行时 DLL：`sherpa-onnx-cxx-api.dll`、`sherpa-onnx-c-api.dll`、`onnxruntime.dll`。
 - 模型目录：`models/`，不提交到 git。
 
 ## 开发约定
@@ -29,8 +29,7 @@
   - `#pragma comment(lib, "...")`
   - `build.bat`
   - `CMakeLists.txt`
-- Win32 include 顺序要小心：
-  - `winsock2.h` 和 `ws2tcpip.h` 必须在 `windows.h` 前。
+- sherpa-onnx `cxx-api.h` 包含非 ASCII 注释，编译时需要 `/utf-8` 标志。
 - UI 修改后必须重新编译，并尽量实际打开 Settings 看是否裁切/重叠。
 - HUD 修改后要特别检查高 DPI 缩放：DirectWrite/Direct2D 使用 DIP，Win32 `SetWindowPos` 使用物理像素，二者不能混用。
 
@@ -62,23 +61,19 @@ Get-Process VoiceLLMASRInput -ErrorAction SilentlyContinue | Stop-Process -Force
 - 默认 `CapsLock` 使用 300ms 长按判定：短按交还系统切换大小写，长按录音，结束后恢复按下前 Caps Lock 状态。
 - `waveIn` 采集 16kHz mono PCM。
 - Direct2D/DirectWrite 绘制底部 HUD，5 根音量条由 `waveIn` buffer 的 RMS 实时驱动。
-- WAV 写入 `%APPDATA%\VoiceLLMASRInput\last_recording.wav`。
-- 启动/停止/重载 `asr_worker.py`。
-- 通过 TCP 发送 JSON 请求到 worker。
+- `AsrEngine` 直接调用 sherpa-onnx C++ API 完成 VAD、ASR、标点（无需 Python）。
 - 收到文本后写剪贴板并发送 `Ctrl+V`。
 
-### `asr_worker.py`
+### `AsrEngine`
 
-负责：
+C++ 类，封装 sherpa-onnx API，缓存模型实例：
 
-- 监听 `127.0.0.1:18088`。
-- 支持 `ping`、`reload`、`shutdown`、`recognize`。
-- 缓存当前 ASR recognizer，避免重复加载模型。
-- 缓存标点模型。
-- 根据 `model_id` 创建对应 `sherpa_onnx.OfflineRecognizer`。
-- 对 `<sil>`、`<blk>` 做空文本过滤。
-- 启用 VAD 时先调用 Silero VAD；只保守裁剪从第一段人声到最后一段人声之外的头尾静音。不要删除中间停顿，否则长句会漏字。无人声则直接返回空文本，不加载 ASR。
-- `postprocess in {"itn", "punct", "llm"}` 时调用本地标点模型。
+- `OfflineRecognizer`：ASR 识别（FireRedASR2 CTC/AED、SenseVoice）。
+- `VoiceActivityDetector`：Silero VAD。
+- `OfflinePunctuation`：CT-Transformer 标点。
+- 同一模型不重复加载；切换模型或 Reload 时清除缓存。
+- 启用 VAD 时保守裁剪头尾静音，中间停顿保留。无人声则直接返回空文本。
+- `postprocess` 为 `itn`/`punct`/`llm` 时启用标点模型。
 
 ## 已知 UI 注意点
 
@@ -91,38 +86,11 @@ Get-Process VoiceLLMASRInput -ErrorAction SilentlyContinue | Stop-Process -Force
 - tab 字体已故意设小，避免占用空间。
 - HUD 尺寸先按 DirectWrite 测量 DIP，再按当前窗口 DPI 转物理像素；不要直接把 DIP 当作 `SetWindowPos` 的宽高。
 
-## Worker 协议
+## ASR 引擎
 
-请求以 UTF-8 JSON 加换行发送。每次连接处理一个请求。
+v0.1.4 起移除了 Python worker，改为 C++ 直接调用 sherpa-onnx。
 
-示例：
-
-```json
-{
-  "cmd": "recognize",
-  "model_id": "firered_aed",
-  "model_dir": "D:\\...\\models\\sherpa-onnx-fire-red-asr2-zh_en-int8-2026-02-26",
-  "threads": "4",
-  "postprocess": "itn",
-  "wav": "C:\\Users\\...\\last_recording.wav"
-}
-```
-
-响应：
-
-```json
-{
-  "ok": true,
-  "text": "识别结果。",
-  "model_id": "firered_aed",
-  "loaded": false,
-  "load_ms": 0,
-  "decode_ms": 850,
-  "postprocess": "punctuation",
-  "punct_ms": 4,
-  "punct_loaded": false
-}
-```
+`AsrEngine` 类位于 `main.cpp` 内部，通过 `g_asrEngine` 全局实例访问。模型加载在后台线程完成，不阻塞 UI。
 
 ## 后续优先级建议
 

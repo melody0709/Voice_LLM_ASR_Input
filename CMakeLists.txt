@@ -5,6 +5,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
+set(SHERPA_DIR "${CMAKE_SOURCE_DIR}/runtime/Lib/site-packages/sherpa_onnx")
+
 add_executable(VoiceLLMASRInput WIN32
     main.cpp
     resources.rc
@@ -16,7 +18,16 @@ set_target_properties(VoiceLLMASRInput PROPERTIES
     WIN32_EXECUTABLE YES
 )
 
+target_include_directories(VoiceLLMASRInput PRIVATE
+    "${SHERPA_DIR}/include"
+)
+
+target_link_directories(VoiceLLMASRInput PRIVATE
+    "${SHERPA_DIR}/lib"
+)
+
 target_link_libraries(VoiceLLMASRInput
+    sherpa-onnx-cxx-api
     user32
     gdi32
     shell32
@@ -26,5 +37,4 @@ target_link_libraries(VoiceLLMASRInput
     dwrite
     shlwapi
     winmm
-    ws2_32
 )

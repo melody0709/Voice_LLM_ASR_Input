@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.1.4 (2026-04-30)
+
+### Changed
+
+- **用 C++ 直接调用 sherpa-onnx 替换 Python ASR worker**
+  - 移除 `asr_worker.py` 进程和 TCP JSON line 通信
+  - 移除 Winsock 依赖（`ws2_32.lib`）
+  - 新增 `AsrEngine` 类，直接调用 `sherpa-onnx-cxx-api` 的 `OfflineRecognizer`、`VoiceActivityDetector`、`OfflinePunctuation`
+  - 识别流程改为：录音 PCM → C++ 直接调用模型 → 返回文本，无中间进程和网络开销
+  - Reload 改为清除模型缓存，下次识别时自动重新加载
+- `build.bat` 添加 sherpa-onnx include/lib 路径，自动复制 DLL 到 build 目录
+- `CMakeLists.txt` 同步更新链接配置
+- 运行时只需 3 个 DLL：`sherpa-onnx-cxx-api.dll`、`sherpa-onnx-c-api.dll`、`onnxruntime.dll`
+- 不再需要 Python 环境和 `runtime/` 目录中的 Python 解释器
+
+### Removed
+
+- 移除 Python worker 相关代码：`StartWorkerProcess`、`StopWorkerProcess`、`SendWorkerJson`、`PingWorker` 等
+- 移除 `WriteWavFile`（不再需要写临时 WAV 文件）
+- 移除 `FindPythonExe`、`QuoteArg` 等辅助函数
+
 ## v0.1.3 (2026-04-29)
 
 ### Changed

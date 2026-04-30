@@ -2,8 +2,6 @@
 #define NOMINMAX
 #endif
 
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #include <windows.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -26,6 +24,8 @@
 #include <thread>
 #include <vector>
 
+#include "sherpa-onnx/c-api/cxx-api.h"
+
 #include "resource.h"
 
 #pragma comment(lib, "user32.lib")
@@ -36,7 +36,6 @@
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dwrite.lib")
 #pragma comment(lib, "winmm.lib")
-#pragma comment(lib, "ws2_32.lib")
 
 namespace {
 
@@ -53,7 +52,6 @@ constexpr UINT_PTR kHudHideTimer = 1;
 constexpr UINT_PTR kCapsLockLongPressTimer = 2;
 constexpr UINT_PTR kHudAnimationTimer = 3;
 constexpr UINT kCapsLockLongPressMs = 300;
-constexpr int kWorkerPort = 18088;
 constexpr int kHudMinWidth = 300;
 constexpr int kHudMinHeight = 56;
 constexpr int kHudScreenMarginX = 80;
@@ -124,9 +122,6 @@ CRITICAL_SECTION g_audioLock;
 bool g_captureActive = false;
 std::atomic<float> g_audioLevel{ 0.0f };
 float g_hudSmoothedLevel = 0.0f;
-std::mutex g_workerMutex;
-PROCESS_INFORMATION g_workerProcess = {};
-bool g_workerStarted = false;
 std::vector<HWND> g_recognitionControls;
 std::vector<HWND> g_shortcutControls;
 
@@ -373,19 +368,6 @@ std::wstring DefaultModelDir(const std::wstring& modelId) {
     return base + L"sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25";
 }
 
-std::wstring TempWavPath() {
-    return AppDataDir() + L"\\last_recording.wav";
-}
-
-std::wstring QuoteArg(const std::wstring& value) {
-    std::wstring out = L"\"";
-    for (wchar_t ch : value) {
-        if (ch == L'"') out += L"\\\"";
-        else out += ch;
-    }
-    out += L"\"";
-    return out;
-}
 
 std::wstring ExtractJsonString(const std::string& json, const std::string& key, const std::wstring& fallback) {
     const std::string marker = "\"" + key + "\"";
@@ -846,269 +828,183 @@ std::vector<BYTE> StopAudioCapture() {
     return data;
 }
 
-bool WriteWavFile(const std::wstring& path, const std::vector<BYTE>& pcm) {
-    std::ofstream file(path, std::ios::binary | std::ios::trunc);
-    if (!file) return false;
-
-    const uint32_t sampleRate = 16000;
-    const uint16_t channels = 1;
-    const uint16_t bitsPerSample = 16;
-    const uint16_t blockAlign = channels * bitsPerSample / 8;
-    const uint32_t byteRate = sampleRate * blockAlign;
-    const uint32_t dataSize = static_cast<uint32_t>(pcm.size());
-    const uint32_t riffSize = 36 + dataSize;
-
-    file.write("RIFF", 4);
-    file.write(reinterpret_cast<const char*>(&riffSize), 4);
-    file.write("WAVE", 4);
-    file.write("fmt ", 4);
-    const uint32_t fmtSize = 16;
-    const uint16_t audioFormat = 1;
-    file.write(reinterpret_cast<const char*>(&fmtSize), 4);
-    file.write(reinterpret_cast<const char*>(&audioFormat), 2);
-    file.write(reinterpret_cast<const char*>(&channels), 2);
-    file.write(reinterpret_cast<const char*>(&sampleRate), 4);
-    file.write(reinterpret_cast<const char*>(&byteRate), 4);
-    file.write(reinterpret_cast<const char*>(&blockAlign), 2);
-    file.write(reinterpret_cast<const char*>(&bitsPerSample), 2);
-    file.write("data", 4);
-    file.write(reinterpret_cast<const char*>(&dataSize), 4);
-    if (!pcm.empty()) file.write(reinterpret_cast<const char*>(pcm.data()), pcm.size());
-    return file.good();
+int ResolveThreads(const std::wstring& threads) {
+    if (threads == L"auto" || threads.empty()) {
+        int n = static_cast<int>(std::thread::hardware_concurrency());
+        return std::clamp(n < 1 ? 4 : n, 1, 8);
+    }
+    return std::clamp(_wtoi(threads.c_str()), 1, 8);
 }
 
-std::wstring RunProcessCapture(const std::wstring& commandLine, DWORD timeoutMs, DWORD& exitCode) {
-    SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };
-    HANDLE readPipe = nullptr;
-    HANDLE writePipe = nullptr;
-    exitCode = 1;
-    if (!CreatePipe(&readPipe, &writePipe, &sa, 0)) return L"";
-    SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0);
+class AsrEngine {
+public:
+    std::mutex lock;
+    std::unique_ptr<sherpa_onnx::cxx::OfflineRecognizer> recognizer;
+    std::unique_ptr<sherpa_onnx::cxx::VoiceActivityDetector> vad;
+    std::unique_ptr<sherpa_onnx::cxx::OfflinePunctuation> punctuation;
+    std::string recognizerKey;
+    std::string vadKey;
+    std::string punctKey;
 
-    STARTUPINFOW si = { sizeof(si) };
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdOutput = writePipe;
-    si.hStdError = writePipe;
-    PROCESS_INFORMATION pi = {};
-    std::wstring mutableCommand = commandLine;
-
-    BOOL ok = CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, AppRootDir().c_str(), &si, &pi);
-    CloseHandle(writePipe);
-    if (!ok) {
-        CloseHandle(readPipe);
-        return L"Failed to start python ASR script";
+    std::string MakeKey(const std::wstring& modelId, const std::wstring& modelDir, int threads) {
+        return WideToUtf8(modelId) + "|" + WideToUtf8(modelDir) + "|" + std::to_string(threads);
     }
 
-    std::string output;
-    char buffer[4096];
-    DWORD read = 0;
-    while (ReadFile(readPipe, buffer, sizeof(buffer), &read, nullptr) && read > 0) {
-        output.append(buffer, buffer + read);
-    }
-    CloseHandle(readPipe);
+    bool EnsureRecognizer(const Config& config) {
+        const std::wstring modelDir = config.modelDir.empty() ? DefaultModelDir(config.modelId) : config.modelDir;
+        const int threads = ResolveThreads(config.threads);
+        const std::string key = MakeKey(config.modelId, modelDir, threads);
+        if (recognizer && recognizerKey == key) return true;
 
-    DWORD waitResult = WaitForSingleObject(pi.hProcess, timeoutMs);
-    if (waitResult == WAIT_TIMEOUT) {
-        TerminateProcess(pi.hProcess, 2);
-        output += "\nASR timeout";
-    }
-    GetExitCodeProcess(pi.hProcess, &exitCode);
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    return Utf8ToWide(output);
-}
+        sherpa_onnx::cxx::OfflineRecognizerConfig rc;
+        rc.model_config.tokens = WideToUtf8(modelDir) + "\\tokens.txt";
+        rc.model_config.num_threads = threads;
+        rc.model_config.debug = false;
 
-void CloseWorkerHandlesLocked() {
-    if (g_workerProcess.hThread) {
-        CloseHandle(g_workerProcess.hThread);
-    }
-    if (g_workerProcess.hProcess) {
-        CloseHandle(g_workerProcess.hProcess);
-    }
-    g_workerProcess = {};
-    g_workerStarted = false;
-}
-
-bool WorkerAliveLocked() {
-    if (!g_workerStarted || !g_workerProcess.hProcess) return false;
-    DWORD exitCode = 0;
-    if (!GetExitCodeProcess(g_workerProcess.hProcess, &exitCode) || exitCode != STILL_ACTIVE) {
-        CloseWorkerHandlesLocked();
-        return false;
-    }
-    return true;
-}
-
-std::string SendWorkerJson(const std::string& request, DWORD timeoutMs) {
-    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock == INVALID_SOCKET) return {};
-
-    const DWORD timeout = timeoutMs;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
-
-    sockaddr_in addr = {};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(kWorkerPort);
-    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
-
-    if (connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
-        closesocket(sock);
-        return {};
-    }
-
-    std::string payload = request;
-    if (payload.empty() || payload.back() != '\n') payload.push_back('\n');
-
-    const char* data = payload.data();
-    int remaining = static_cast<int>(payload.size());
-    while (remaining > 0) {
-        const int sent = send(sock, data, remaining, 0);
-        if (sent <= 0) {
-            closesocket(sock);
-            return {};
+        if (config.modelId == L"firered_ctc") {
+            rc.model_config.fire_red_asr_ctc.model = WideToUtf8(modelDir) + "\\model.int8.onnx";
+        } else if (config.modelId == L"firered_aed") {
+            rc.model_config.fire_red_asr.encoder = WideToUtf8(modelDir) + "\\encoder.int8.onnx";
+            rc.model_config.fire_red_asr.decoder = WideToUtf8(modelDir) + "\\decoder.int8.onnx";
+        } else if (config.modelId == L"sensevoice") {
+            rc.model_config.sense_voice.model = WideToUtf8(modelDir) + "\\model.int8.onnx";
+            rc.model_config.sense_voice.use_itn = true;
         }
-        data += sent;
-        remaining -= sent;
-    }
-    shutdown(sock, SD_SEND);
 
-    std::string response;
-    char buffer[4096];
-    while (true) {
-        const int received = recv(sock, buffer, sizeof(buffer), 0);
-        if (received <= 0) break;
-        response.append(buffer, buffer + received);
-        if (response.find('\n') != std::string::npos) break;
-    }
-    closesocket(sock);
-    return response;
-}
-
-bool PingWorker() {
-    const std::string response = SendWorkerJson("{\"cmd\":\"ping\"}", 1000);
-    return ExtractJsonBool(response, "ok", false);
-}
-
-std::wstring FindPythonExe() {
-    const std::wstring runtimeExe = AppRootDir() + L"\\runtime\\python.exe";
-    if (GetFileAttributesW(runtimeExe.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        return runtimeExe;
-    }
-    return L"python";
-}
-
-bool StartWorkerProcess() {
-    if (PingWorker()) return true;
-
-    {
-        std::lock_guard<std::mutex> guard(g_workerMutex);
-        if (!WorkerAliveLocked()) {
-            const std::wstring script = AppRootDir() + L"\\asr_worker.py";
-            std::wstring command =
-                QuoteArg(FindPythonExe()) + L" " + QuoteArg(script) +
-                L" --host 127.0.0.1 --port " + std::to_wstring(kWorkerPort);
-
-            STARTUPINFOW si = { sizeof(si) };
-            PROCESS_INFORMATION pi = {};
-            std::wstring mutableCommand = command;
-            BOOL ok = CreateProcessW(
-                nullptr,
-                mutableCommand.data(),
-                nullptr,
-                nullptr,
-                FALSE,
-                CREATE_NO_WINDOW,
-                nullptr,
-                AppRootDir().c_str(),
-                &si,
-                &pi);
-            if (!ok) return false;
-            g_workerProcess = pi;
-            g_workerStarted = true;
-        }
+        auto r = sherpa_onnx::cxx::OfflineRecognizer::Create(rc);
+        if (!r.Get()) return false;
+        recognizer = std::make_unique<sherpa_onnx::cxx::OfflineRecognizer>(std::move(r));
+        recognizerKey = key;
+        return true;
     }
 
-    const DWORD started = GetTickCount();
-    while (GetTickCount() - started < 7000) {
-        if (PingWorker()) return true;
+    bool EnsureVad(int threads) {
+        const std::string key = "vad|" + std::to_string(threads);
+        if (vad && vadKey == key) return true;
+
+        const std::wstring vadPath = AppRootDir() + L"\\models\\silero_vad.int8.onnx";
+        if (GetFileAttributesW(vadPath.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
+
+        sherpa_onnx::cxx::VadModelConfig vc;
+        vc.silero_vad.model = WideToUtf8(vadPath);
+        vc.silero_vad.threshold = 0.5f;
+        vc.silero_vad.min_silence_duration = 0.25f;
+        vc.silero_vad.min_speech_duration = 0.25f;
+        vc.silero_vad.max_speech_duration = 30.0f;
+        vc.silero_vad.window_size = 512;
+        vc.sample_rate = 16000;
+        vc.num_threads = threads;
+
+        auto v = sherpa_onnx::cxx::VoiceActivityDetector::Create(vc, 600.0f);
+        if (!v.Get()) return false;
+        vad = std::make_unique<sherpa_onnx::cxx::VoiceActivityDetector>(std::move(v));
+        vadKey = key;
+        return true;
+    }
+
+    bool EnsurePunctuation(int threads) {
+        const std::string key = "punct|" + std::to_string(threads);
+        if (punctuation && punctKey == key) return true;
+
+        const std::wstring punctPath = AppRootDir() +
+            L"\\models\\sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8\\model.int8.onnx";
+        if (GetFileAttributesW(punctPath.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
+
+        sherpa_onnx::cxx::OfflinePunctuationConfig pc;
+        pc.model.ct_transformer = WideToUtf8(punctPath);
+        pc.model.num_threads = threads;
+
+        auto p = sherpa_onnx::cxx::OfflinePunctuation::Create(pc);
+        if (!p.Get()) return false;
+        punctuation = std::make_unique<sherpa_onnx::cxx::OfflinePunctuation>(std::move(p));
+        punctKey = key;
+        return true;
+    }
+
+    std::wstring Recognize(const std::vector<float>& samples, int sampleRate, const Config& config) {
+        const int threads = ResolveThreads(config.threads);
+
         {
-            std::lock_guard<std::mutex> guard(g_workerMutex);
-            if (g_workerStarted && !WorkerAliveLocked()) return false;
-        }
-        Sleep(150);
-    }
-    return PingWorker();
-}
-
-void StopWorkerProcess() {
-    bool shouldShutdown = false;
-    {
-        std::lock_guard<std::mutex> guard(g_workerMutex);
-        shouldShutdown = g_workerStarted;
-    }
-    if (shouldShutdown) {
-        SendWorkerJson("{\"cmd\":\"shutdown\"}", 1000);
-    }
-
-    std::lock_guard<std::mutex> guard(g_workerMutex);
-    if (g_workerStarted && g_workerProcess.hProcess) {
-        DWORD waitResult = WaitForSingleObject(g_workerProcess.hProcess, 2000);
-        if (waitResult == WAIT_TIMEOUT) {
-            TerminateProcess(g_workerProcess.hProcess, 0);
-            WaitForSingleObject(g_workerProcess.hProcess, 1000);
-        }
-    }
-    CloseWorkerHandlesLocked();
-}
-
-bool ReloadWorker() {
-    if (!StartWorkerProcess()) return false;
-    const std::string response = SendWorkerJson("{\"cmd\":\"reload\"}", 2000);
-    return ExtractJsonBool(response, "ok", false);
-}
-
-std::string BuildRecognizeRequest(const Config& config, const std::wstring& wavPath) {
-    const std::wstring modelDir = config.modelDir.empty() ? DefaultModelDir(config.modelId) : config.modelDir;
-    return std::string("{\"cmd\":\"recognize\"") +
-        ",\"model_id\":\"" + EscapeJson(config.modelId) + "\"" +
-        ",\"model_dir\":\"" + EscapeJson(modelDir) + "\"" +
-        ",\"threads\":\"" + EscapeJson(config.threads) + "\"" +
-        ",\"enable_vad\":" + std::string(config.enableVad ? "true" : "false") +
-        ",\"postprocess\":\"" + EscapeJson(config.postprocess) + "\"" +
-        ",\"wav\":\"" + EscapeJson(wavPath) + "\"}";
-}
-
-std::wstring ExtractAsrText(const std::wstring& output, bool& ok) {
-    const std::string utf8 = WideToUtf8(output);
-    ok = ExtractJsonBool(utf8, "ok", false);
-    if (ok) {
-        return ExtractJsonString(utf8, "text", L"");
-    }
-    return ExtractJsonString(utf8, "error", L"ASR failed");
-}
-
-void RecognizeAsync(const std::wstring& wavPath) {
-    const Config config = g_config;
-    std::thread([config, wavPath]() {
-        if (!StartWorkerProcess()) {
-            PostMessageW(g_mainWindow, kAsrResultMessage, 0, reinterpret_cast<LPARAM>(new std::wstring(L"ASR failed: worker did not start")));
-            return;
+            std::lock_guard<std::mutex> g(lock);
+            if (!EnsureRecognizer(config)) return L"ASR failed: model load error";
         }
 
-        std::string response = SendWorkerJson(BuildRecognizeRequest(config, wavPath), 120000);
-        if (response.empty()) {
-            StopWorkerProcess();
-            if (StartWorkerProcess()) {
-                response = SendWorkerJson(BuildRecognizeRequest(config, wavPath), 120000);
+        std::vector<float> workSamples = samples;
+
+        if (config.enableVad && workSamples.size() > 0) {
+            std::lock_guard<std::mutex> g(lock);
+            if (EnsureVad(threads)) {
+                vad->Reset();
+                const size_t windowSize = 512;
+                for (size_t i = 0; i < workSamples.size(); i += windowSize) {
+                    size_t end = std::min(i + windowSize, workSamples.size());
+                    vad->AcceptWaveform(workSamples.data() + i, static_cast<int32_t>(end - i));
+                }
+                vad->Flush();
+
+                if (!vad->IsEmpty()) {
+                    auto seg = vad->Front();
+                    workSamples = std::move(seg.samples);
+                }
             }
         }
 
-        bool ok = false;
-        ok = ExtractJsonBool(response, "ok", false);
-        std::wstring text = ok ? ExtractJsonString(response, "text", L"") : ExtractJsonString(response, "error", L"ASR worker pending");
-        if (!ok) {
-            text = L"ASR failed: " + text;
+        if (workSamples.empty()) return L"";
+
+        std::wstring text;
+        {
+            std::lock_guard<std::mutex> g(lock);
+            auto stream = recognizer->CreateStream();
+            stream.AcceptWaveform(sampleRate, workSamples.data(), static_cast<int32_t>(workSamples.size()));
+            recognizer->Decode(&stream);
+            auto result = recognizer->GetResult(&stream);
+            text = Utf8ToWide(result.text);
+        }
+
+        if (text == L"<sil>" || text == L"<blk>") return L"";
+
+        if (config.postprocess == L"itn" || config.postprocess == L"punct" || config.postprocess == L"llm") {
+            std::lock_guard<std::mutex> g(lock);
+            if (EnsurePunctuation(threads)) {
+                std::string utf8 = WideToUtf8(text);
+                std::string punctuated = punctuation->AddPunctuation(utf8);
+                text = Utf8ToWide(punctuated);
+            }
+        }
+
+        return text;
+    }
+
+    void Reload() {
+        std::lock_guard<std::mutex> g(lock);
+        recognizer.reset();
+        vad.reset();
+        punctuation.reset();
+        recognizerKey.clear();
+        vadKey.clear();
+        punctKey.clear();
+    }
+};
+
+AsrEngine g_asrEngine;
+
+std::vector<float> PcmToFloat(const std::vector<BYTE>& pcm) {
+    const size_t count = pcm.size() / 2;
+    std::vector<float> samples(count);
+    const auto* raw = reinterpret_cast<const int16_t*>(pcm.data());
+    for (size_t i = 0; i < count; ++i) {
+        samples[i] = static_cast<float>(raw[i]) / 32768.0f;
+    }
+    return samples;
+}
+
+void RecognizeAsync(const std::vector<BYTE>& pcm) {
+    const Config config = g_config;
+    std::thread([config, pcm]() {
+        auto samples = PcmToFloat(pcm);
+        std::wstring text = g_asrEngine.Recognize(samples, 16000, config);
+        if (text.empty()) {
+            text = L"(empty result)";
         }
         PostMessageW(g_mainWindow, kAsrResultMessage, 0, reinterpret_cast<LPARAM>(new std::wstring(text)));
     }).detach();
@@ -1136,15 +1032,8 @@ void StopRecordingSession() {
         return;
     }
 
-    const std::wstring wavPath = TempWavPath();
-    if (!WriteWavFile(wavPath, pcm)) {
-        ShowHud(L"Failed to save recording");
-        SetTimer(g_hudWindow, kHudHideTimer, 1800, nullptr);
-        return;
-    }
-
     ShowHud(L"Recognizing... " + ModelDisplayName(g_config.modelId));
-    RecognizeAsync(wavPath);
+    RecognizeAsync(pcm);
 }
 
 void ResetCapsLockHotkeyState() {
@@ -1482,7 +1371,7 @@ void LoadSettingsControls(HWND hwnd) {
         hotkeyState->original = hotkeyState->hotkey;
         InvalidateRect(hotkeyEdit, nullptr, TRUE);
     }
-    SetStatus(hwnd, L"Ready. Save reloads the local ASR worker settings.");
+    SetStatus(hwnd, L"Ready.");
 }
 
 std::wstring ComboText(HWND combo) {
@@ -1513,7 +1402,7 @@ void SaveSettingsControls(HWND hwnd) {
     g_config.hotkey = HotkeyToString(hotkey);
 
     SaveConfig();
-    SetStatus(hwnd, L"Saved. Worker reload requested.");
+    SetStatus(hwnd, L"Saved. ASR engine reloaded.");
     PostMessageW(g_mainWindow, kReloadMessage, 0, 0);
 }
 
@@ -1833,9 +1722,9 @@ void ShowTrayMenu(HWND hwnd) {
     POINT pt;
     GetCursorPos(&pt);
     HMENU menu = CreatePopupMenu();
-    AppendMenuW(menu, MF_STRING | MF_GRAYED | MF_DISABLED, ID_TRAY_VERSION, L"Version: v0.1.3");
+    AppendMenuW(menu, MF_STRING | MF_GRAYED | MF_DISABLED, ID_TRAY_VERSION, L"Version: v0.1.4");
     AppendMenuW(menu, MF_STRING, ID_TRAY_SETTINGS, L"Settings...");
-    AppendMenuW(menu, MF_STRING, ID_TRAY_RELOAD, L"Reload ASR Worker");
+    AppendMenuW(menu, MF_STRING, ID_TRAY_RELOAD, L"Reload ASR Engine");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, ID_TRAY_QUIT, L"Quit");
     SetForegroundWindow(hwnd);
@@ -1851,7 +1740,6 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     case WM_CREATE:
         AddTrayIcon(hwnd);
         InstallKeyboardHook();
-        std::thread([]() { StartWorkerProcess(); }).detach();
         return 0;
     case kTrayMessage:
         if (LOWORD(lParam) == WM_RBUTTONUP || LOWORD(lParam) == WM_CONTEXTMENU) {
@@ -1861,17 +1749,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         return 0;
     case kReloadMessage:
-        {
-            const std::wstring modelId = g_config.modelId;
-            std::thread([modelId]() {
-            const bool ok = ReloadWorker();
-            const std::wstring text = ok
-                ? L"ASR worker reloaded: " + ModelDisplayName(modelId)
-                : L"ASR worker reload failed";
-            PostMessageW(g_mainWindow, kAsrResultMessage, 1, reinterpret_cast<LPARAM>(new std::wstring(text)));
-            }).detach();
-        }
-        ShowHud(L"Reloading ASR worker...");
+        g_asrEngine.Reload();
+        ShowHud(L"ASR engine reloaded: " + ModelDisplayName(g_config.modelId));
         SetTimer(g_hudWindow, kHudHideTimer, 1200, nullptr);
         return 0;
     case kAsrResultMessage: {
@@ -1918,7 +1797,6 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         g_captureActive = false;
         StopAudioCapture();
         UninstallKeyboardHook();
-        StopWorkerProcess();
         RemoveTrayIcon(hwnd);
         PostQuitMessage(0);
         return 0;
@@ -1969,13 +1847,6 @@ bool RegisterWindowClasses() {
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     g_instance = instance;
     InitializeCriticalSection(&g_audioLock);
-    WSADATA wsaData = {};
-    const bool winsockReady = WSAStartup(MAKEWORD(2, 2), &wsaData) == 0;
-    if (!winsockReady) {
-        MessageBoxW(nullptr, L"Failed to initialize local ASR worker network.", kAppName, MB_OK | MB_ICONERROR);
-        DeleteCriticalSection(&g_audioLock);
-        return 1;
-    }
     InitCommonControls();
     g_appIcon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_APP_ICON));
     if (!g_appIcon) {
@@ -1989,7 +1860,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
         MessageBoxW(nullptr, L"Voice LLM ASR Input is already running.", kAppName, MB_OK | MB_ICONINFORMATION);
         CloseHandle(mutex);
-        WSACleanup();
         DeleteUiResources();
         DeleteCriticalSection(&g_audioLock);
         return 0;
@@ -1997,7 +1867,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     if (!RegisterWindowClasses()) {
         MessageBoxW(nullptr, L"Failed to register window classes.", kAppName, MB_OK | MB_ICONERROR);
-        WSACleanup();
         DeleteUiResources();
         DeleteCriticalSection(&g_audioLock);
         return 1;
@@ -2019,8 +1888,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     if (!g_mainWindow) {
         MessageBoxW(nullptr, L"Failed to create main window.", kAppName, MB_OK | MB_ICONERROR);
-        StopWorkerProcess();
-        WSACleanup();
         DeleteUiResources();
         DeleteCriticalSection(&g_audioLock);
         return 1;
@@ -2036,7 +1903,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         ReleaseMutex(mutex);
         CloseHandle(mutex);
     }
-    WSACleanup();
     DeleteUiResources();
     DeleteCriticalSection(&g_audioLock);
     return static_cast<int>(msg.wParam);

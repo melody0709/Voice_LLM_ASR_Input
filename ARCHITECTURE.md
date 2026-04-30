@@ -8,14 +8,11 @@
 flowchart LR
     User["用户长按快捷键"] --> Frontend["VoiceLLMASRInput.exe<br/>Win32 托盘前端"]
     Frontend --> Recorder["waveIn 录音<br/>16kHz mono PCM"]
-    Recorder --> Wav["last_recording.wav"]
-    Frontend --> Worker["asr_worker.py<br/>127.0.0.1:18088"]
-    Wav --> Worker
-    Worker --> VAD["Silero VAD<br/>trim/no speech"]
+    Recorder --> Engine["AsrEngine (C++)<br/>sherpa-onnx-cxx-api"]
+    Engine --> VAD["Silero VAD<br/>trim/no speech"]
     VAD --> ASR["sherpa-onnx ASR<br/>FireRed/SenseVoice"]
     ASR --> Punct["CT-Transformer 标点"]
-    Punct --> Worker
-    Worker --> Frontend
+    Punct --> Frontend
     Frontend --> Inject["剪贴板 + Ctrl+V"]
 ```
 
@@ -23,28 +20,17 @@ flowchart LR
 
 ### `VoiceLLMASRInput.exe`
 
-主进程。职责：
+单进程。职责：
 
 - 单实例运行。
 - 注册托盘图标。
 - 显示 Settings。
 - 监听全局快捷键。
 - 采集麦克风音频。
-- 管理 ASR worker 生命周期。
-- 向 worker 发送识别请求。
+- 通过 `AsrEngine` 直接调用 sherpa-onnx C++ API 完成 VAD、ASR、标点。
 - 将最终文本注入当前应用。
 
-### `asr_worker.py`
-
-子进程。由 C++ 主进程隐藏启动。职责：
-
-- 监听本机 TCP。
-- 加载并缓存当前 ASR 模型。
-- 加载并缓存标点模型。
-- 读取 WAV。
-- 返回识别文本和耗时信息。
-
-worker 的存在是为了避免每次录音都重新启动 Python 和加载 ONNX 模型。第一次使用某个模型仍然需要加载，后续同模型会复用。
+`AsrEngine` 内部缓存 `OfflineRecognizer`、`VoiceActivityDetector`、`OfflinePunctuation`，同一模型不会重复加载。
 
 ## 主要模块
 
@@ -137,24 +123,20 @@ models/silero_vad.int8.onnx
 - 没检测到语音时直接返回空文本，不加载 ASR 模型。
 - 响应里包含 `vad_ms`、`vad_segments`、`speech_ms`，用于性能测试。
 
-### Worker 通信
+### ASR 引擎
 
-C++ 使用 Winsock 连接：
+`AsrEngine` 类（`main.cpp` 内部）封装 sherpa-onnx C++ API：
 
-```text
-127.0.0.1:18088
-```
+- `OfflineRecognizer`：ASR 识别（FireRedASR2 CTC/AED、SenseVoice）
+- `VoiceActivityDetector`：Silero VAD
+- `OfflinePunctuation`：CT-Transformer 标点
 
-协议是 JSON line：一个连接发送一条 JSON，以 `\n` 结尾；worker 返回一条 JSON，以 `\n` 结尾。
+模型加载后缓存，同一配置不会重复加载。切换模型或 Reload 时清除缓存，下次识别自动重新加载。
 
-支持命令：
-
-- `ping`
-- `reload`
-- `shutdown`
-- `recognize`
-
-`reload` 会清空 ASR 模型缓存和标点模型缓存。
+运行时 DLL 依赖：
+- `sherpa-onnx-cxx-api.dll`
+- `sherpa-onnx-c-api.dll`
+- `onnxruntime.dll`
 
 ### 模型适配
 
@@ -253,13 +235,13 @@ LLM 必须默认关闭，并加入：
 - 数字、路径、URL、代码保护。
 - 失败直接使用 ASR 原文。
 
-### Worker 形态
+### 架构演进
 
-当前 Python worker 适合快速实验。稳定后可以考虑：
+当前已是纯 C++ 单进程架构。后续可考虑：
 
-- 继续 Python，但增加日志和模型下载管理。
-- C++ worker 直接链接 sherpa-onnx，减少 Python 依赖。
-- Rust/C++ service，前端保持薄 UI。
+- 流式 ASR：更换支持 `OnlineRecognizer` 的模型（如 Paraformer 流式版、Zipformer2 CTC）。
+- WebSocket 或长连接协议，支持音频流式传输。
+- Rust/C++ 独立服务，前端保持薄 UI。
 
 ## 风险点
 
