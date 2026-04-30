@@ -40,7 +40,8 @@
       "Bash(cmd //c build_test.bat)",
       "Bash(cmd //c \"set PATH=%CD%;%PATH% && test_firered.exe ../models/sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25/test_wavs/0.wav ../models/fireredvad_stream_vad_with_cache.onnx 0.5\")",
       "WebFetch(domain:raw.githubusercontent.com)",
-      "Bash(cmd //c \"set PATH=%CD%;%PATH% && test_firered.exe ../models/Recording.wav ../models/fireredvad_stream_vad_with_cache.onnx 0.5\")"
+      "Bash(cmd //c \"set PATH=%CD%;%PATH% && test_firered.exe ../models/Recording.wav ../models/fireredvad_stream_vad_with_cache.onnx 0.5\")",
+      "Bash(git rm *)"
     ]
   }
 }

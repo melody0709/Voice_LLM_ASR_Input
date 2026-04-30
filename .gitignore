@@ -2,6 +2,8 @@ build/
 models/
 runtime/
 
+.claude/
+
 *.user
 *.suo
 *.obj

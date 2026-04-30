@@ -71,13 +71,17 @@ models/
 ## 重要文件
 
 - `main.cpp`: Win32 托盘、Settings、Direct2D HUD、快捷键监听、录音、ASR 引擎（sherpa-onnx C++ API）、文本粘贴。
-- `SHERPA_ONNX_CPP_RESEARCH.md`: sherpa-onnx C++ API 集成研究报告。
-- `PLAN.md`: 研究计划、模型取舍和后续路线。
-- `OPTIMIZATION_PLAN.md`: 优化路线、完成勾选和推荐顺序。
+- `firered_vad.h`: FireRedVAD 模块（fbank 特征提取 + ONNX 流式推理）。
 - `ARCHITECTURE.md`: 当前架构说明。
 - `AGENTS.md`: 后续开发代理/协作者注意事项。
+- `CHANGELOG.md`: 版本变更记录。
 - `build.bat`: Visual Studio 2022 编译脚本。
 - `resources.rc`, `resource.h`, `app.ico`, `app.manifest`: Windows 资源和图标。
+
+归档文档在 `.plan/` 目录（不提交 git）：
+
+- `.plan/complete/`: 已完成的研究和规划（FireRedVAD 接入、sherpa-onnx C++ 集成等）。
+- `.plan/ongoing/OPTIMIZATION_PLAN.md`: 后续优化路线。
 
 ## 当前限制
 
