@@ -990,6 +990,14 @@ bool PingWorker() {
     return ExtractJsonBool(response, "ok", false);
 }
 
+std::wstring FindPythonExe() {
+    const std::wstring runtimeExe = AppRootDir() + L"\\runtime\\python.exe";
+    if (GetFileAttributesW(runtimeExe.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        return runtimeExe;
+    }
+    return L"python";
+}
+
 bool StartWorkerProcess() {
     if (PingWorker()) return true;
 
@@ -998,7 +1006,7 @@ bool StartWorkerProcess() {
         if (!WorkerAliveLocked()) {
             const std::wstring script = AppRootDir() + L"\\asr_worker.py";
             std::wstring command =
-                L"python " + QuoteArg(script) +
+                QuoteArg(FindPythonExe()) + L" " + QuoteArg(script) +
                 L" --host 127.0.0.1 --port " + std::to_wstring(kWorkerPort);
 
             STARTUPINFOW si = { sizeof(si) };

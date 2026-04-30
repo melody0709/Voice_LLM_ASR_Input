@@ -1,5 +1,6 @@
 build/
 models/
+runtime/
 *.user
 *.suo
 *.obj
@@ -10,3 +11,4 @@ models/
 .bak
 __pycache__/
 .serena/
+python-embed.zip
