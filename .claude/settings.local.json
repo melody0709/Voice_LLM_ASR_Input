@@ -20,7 +20,27 @@
       "Bash(cat build_stdout.txt)",
       "Bash(cat build_stderr.txt)",
       "WebFetch(domain:github.com)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/microsoft/onnxruntime/v1.24.4/include/onnxruntime_c_api.h\" -o third_party/onnxruntime/include/onnxruntime_c_api.h)",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/FireRedTeam/FireRedVAD/main/pretrained_models/onnx_models/fireredvad_stream_vad.onnx\" -o models/fireredvad_stream_vad.onnx)",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/FireRedTeam/FireRedVAD/main/pretrained_models/onnx_models/cmvn.ark\" -o models/cmvn.ark)",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/microsoft/onnxruntime/rel-1.24.4/include/onnxruntime_c_api.h\" -o third_party/onnxruntime/include/onnxruntime_c_api.h)",
+      "Bash(curl *)",
+      "Bash(python -c \"import sys; sys.path.insert\\(0, 'runtime/Lib/site-packages'\\); import onnxruntime as ort; print\\(ort.__version__\\)\")",
+      "Bash(pip install *)",
+      "Bash(python -c ' *)",
+      "Bash(rm -f build_stdout.txt build_stderr.txt)",
+      "Bash(dumpbin /exports build/onnxruntime.dll)",
+      "Bash(python *)",
+      "Bash(cp -r \"C:\\\\ProgramData\\\\miniconda3\\\\Lib\\\\site-packages\\\\kaldi_native_fbank\\\\include\\\\kaldi-native-fbank\" third_party/kaldi_native_fbank/include/)",
+      "Bash(cp \"C:\\\\ProgramData\\\\miniconda3\\\\Lib\\\\site-packages\\\\kaldi_native_fbank\\\\lib\\\\kaldi-native-fbank-core.lib\" third_party/kaldi_native_fbank/lib/)",
+      "Bash(cp \"C:\\\\ProgramData\\\\miniconda3\\\\Lib\\\\site-packages\\\\kaldi_native_fbank\\\\lib\\\\kaldi-native-fbank-core.dll\" build/)",
+      "Bash(./build.bat)",
+      "Bash(cmd /c 'call \"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\VC\\\\Auxiliary\\\\Build\\\\vcvars64.bat\" >nul 2>&1 && cl /nologo /O2 /EHsc /MT /std:c++17 /utf-8 /D_CRT_SECURE_NO_WARNINGS /I\"runtime/Lib/site-packages/sherpa_onnx/include\" /I\"third_party/onnxruntime/include\" /I\"third_party/kaldi_native_fbank/include\" /Fe:build/test_firered.exe test_firered.cpp /link /LIBPATH:\"third_party/onnxruntime\" /LIBPATH:\"third_party/kaldi_native_fbank/lib\" onnxruntime.lib kaldi-native-fbank-core.lib /OUT:build/test_firered.exe')",
+      "Bash(cmd //c build_test.bat)",
+      "Bash(cmd //c \"set PATH=%CD%;%PATH% && test_firered.exe ../models/sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25/test_wavs/0.wav ../models/fireredvad_stream_vad_with_cache.onnx 0.5\")",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(cmd //c \"set PATH=%CD%;%PATH% && test_firered.exe ../models/Recording.wav ../models/fireredvad_stream_vad_with_cache.onnx 0.5\")"
     ]
   }
 }

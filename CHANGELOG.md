@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.1.5 (2026-04-30)
+
+### Added
+
+- **FireRedVAD 接入**：Settings 新增 VAD 模型下拉框，可在 Silero VAD 和 FireRed VAD 之间切换
+  - 新增 `firered_vad.h` header-only 模块：使用 `kaldi_native_fbank` 提取 80 维 fbank 特征 + `onnxruntime` 加载 DFSMN 流式模型
+  - FireRedVAD 准确率显著优于 Silero VAD（F1 97.57 vs 95.95，误报率 2.69% vs 9.41%），模型仅 2.2MB
+  - 新增 `third_party/kaldi_native_fbank/` 和 `third_party/onnxruntime/` 依赖
+  - `build.bat` 和 `CMakeLists.txt` 同步更新链接配置
+  - 运行时新增 DLL：`kaldi-native-fbank-core.dll`
+
+### Fixed
+
+- 修复 FireRedVAD 无法检测语音的问题：音频需要 int16 范围（-32768~32767），而非归一化 float（-1.0~1.0），fbank 特征提取前需乘以 32768
+
 ## v0.1.4 (2026-04-30)
 
 ### Changed

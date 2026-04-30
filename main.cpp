@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "sherpa-onnx/c-api/cxx-api.h"
+#include "firered_vad.h"
 
 #include "resource.h"
 
@@ -79,12 +80,14 @@ constexpr int IDC_SAVE = 2009;
 constexpr int IDC_CANCEL = 2010;
 constexpr int IDC_STATUS = 2011;
 constexpr int IDC_SETTINGS_TAB = 2012;
+constexpr int IDC_VAD_MODEL = 2013;
 
 struct Config {
     std::wstring modelId = L"firered_ctc";
     std::wstring modelDir;
     std::wstring threads = L"auto";
     bool enableVad = true;
+    std::wstring vadModel = L"silero"; // "silero" | "firered"
     bool enablePartial = true;
     std::wstring postprocess = L"itn";
     std::wstring hotkey = L"CapsLock";
@@ -423,6 +426,7 @@ void LoadConfig() {
     g_config.modelDir = ExtractJsonString(json, "model_dir", g_config.modelDir);
     g_config.threads = ExtractJsonString(json, "threads", g_config.threads);
     g_config.enableVad = ExtractJsonBool(json, "enable_vad", g_config.enableVad);
+    g_config.vadModel = ExtractJsonString(json, "vad_model", g_config.vadModel);
     g_config.enablePartial = ExtractJsonBool(json, "enable_partial", g_config.enablePartial);
     g_config.postprocess = ExtractJsonString(json, "postprocess", g_config.postprocess);
     g_config.hotkey = ExtractJsonString(json, "hotkey", g_config.hotkey);
@@ -438,6 +442,7 @@ void SaveConfig() {
          << "  \"model_dir\": \"" << EscapeJson(g_config.modelDir) << "\",\n"
          << "  \"threads\": \"" << EscapeJson(g_config.threads) << "\",\n"
          << "  \"enable_vad\": " << (g_config.enableVad ? "true" : "false") << ",\n"
+         << "  \"vad_model\": \"" << EscapeJson(g_config.vadModel) << "\",\n"
          << "  \"enable_partial\": " << (g_config.enablePartial ? "true" : "false") << ",\n"
          << "  \"postprocess\": \"" << EscapeJson(g_config.postprocess) << "\",\n"
          << "  \"hotkey\": \"" << EscapeJson(g_config.hotkey) << "\"\n"
@@ -842,8 +847,10 @@ public:
     std::unique_ptr<sherpa_onnx::cxx::OfflineRecognizer> recognizer;
     std::unique_ptr<sherpa_onnx::cxx::VoiceActivityDetector> vad;
     std::unique_ptr<sherpa_onnx::cxx::OfflinePunctuation> punctuation;
+    std::unique_ptr<firered_vad::FireRedVad> fireRedVad;
     std::string recognizerKey;
     std::string vadKey;
+    std::string fireRedVadKey;
     std::string punctKey;
 
     std::string MakeKey(const std::wstring& modelId, const std::wstring& modelDir, int threads) {
@@ -902,6 +909,21 @@ public:
         return true;
     }
 
+    bool EnsureFireRedVad() {
+        const std::string key = "firered_vad";
+        if (fireRedVad && fireRedVadKey == key) return true;
+
+        firered_vad::FireRedVadConfig cfg;
+        cfg.modelPath = WideToUtf8(AppRootDir() + L"\\models\\fireredvad_stream_vad_with_cache.onnx");
+        if (GetFileAttributesW(Utf8ToWide(cfg.modelPath).c_str()) == INVALID_FILE_ATTRIBUTES) return false;
+
+        auto v = firered_vad::FireRedVad::Create(cfg);
+        if (!v) return false;
+        fireRedVad = std::move(v);
+        fireRedVadKey = key;
+        return true;
+    }
+
     bool EnsurePunctuation(int threads) {
         const std::string key = "punct|" + std::to_string(threads);
         if (punctuation && punctKey == key) return true;
@@ -932,19 +954,28 @@ public:
         std::vector<float> workSamples = samples;
 
         if (config.enableVad && workSamples.size() > 0) {
-            std::lock_guard<std::mutex> g(lock);
-            if (EnsureVad(threads)) {
-                vad->Reset();
-                const size_t windowSize = 512;
-                for (size_t i = 0; i < workSamples.size(); i += windowSize) {
-                    size_t end = std::min(i + windowSize, workSamples.size());
-                    vad->AcceptWaveform(workSamples.data() + i, static_cast<int32_t>(end - i));
+            if (config.vadModel == L"firered") {
+                std::lock_guard<std::mutex> g(lock);
+                if (EnsureFireRedVad()) {
+                    fireRedVad->Reset();
+                    bool hasSpeech = fireRedVad->Process(workSamples.data(), static_cast<int>(workSamples.size()));
+                    if (!hasSpeech) return L"";
                 }
-                vad->Flush();
+            } else {
+                std::lock_guard<std::mutex> g(lock);
+                if (EnsureVad(threads)) {
+                    vad->Reset();
+                    const size_t windowSize = 512;
+                    for (size_t i = 0; i < workSamples.size(); i += windowSize) {
+                        size_t end = std::min(i + windowSize, workSamples.size());
+                        vad->AcceptWaveform(workSamples.data() + i, static_cast<int32_t>(end - i));
+                    }
+                    vad->Flush();
 
-                if (!vad->IsEmpty()) {
-                    auto seg = vad->Front();
-                    workSamples = std::move(seg.samples);
+                    if (!vad->IsEmpty()) {
+                        auto seg = vad->Front();
+                        workSamples = std::move(seg.samples);
+                    }
                 }
             }
         }
@@ -980,8 +1011,10 @@ public:
         recognizer.reset();
         vad.reset();
         punctuation.reset();
+        fireRedVad.reset();
         recognizerKey.clear();
         vadKey.clear();
+        fireRedVadKey.clear();
         punctKey.clear();
     }
 };
@@ -1364,6 +1397,13 @@ void LoadSettingsControls(HWND hwnd) {
     else if (g_config.postprocess == L"llm") postIndex = 2;
     ComboBox_SetCurSel(post, postIndex);
 
+    HWND vadModelCombo = GetDlgItem(hwnd, IDC_VAD_MODEL);
+    ComboBox_AddString(vadModelCombo, L"Silero VAD");
+    ComboBox_AddString(vadModelCombo, L"FireRed VAD");
+    int vadModelIndex = 0;
+    if (g_config.vadModel == L"firered") vadModelIndex = 1;
+    ComboBox_SetCurSel(vadModelCombo, vadModelIndex);
+
     HWND hotkeyEdit = GetDlgItem(hwnd, IDC_HOTKEY);
     auto* hotkeyState = hotkeyEdit ? reinterpret_cast<HotkeyEditState*>(GetWindowLongPtrW(hotkeyEdit, GWLP_USERDATA)) : nullptr;
     if (hotkeyState) {
@@ -1394,6 +1434,10 @@ void SaveSettingsControls(HWND hwnd) {
     if (g_config.threads.empty()) g_config.threads = L"auto";
     if (g_config.threads.substr(0, 4) == L"auto") g_config.threads = L"auto";
     g_config.enableVad = Button_GetCheck(GetDlgItem(hwnd, IDC_VAD)) == BST_CHECKED;
+    {
+        int vadIdx = (int)SendMessageW(GetDlgItem(hwnd, IDC_VAD_MODEL), CB_GETCURSEL, 0, 0);
+        g_config.vadModel = (vadIdx == 1) ? L"firered" : L"silero";
+    }
     g_config.enablePartial = Button_GetCheck(GetDlgItem(hwnd, IDC_PARTIAL)) == BST_CHECKED;
     {
         int postIdx = (int)SendMessageW(GetDlgItem(hwnd, IDC_POSTPROCESS), CB_GETCURSEL, 0, 0);
@@ -1632,9 +1676,13 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         AddRecognitionControl(vad);
         AddRecognitionControl(partial);
 
-        control = CreateLabel(hwnd, 54, 238, 130, 30, L"Punctuation");
+        control = CreateLabel(hwnd, 54, 238, 130, 30, L"VAD model");
         AddRecognitionControl(control);
-        AddRecognitionControl(CreateCombo(hwnd, IDC_POSTPROCESS, 200, 232, 250, 150));
+        AddRecognitionControl(CreateCombo(hwnd, IDC_VAD_MODEL, 200, 232, 250, 150));
+
+        control = CreateLabel(hwnd, 54, 290, 130, 30, L"Punctuation");
+        AddRecognitionControl(control);
+        AddRecognitionControl(CreateCombo(hwnd, IDC_POSTPROCESS, 200, 284, 250, 150));
 
         control = CreateLabel(hwnd, 54, 82, 130, 30, L"Hold hotkey");
         AddShortcutControl(control);
@@ -1726,7 +1774,7 @@ void ShowTrayMenu(HWND hwnd) {
     POINT pt;
     GetCursorPos(&pt);
     HMENU menu = CreatePopupMenu();
-    AppendMenuW(menu, MF_STRING | MF_GRAYED | MF_DISABLED, ID_TRAY_VERSION, L"Version: v0.1.4");
+    AppendMenuW(menu, MF_STRING | MF_GRAYED | MF_DISABLED, ID_TRAY_VERSION, L"Version: v0.1.5");
     AppendMenuW(menu, MF_STRING, ID_TRAY_SETTINGS, L"Settings...");
     AppendMenuW(menu, MF_STRING, ID_TRAY_RELOAD, L"Reload ASR Engine");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);

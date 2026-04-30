@@ -16,8 +16,9 @@
 
 - 前端：单文件 Win32 C++，主要在 `main.cpp`。
 - ASR：C++ 直接调用 `sherpa-onnx-cxx-api`（`OfflineRecognizer`、`VoiceActivityDetector`、`OfflinePunctuation`）。
+- VAD：Silero VAD（sherpa-onnx 内置）或 FireRed VAD（`firered_vad.h`，用 `kaldi_native_fbank` + `onnxruntime`）。
 - 构建：`build.bat` 调用 Visual Studio 2022 `cl` 和 `rc`。
-- 运行时 DLL：`sherpa-onnx-cxx-api.dll`、`sherpa-onnx-c-api.dll`、`onnxruntime.dll`。
+- 运行时 DLL：`sherpa-onnx-cxx-api.dll`、`sherpa-onnx-c-api.dll`、`onnxruntime.dll`、`kaldi-native-fbank-core.dll`。
 - 模型目录：`models/`，不提交到 git。
 
 ## 开发约定
@@ -70,6 +71,7 @@ C++ 类，封装 sherpa-onnx API，缓存模型实例：
 
 - `OfflineRecognizer`：ASR 识别（FireRedASR2 CTC/AED、SenseVoice）。
 - `VoiceActivityDetector`：Silero VAD。
+- `firered_vad::FireRedVad`：FireRed VAD（`firered_vad.h`）。
 - `OfflinePunctuation`：CT-Transformer 标点。
 - 同一模型不重复加载；切换模型或 Reload 时清除缓存。
 - 启用 VAD 时保守裁剪头尾静音，中间停顿保留。无人声则直接返回空文本。
@@ -117,3 +119,4 @@ v0.1.4 起移除了 Python worker，改为 C++ 直接调用 sherpa-onnx。
 
 - 改 `CapsLock` 热键逻辑时不要吞掉短按的系统大小写切换；短按需要补发 `CapsLock`，长按录音结束后必须保持原来的 Caps Lock 状态。
 - 改 HUD 尺寸/文字布局时注意 DPI 单位：DirectWrite 文本测量和 Direct2D 绘制是 DIP，Win32 窗口大小是物理像素；高 DPI 下需要显式换算。
+- FireRedVAD 的 fbank 特征提取期望 int16 范围音频值（-32768~32767），不是归一化 float（-1.0~1.0）。传入前必须乘以 32768，否则模型输出概率始终接近 0。

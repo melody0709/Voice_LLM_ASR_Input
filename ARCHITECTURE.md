@@ -9,7 +9,7 @@ flowchart LR
     User["用户长按快捷键"] --> Frontend["VoiceLLMASRInput.exe<br/>Win32 托盘前端"]
     Frontend --> Recorder["waveIn 录音<br/>16kHz mono PCM"]
     Recorder --> Engine["AsrEngine (C++)<br/>sherpa-onnx-cxx-api"]
-    Engine --> VAD["Silero VAD<br/>trim/no speech"]
+    Engine --> VAD["VAD<br/>Silero / FireRed"]
     VAD --> ASR["sherpa-onnx ASR<br/>FireRed/SenseVoice"]
     ASR --> Punct["CT-Transformer 标点"]
     Punct --> Frontend
@@ -108,20 +108,22 @@ Settings 是普通 Win32 窗口，目前分两个 tab：
 
 ### VAD
 
-`Enable VAD` 开启时，worker 在 ASR 前运行 Silero VAD：
+`Enable VAD` 开启时，ASR 前先做人声检测。Settings 中可选择 VAD 模型：
 
-```text
-models/silero_vad.int8.onnx
-```
+**Silero VAD**（默认）：sherpa-onnx 内置的 `VoiceActivityDetector`，保守裁剪头尾静音。
 
-当前策略：
+**FireRed VAD**：小红书团队开源的 DFSMN 流式 VAD，准确率更高（F1 97.57 vs 95.95，误报率 2.69% vs 9.41%）。
+
+- `firered_vad.h` header-only 模块，使用 `kaldi_native_fbank` 提取 80 维 fbank 特征 + `onnxruntime` 加载模型
+- 模型：`models/fireredvad_stream_vad_with_cache.onnx`（2.2MB）
+- CMVN 参数：`models/cmvn.ark`（硬编码进代码）
+- 流式推理，每帧更新 DFSMN 缓存 `[8, 1, 128, 19]`
+- **关键**：音频需要 int16 范围（-32768~32767），归一化 float 需先乘以 32768
+
+当前策略（两种 VAD 共用）：
 
 - 只处理 16kHz 音频。
-- 检出语音段后，只使用第一段开始到最后一段结束的包围区间，并保留 padding。
-- 中间停顿不会被删除，避免长句被裁碎导致漏字。
-- 如果长录音中 VAD 检出的语音占比异常小，会自动回退使用原始音频。
 - 没检测到语音时直接返回空文本，不加载 ASR 模型。
-- 响应里包含 `vad_ms`、`vad_segments`、`speech_ms`，用于性能测试。
 
 ### ASR 引擎
 
@@ -129,6 +131,7 @@ models/silero_vad.int8.onnx
 
 - `OfflineRecognizer`：ASR 识别（FireRedASR2 CTC/AED、SenseVoice）
 - `VoiceActivityDetector`：Silero VAD
+- `firered_vad::FireRedVad`：FireRed VAD（`firered_vad.h`）
 - `OfflinePunctuation`：CT-Transformer 标点
 
 模型加载后缓存，同一配置不会重复加载。切换模型或 Reload 时清除缓存，下次识别自动重新加载。
@@ -137,6 +140,7 @@ models/silero_vad.int8.onnx
 - `sherpa-onnx-cxx-api.dll`
 - `sherpa-onnx-c-api.dll`
 - `onnxruntime.dll`
+- `kaldi-native-fbank-core.dll`（FireRed VAD 使用）
 
 ### 模型适配
 
@@ -190,6 +194,7 @@ models/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8/model.
   "model_dir": "D:\\...\\models\\sherpa-onnx-fire-red-asr2-zh_en-int8-2026-02-26",
   "threads": "4",
   "enable_vad": true,
+  "vad_model": "silero",
   "enable_partial": true,
   "postprocess": "itn",
   "hotkey": "CapsLock"

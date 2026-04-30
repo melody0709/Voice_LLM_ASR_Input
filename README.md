@@ -2,7 +2,7 @@
 
 Windows 11 本地 CPU 语音输入工具。当前 v1 目标不是完整 TSF/IME，而是一个托盘常驻程序：按住快捷键录音，松开后本地 ASR 识别，把最终文本粘贴到当前输入位置。
 
-当前版本：`v0.1.4`
+当前版本：`v0.1.5`
 
 ## 当前能力
 
@@ -14,6 +14,7 @@ Windows 11 本地 CPU 语音输入工具。当前 v1 目标不是完整 TSF/IME�
 - **C++ 直接调用 sherpa-onnx**：无需 Python 环境，ASR/VAD/标点全部在进程内完成。
 - Direct2D/DirectWrite HUD：录音时显示底部胶囊悬浮窗，5 根音量条由实时 PCM RMS 驱动，并按 DPI 正确缩放。
 - Silero VAD int8：启用后先做人声检测，保守裁掉整段头尾静音；无人声时不加载/不运行 ASR。
+- FireRed VAD：可选的高精度 VAD（F1 97.57，误报率 2.69%），Settings 中可切换。
 - 支持三种 ASR 模型：
   - FireRedASR2 CTC int8 ONNX
   - FireRedASR2 AED int8 ONNX
@@ -31,6 +32,8 @@ models/
   sherpa-onnx-fire-red-asr2-zh_en-int8-2026-02-26/
   sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17/
   sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8/
+  fireredvad_stream_vad_with_cache.onnx   (可选，FireRed VAD 模型)
+  cmvn.ark                                (可选，FireRed VAD CMVN 参数)
 ```
 
 2. 构建：
@@ -54,6 +57,7 @@ models/
   - `Model folder`: 当前模型目录
   - `Threads`: `auto`, `1` ... `8`
   - `Enable VAD`: 使用 Silero VAD 保守裁剪头尾静音，无人声时跳过 ASR
+  - `VAD model`: Silero VAD / FireRed VAD
   - `Partial result`: 当前 UI 预留，后续做流式/模拟流式
   - `Punctuation`: `Disabled`, `Auto punctuate`, `Auto punctuate + LLM`
 - `Shortcut` tab：
