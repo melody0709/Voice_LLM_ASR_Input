@@ -20,10 +20,9 @@
   当前版本：<code>v0.2.2</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
 </p>
 
-<!-- TODO: Replace with actual demo GIF -->
-<!-- Record a GIF showing: press CapsLock → HUD appears with volume bars → speak → release → text pasted into editor -->
-<!-- Recommended tool: ScreenToGif (https://www.screentogif.com/) -->
-<!-- <p align="center"><img src="docs/demo.gif" width="600" alt="Demo" /></p> -->
+<p align="center">
+  <video src="vedio.webm" controls width="600"></video>
+</p>
 
 ---
 
