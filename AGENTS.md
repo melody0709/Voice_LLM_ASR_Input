@@ -31,10 +31,10 @@
   - `build.bat`
   - `CMakeLists.txt`
 - **更新版本号时必须同步更新以下文件**：
-  - `src/resource.h`：APP_VERSION_MAJOR/MINOR/PATCH/BUILD
-  - `src/resources.rc`：FileVersion 和 ProductVersion 字符串
+  - `src/resource.h`：APP_VERSION_MAJOR/MINOR/PATCH/BUILD（**唯一需要改的文件**，字符串宏会自动派生）
   - `README.md`：当前版本
   - `CHANGELOG.md`：添加新版本记录
+  - `src/main.cpp` 和 `src/resources.rc` 使用 `resource.h` 中的版本字符串宏，无需手动更新
 - sherpa-onnx `cxx-api.h` 包含非 ASCII 注释，编译时需要 `/utf-8` 标志。
 - UI 修改后必须重新编译，并尽量实际打开 Settings 看是否裁切/重叠。
 - HUD 修改后要特别检查高 DPI 缩放：DirectWrite/Direct2D 使用 DIP，Win32 `SetWindowPos` 使用物理像素，二者不能混用。
