@@ -1,0 +1,189 @@
+<p align="center">
+  <img src="src/app.ico" width="64" alt="Voice LLM ASR Input icon" />
+</p>
+
+<h1 align="center">Voice LLM ASR Input</h1>
+
+<p align="center">
+  <strong>Local voice input for Windows. Press, speak, paste.</strong><br/>
+  Windows 11 本地语音输入工具 — 按住说话，松开粘贴，无需云端
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Platform-Windows%2011-blue?logo=windows" alt="Platform" />
+  <img src="https://img.shields.io/github/license/melody0709/Voice_LLM_ASR_Input" alt="License" />
+  <img src="https://img.shields.io/github/v/release/melody0709/Voice_LLM_ASR_Input" alt="Release" />
+  <img src="https://img.shields.io/badge/CPU-only-green" alt="CPU Only" />
+</p>
+
+<p align="center">
+  当前版本：<code>v0.2.2</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
+</p>
+
+<!-- TODO: Replace with actual demo GIF -->
+<!-- Record a GIF showing: press CapsLock → HUD appears with volume bars → speak → release → text pasted into editor -->
+<!-- Recommended tool: ScreenToGif (https://www.screentogif.com/) -->
+<!-- <p align="center"><img src="docs/demo.gif" width="600" alt="Demo" /></p> -->
+
+---
+
+## Highlights
+
+- **按住即说** — 默认 CapsLock 长按录音，松开自动粘贴到当前窗口；短按照常切换大小写
+- **100% 本地** — C++ 直接调用 sherpa-onnx，无需 Python、无需云端 API，所有数据不出本机
+- **实时 HUD** — 录音时底部显示悬浮胶囊窗，5 根音量条随声音跳动
+- **双 VAD 可选** — Silero VAD（轻量）/ FireRed VAD（高精度 F1 97.57），智能跳过静音
+- **LLM 纠错（可选）** — 支持 DeepSeek / OpenRouter / SiliconFlow 等多供应商，一键配置
+
+## Quick Start
+
+### 1. 下载模型
+
+```powershell
+.\download_models.ps1
+```
+
+交互式菜单选择模型，自动下载并解压到 `models/` 目录（约 3GB 磁盘空间）。
+
+> Silero VAD 和 FireRed VAD 已内置，无需下载。
+
+### 2. 构建
+
+```powershell
+.\build.bat
+```
+
+需要 Visual Studio 2022（C++ 桌面开发工作负载）。
+
+### 3. 运行
+
+```powershell
+.\build\VoiceLLMASRInput.exe
+```
+
+右键托盘图标打开 Settings，按住快捷键开始录音，松开后识别并粘贴。
+
+---
+
+<details open>
+<summary><strong>⚙️ Settings 说明</strong></summary>
+
+**Recognition tab**
+- `ASR model` — 语音识别模型：
+  - `FireRedASR2 CTC` — 速度快，适合日常输入
+  - `FireRedASR2 AED` — 质量更好，长句更准
+  - `SenseVoiceSmall` — 轻量模型，适合低资源机器
+- `Model folder` — 模型文件存放目录
+- `Threads` — 推理线程数，`auto` 自动使用 CPU 核心数（上限 8）
+- `Enable VAD` — 开启人声检测，录音前先判断是否有语音，无人声时跳过 ASR 以节省时间
+- `VAD model` — 人声检测模型（需先开启 Enable VAD）：
+  - `Silero VAD` — 轻量快速，准确率 F1 95.95
+  - `FireRed VAD` — 高精度（F1 97.57，误报率 2.69%），模型仅 2.2MB
+- `Punctuation` — 识别后处理：
+  - `Disabled` — 不处理，输出 ASR 原文
+  - `Auto punctuate` — 本地 CT-Transformer 自动补标点（无需网络）
+  - `Auto punctuate + LLM` — 本地标点 + 云端 LLM 纠错（需在 LLM tab 配置供应商和 API Key，详见下方 LLM 纠错区块）
+
+**Shortcut tab**
+- 点击输入框后按快捷键录入
+- `Esc` 取消本次录入，`Backspace/Delete` 清空快捷键
+- 默认 CapsLock：短按切换大小写，长按 300ms 触发语音输入
+
+**LLM tab**
+- `Provider` — 供应商下拉框，内置 DeepSeek / OpenRouter / SiliconFlow 预设，选择后自动填充下方字段
+- `API Base URL` — 供应商 API 地址（预设自动填入）
+- `API Key` — API 密钥，使用 DPAPI 加密存储到本地配置
+- `Model` — 模型名称（如 `deepseek-v4-flash`）
+- `Test Connection` — 测试 API 连接是否正常，结果在下方 Status 区域显示
+- `Extra Params` — 附加 JSON 参数，合并到请求体中（格式：`"key":"value","key2":"value2"`）。预设供应商会自动注入关闭思考模式参数，用户可在此追加自定义字段
+- `[+]` / `[−]` — 添加/删除自定义供应商（预设不可删除）
+
+**LLM Prompt tab**
+- `System Prompt` — 多行编辑器，自定义 LLM 纠错的系统提示词（留空使用内置默认）
+- `Basic Fix` / `Deep Fix` — 预设按钮，一键填入不同纠错力度的 System Prompt
+
+</details>
+
+<details>
+<summary><strong>📦 支持的模型</strong></summary>
+
+| 模型 | 类型 | 特点 |
+|---|---|---|
+| FireRedASR2 CTC int8 | ASR | 速度快，适合日常输入 |
+| FireRedASR2 AED int8 | ASR | 质量更好，长句更准 |
+| SenseVoiceSmall int8 | ASR | 轻量，适合低资源机器 |
+| CT-Transformer 标点 int8 | 后处理 | 中英文标点自动补全 |
+
+模型下载链接见 `download_models.ps1` 脚本，或手动从 [sherpa-onnx releases](https://github.com/k2-fsa/sherpa-onnx/releases) 获取。
+
+</details>
+
+<details>
+<summary><strong>🤖 LLM 纠错</strong></summary>
+
+v0.2.0 起新增可选的云端 LLM 文本纠错。默认关闭，需手动启用：
+
+1. Settings → LLM tab → 选择供应商，填入 API Key
+2. Settings → Recognition → Punctuation 设为 `Auto punctuate + LLM`
+
+特性：
+- 预设供应商自动注入关闭思考模式参数
+- Extra Params 支持自定义 JSON 片段合并到请求体
+- API Key 使用 DPAPI 加密存储
+- 向下兼容旧配置格式
+
+</details>
+
+<details>
+<summary><strong>🏗️ 项目结构</strong></summary>
+
+```
+src/
+  main.cpp          — 托盘、Settings、HUD、快捷键、录音、ASR 引擎
+  firered_vad.h     — FireRed VAD 模块（header-only）
+  llm_refine.h      — LLM 纠错模块（header-only）
+  resources.rc / resource.h / app.ico / app.manifest
+dll/                — 运行时 DLL（sherpa-onnx、onnxruntime 等）
+third_party/        — 头文件和导入库
+models/             — 模型文件（不提交 git）
+build.bat           — Visual Studio 2022 编译脚本
+download_models.ps1 — 模型下载脚本
+ARCHITECTURE.md     — 架构详细说明
+AGENTS.md           — 开发协作者注意事项
+CHANGELOG.md        — 版本变更记录
+```
+
+</details>
+
+<details>
+<summary><strong>⚠️ 已知限制</strong></summary>
+
+- 录音后才识别，尚未实现真正流式 partial
+- 文本注入以剪贴板 + Ctrl+V 为主，管理员权限窗口可能拦截
+- 模型文件较大（约 3GB），首次加载需要几秒
+- LLM 纠错尚未完全实现（Punctuation 的 +L 选项当前按本地标点处理）
+
+</details>
+
+<details>
+<summary><strong>📋 更新日志</strong></summary>
+
+详见 [CHANGELOG.md](CHANGELOG.md)
+
+**最近更新：**
+- **v0.2.2** — GitHub 发布准备：目录重组、aria2c 多连接下载、新用户引导
+- **v0.2.1** — 多供应商预设系统、LLM Prompt 独立 Tab、Extra Params
+- **v0.2.0** — FireRedVAD 接入、云端 LLM 纠错模块
+- **v0.1.4** — C++ 直接调用 sherpa-onnx，移除 Python 依赖
+
+</details>
+
+---
+
+## Acknowledgments
+
+- [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) — ASR / VAD / 标点推理引擎
+- [FireRedASR](https://github.com/FireRedTeam/FireRedASR) — 高精度中文 ASR 模型
+- [FireRed VAD](https://github.com/FireRedTeam/FireRedAudio) — 高精度 VAD 模型
+- [Silero VAD](https://github.com/snakers4/silero-vad) — 轻量 VAD 模型
+- [onnxruntime](https://github.com/microsoft/onnxruntime) — ONNX 推理引擎
