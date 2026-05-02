@@ -20,9 +20,7 @@
   当前版本：<code>v0.2.2</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
 </p>
 
-<p align="center">
-  <video src="../doc/vedio.webm" controls width="600"></video>
-</p>
+https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 
 ---
 
