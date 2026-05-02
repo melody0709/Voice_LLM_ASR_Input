@@ -133,6 +133,10 @@ ID2D1Factory* g_d2dFactory = nullptr;
 IDWriteFactory* g_dwriteFactory = nullptr;
 ID2D1HwndRenderTarget* g_hudRenderTarget = nullptr;
 ID2D1SolidColorBrush* g_hudBrush = nullptr;
+ID2D1LinearGradientBrush* g_hudBarGradientRec = nullptr;
+ID2D1LinearGradientBrush* g_hudBarGradientIdle = nullptr;
+ID2D1GradientStopCollection* g_hudBarGradientStopsRec = nullptr;
+ID2D1GradientStopCollection* g_hudBarGradientStopsIdle = nullptr;
 IDWriteTextFormat* g_hudTextFormat = nullptr;
 Config g_config;
 bool g_recording = false;
@@ -627,6 +631,10 @@ void CreateUiResources() {
 
 void DeleteUiResources() {
     SafeRelease(g_hudBrush);
+    SafeRelease(g_hudBarGradientRec);
+    SafeRelease(g_hudBarGradientIdle);
+    SafeRelease(g_hudBarGradientStopsRec);
+    SafeRelease(g_hudBarGradientStopsIdle);
     SafeRelease(g_hudRenderTarget);
     SafeRelease(g_hudTextFormat);
     SafeRelease(g_dwriteFactory);
@@ -1741,7 +1749,38 @@ bool EnsureHudRenderTarget(HWND hwnd) {
             return false;
         }
     }
-    return g_hudRenderTarget && g_hudBrush && g_hudTextFormat;
+
+    if (!g_hudBarGradientStopsRec && g_hudRenderTarget) {
+        D2D1_GRADIENT_STOP stopsRec[] = {
+            { 0.0f, D2D1::ColorF(0.102f, 0.420f, 0.541f, 1.0f) },
+            { 1.0f, D2D1::ColorF(0.357f, 0.878f, 1.000f, 1.0f) },
+        };
+        if (FAILED(g_hudRenderTarget->CreateGradientStopCollection(stopsRec, 2, &g_hudBarGradientStopsRec))) {
+            return false;
+        }
+        if (FAILED(g_hudRenderTarget->CreateLinearGradientBrush(
+                D2D1::LinearGradientBrushProperties(D2D1::Point2F(0, 0), D2D1::Point2F(0, 1)),
+                g_hudBarGradientStopsRec, &g_hudBarGradientRec))) {
+            return false;
+        }
+    }
+
+    if (!g_hudBarGradientStopsIdle && g_hudRenderTarget) {
+        D2D1_GRADIENT_STOP stopsIdle[] = {
+            { 0.0f, D2D1::ColorF(0.290f, 0.306f, 0.329f, 0.72f) },
+            { 1.0f, D2D1::ColorF(0.616f, 0.639f, 0.671f, 0.72f) },
+        };
+        if (FAILED(g_hudRenderTarget->CreateGradientStopCollection(stopsIdle, 2, &g_hudBarGradientStopsIdle))) {
+            return false;
+        }
+        if (FAILED(g_hudRenderTarget->CreateLinearGradientBrush(
+                D2D1::LinearGradientBrushProperties(D2D1::Point2F(0, 0), D2D1::Point2F(0, 1)),
+                g_hudBarGradientStopsIdle, &g_hudBarGradientIdle))) {
+            return false;
+        }
+    }
+
+    return g_hudRenderTarget && g_hudBrush && g_hudBarGradientRec && g_hudBarGradientIdle && g_hudTextFormat;
 }
 
 void DrawHudDirect2D(HWND hwnd) {
@@ -1773,17 +1812,13 @@ void DrawHudDirect2D(HWND hwnd) {
 
     const float level = g_recording ? CurrentHudLevel() : 0.18f;
     const float centerY = height / 2.0f;
-    const float barWidth = 6.0f;
-    const float barGap = 4.5f;
-    const float barAreaHeight = std::min(40.0f, height - 16.0f);
+    const float barWidth = 6.5f;
+    const float barGap = 4.0f;
+    const float barAreaHeight = std::min(54.0f, height - 8.0f);
     const float barStartX = kHudLeftPad + 2.0f;
     const float weights[] = { 0.5f, 0.8f, 1.0f, 0.75f, 0.55f };
     const float minFraction = 0.24f;
     const double tick = static_cast<double>(GetTickCount64());
-
-    g_hudBrush->SetColor(g_recording
-        ? D2D1::ColorF(0.32f, 0.82f, 1.0f, 0.95f)
-        : D2D1::ColorF(0.62f, 0.66f, 0.72f, 0.72f));
 
     for (int i = 0; i < 5; ++i) {
         const float motion = g_recording ? static_cast<float>(std::sin(tick * 0.012 + i * 1.9) * 0.035) : 0.0f;
@@ -1791,11 +1826,20 @@ void DrawHudDirect2D(HWND hwnd) {
                                           minFraction, 1.0f);
         const float h = barAreaHeight * fraction;
         const float x = barStartX + i * (barWidth + barGap);
+
+        const float sweep = std::fmod(static_cast<float>(tick) * 0.0008f + i * 0.15f, 1.0f);
+        const float gradTop = centerY - h / 2.0f - sweep * h * 0.3f;
+        const float gradBottom = centerY + h / 2.0f + (1.0f - sweep) * h * 0.3f;
+
+        auto* brush = g_recording ? g_hudBarGradientRec : g_hudBarGradientIdle;
+        brush->SetStartPoint(D2D1::Point2F(x, gradBottom));
+        brush->SetEndPoint(D2D1::Point2F(x, gradTop));
+
         const D2D1_ROUNDED_RECT bar = D2D1::RoundedRect(
             D2D1::RectF(x, centerY - h / 2.0f, x + barWidth, centerY + h / 2.0f),
             barWidth / 2.0f,
             barWidth / 2.0f);
-        g_hudRenderTarget->FillRoundedRectangle(bar, g_hudBrush);
+        g_hudRenderTarget->FillRoundedRectangle(bar, brush);
     }
 
     g_hudBrush->SetColor(g_hudIsRefining
@@ -1815,6 +1859,10 @@ void DrawHudDirect2D(HWND hwnd) {
     const HRESULT hr = g_hudRenderTarget->EndDraw();
     if (hr == D2DERR_RECREATE_TARGET) {
         SafeRelease(g_hudBrush);
+        SafeRelease(g_hudBarGradientRec);
+        SafeRelease(g_hudBarGradientIdle);
+        SafeRelease(g_hudBarGradientStopsRec);
+        SafeRelease(g_hudBarGradientStopsIdle);
         SafeRelease(g_hudRenderTarget);
     }
     ValidateRect(hwnd, nullptr);
