@@ -21,7 +21,7 @@
 </p>
 
 <p align="center">
-  <video src="./doc/vedio.webm" controls width="600"></video>
+  <video src="./https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e" controls width="600"></video>
 </p>
 
 ---
