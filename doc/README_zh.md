@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="src/app.ico" width="64" alt="Voice LLM ASR Input icon" />
+  <img src="../src/app.ico" width="64" alt="Voice LLM ASR Input icon" />
 </p>
 
 <h1 align="center">Voice LLM ASR Input</h1>
@@ -21,7 +21,7 @@
 </p>
 
 <p align="center">
-  <video src="vedio.webm" controls width="600"></video>
+  <video src="../doc/vedio.webm" controls width="600"></video>
 </p>
 
 ---

@@ -21,7 +21,7 @@
 </p>
 
 <p align="center">
-  <video src="doc/vedio.webm" controls width="600"></video>
+  <video src="./doc/vedio.webm" controls width="600"></video>
 </p>
 
 ---
