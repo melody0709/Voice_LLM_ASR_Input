@@ -20,9 +20,7 @@
   Current version: <code>v0.2.2</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
 </p>
 
-<p align="center">
-  <video src="./https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e" controls width="600"></video>
-</p>
+https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 
 ---
 
