@@ -97,14 +97,15 @@ constexpr int IDC_LLM_EXTRA = 2030;
 constexpr int IDC_LLM_PROVIDER_ADD = 2031;
 constexpr int IDC_LLM_PROVIDER_DEL = 2032;
 constexpr int IDC_LLM_EXTRA_RESET = 2033;
+constexpr int IDC_DOWNLOAD_MODELS = 2034;
 
 struct Config {
     std::wstring modelId = L"firered_ctc";
     std::wstring modelDir;
     std::wstring threads = L"auto";
-    bool enableVad = true;
-    std::wstring vadModel = L"silero"; // "silero" | "firered"
-    bool enablePartial = true;
+    bool enableVad = false;
+    std::wstring vadModel = L"firered"; // "silero" | "firered"
+    bool enablePartial = false;
     std::wstring postprocess = L"itn";
     std::wstring hotkey = L"CapsLock";
     std::wstring llmProvider = L"DeepSeek";
@@ -376,10 +377,6 @@ std::wstring AppDataDir() {
     return result;
 }
 
-std::wstring ConfigPath() {
-    return AppDataDir() + L"\\config.json";
-}
-
 std::wstring AppRootDir() {
     wchar_t modulePath[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
@@ -392,6 +389,10 @@ std::wstring AppRootDir() {
     return dir;
 }
 
+std::wstring ConfigPath() {
+    return AppRootDir() + L"\\config.json";
+}
+
 std::wstring DefaultModelDir(const std::wstring& modelId) {
     const std::wstring base = AppRootDir() + L"\\models\\";
     if (modelId == L"firered_aed") {
@@ -401,6 +402,62 @@ std::wstring DefaultModelDir(const std::wstring& modelId) {
         return base + L"sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17";
     }
     return base + L"sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25";
+}
+
+bool ModelDirExists(const std::wstring& dir) {
+    if (dir.empty()) return false;
+    DWORD attr = GetFileAttributesW(dir.c_str());
+    return (attr != INVALID_FILE_ATTRIBUTES) && (attr & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+bool AnyModelDirExists() {
+    const std::wstring base = AppRootDir() + L"\\models\\";
+    const std::wstring dirs[] = {
+        L"sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25",
+        L"sherpa-onnx-fire-red-asr2-zh_en-int8-2026-02-26",
+        L"sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17"
+    };
+    for (const auto& d : dirs) {
+        if (ModelDirExists(base + d)) return true;
+    }
+    return false;
+}
+
+bool RunModelDownloader(HWND hwnd) {
+    std::wstring scriptPath = AppRootDir() + L"\\download_models.ps1";
+    
+    if (GetFileAttributesW(scriptPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        MessageBoxW(hwnd, 
+            L"download_models.ps1 not found.\n\n"
+            L"Please download models manually from:\n"
+            L"https://github.com/k2-fsa/sherpa-onnx/releases",
+            L"Script Not Found", MB_OK | MB_ICONWARNING);
+        return false;
+    }
+    
+    std::wstring cmd = L"-ExecutionPolicy Bypass -NoExit -File \"" + scriptPath + L"\"";
+    
+    SHELLEXECUTEINFOW sei = { sizeof(sei) };
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    sei.hwnd = hwnd;
+    sei.lpVerb = L"open";
+    sei.lpFile = L"powershell.exe";
+    sei.lpParameters = cmd.c_str();
+    sei.lpDirectory = AppRootDir().c_str();
+    sei.nShow = SW_SHOWNORMAL;
+    
+    if (!ShellExecuteExW(&sei)) {
+        MessageBoxW(hwnd, L"Failed to start download.", L"Error", MB_OK | MB_ICONERROR);
+        return false;
+    }
+    
+    if (sei.hProcess) {
+        WaitForSingleObject(sei.hProcess, INFINITE);
+        CloseHandle(sei.hProcess);
+    }
+    
+    std::wstring modelDir = DefaultModelDir(g_config.modelId);
+    return ModelDirExists(modelDir);
 }
 
 
@@ -2144,6 +2201,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         ApplyUiFont(modelDir);
         AddRecognitionControl(modelDir);
         AddRecognitionControl(CreateButton(hwnd, IDC_BROWSE, 694, 127, 92, 34, L"Browse..."));
+        AddRecognitionControl(CreateButton(hwnd, IDC_DOWNLOAD_MODELS, 694, 167, 92, 34, L"Download"));
 
         control = CreateLabel(hwnd, 54, 186, 130, 30, L"Threads");
         AddRecognitionControl(control);
@@ -2321,6 +2379,23 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         case IDC_BROWSE:
             BrowseModelDirectory(hwnd);
             return 0;
+        case IDC_DOWNLOAD_MODELS: {
+            int ret = MessageBoxW(hwnd,
+                L"Download ASR models? (~2.2GB)\n\n"
+                L"This will open a PowerShell window.",
+                L"Download Models",
+                MB_YESNO | MB_ICONQUESTION);
+            
+            if (ret == IDYES) {
+                if (RunModelDownloader(hwnd)) {
+                    std::wstring newDir = DefaultModelDir(g_config.modelId);
+                    SetWindowTextW(GetDlgItem(hwnd, IDC_MODEL_DIR), newDir.c_str());
+                    g_config.modelDir = newDir;
+                    MessageBoxW(hwnd, L"Download complete!", L"Success", MB_OK | MB_ICONINFORMATION);
+                }
+            }
+            return 0;
+        }
         case IDC_SAVE:
             SaveSettingsControls(hwnd);
             return 0;
@@ -2571,6 +2646,22 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     CreateUiResources();
 
     LoadConfig();
+
+    // 检查模型目录，如果没有任何 ASR 模型则提示下载
+    if (!AnyModelDirExists()) {
+        int ret = MessageBoxW(nullptr,
+            L"ASR models not found.\n\n"
+            L"Download models now? (~2.2GB)\n"
+            L"This will open a PowerShell window.\n\n"
+            L"[Yes] - Download models\n"
+            L"[No]  - Open Settings manually",
+            L"Voice LLM ASR Input - Setup",
+            MB_YESNO | MB_ICONQUESTION);
+        
+        if (ret == IDYES) {
+            RunModelDownloader(nullptr);
+        }
+    }
 
     HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\VoiceLLMASRInput.SingleInstance");
     if (mutex && GetLastError() == ERROR_ALREADY_EXISTS) {

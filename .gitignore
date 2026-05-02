@@ -1,8 +1,8 @@
 build/
-models/
 runtime/
 
 .claude/
+.opencode/
 
 *.user
 *.suo
@@ -14,4 +14,9 @@ runtime/
 .bak
 __pycache__/
 .serena/
-python-embed.zip
+release/
+# 忽略 models 下所有内容，除了两个小 VAD 模型
+models/*
+!models/silero_vad.int8.onnx
+!models/fireredvad_stream_vad_with_cache.onnx
+config.json

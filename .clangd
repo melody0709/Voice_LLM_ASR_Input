@@ -3,7 +3,8 @@ CompileFlags:
     - --target=x86_64-pc-windows-msvc
     - -DUNICODE
     - -D_UNICODE
-    - -Iruntime/Lib/site-packages/sherpa_onnx/include
+    - -Isrc
+    - -Ithird_party/sherpa-onnx/include
     - -Ithird_party/onnxruntime/include
     - -Ithird_party/kaldi_native_fbank/include
   Compiler: cl

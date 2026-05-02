@@ -5,12 +5,12 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-set(SHERPA_DIR "${CMAKE_SOURCE_DIR}/runtime/Lib/site-packages/sherpa_onnx")
+set(SHERPA_DIR "${CMAKE_SOURCE_DIR}/third_party/sherpa-onnx")
 set(KNF_DIR "${CMAKE_SOURCE_DIR}/third_party/kaldi_native_fbank")
 
 add_executable(VoiceLLMASRInput WIN32
-    main.cpp
-    resources.rc
+    src/main.cpp
+    src/resources.rc
 )
 
 add_compile_definitions(UNICODE _UNICODE)
@@ -20,6 +20,7 @@ set_target_properties(VoiceLLMASRInput PROPERTIES
 )
 
 target_include_directories(VoiceLLMASRInput PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
     "${SHERPA_DIR}/include"
     "${CMAKE_SOURCE_DIR}/third_party/onnxruntime/include"
     "${KNF_DIR}/include"

@@ -2,7 +2,7 @@
 
 Windows 11 本地 CPU 语音输入工具。当前 v1 目标不是完整 TSF/IME，而是一个托盘常驻程序：按住快捷键录音，松开后本地 ASR 识别，把最终文本粘贴到当前输入位置。
 
-当前版本：`v0.1.5`
+当前版本：`v0.2.2`
 
 ## 当前能力
 
@@ -24,25 +24,36 @@ Windows 11 本地 CPU 语音输入工具。当前 v1 目标不是完整 TSF/IME�
 
 ## 快速开始
 
-1. 确认模型放在 `models/` 下：
+### 1. 下载模型
 
-```text
-models/
-  sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25/
-  sherpa-onnx-fire-red-asr2-zh_en-int8-2026-02-26/
-  sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17/
-  sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8/
-  fireredvad_stream_vad_with_cache.onnx   (可选，FireRed VAD 模型)
-  cmvn.ark                                (可选，FireRed VAD CMVN 参数)
+**自动下载（推荐）：**
+
+```powershell
+.\download_models.ps1
 ```
 
-2. 构建：
+**手动下载：**
+
+从以下链接下载压缩包，解压到 `models/` 目录：
+
+| 模型 | 下载链接 |
+|---|---|
+| FireRedASR2 CTC int8 | [下载](https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25.tar.bz2) |
+| FireRedASR2 AED int8 | [下载](https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-fire-red-asr2-zh_en-int8-2026-02-26.tar.bz2) |
+| SenseVoiceSmall int8 | [下载](https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2) |
+| CT-Transformer 标点 int8 | [下载](https://github.com/k2-fsa/sherpa-onnx/releases/download/punctuation-models/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8.tar.bz2) |
+
+**磁盘空间要求：** 约 3GB（模型解压后）
+
+> Silero VAD 和 FireRed VAD 已内置，无需下载。
+
+### 2. 构建
 
 ```powershell
 .\build.bat
 ```
 
-3. 运行：
+### 3. 运行
 
 ```powershell
 .\build\VoiceLLMASRInput.exe
@@ -70,13 +81,13 @@ models/
 
 ## 重要文件
 
-- `main.cpp`: Win32 托盘、Settings、Direct2D HUD、快捷键监听、录音、ASR 引擎（sherpa-onnx C++ API）、文本粘贴。
-- `firered_vad.h`: FireRedVAD 模块（fbank 特征提取 + ONNX 流式推理）。
+- `src/main.cpp`: Win32 托盘、Settings、Direct2D HUD、快捷键监听、录音、ASR 引擎（sherpa-onnx C++ API）、文本粘贴。
+- `src/firered_vad.h`: FireRedVAD 模块（fbank 特征提取 + ONNX 流式推理）。
 - `ARCHITECTURE.md`: 当前架构说明。
 - `AGENTS.md`: 后续开发代理/协作者注意事项。
 - `CHANGELOG.md`: 版本变更记录。
 - `build.bat`: Visual Studio 2022 编译脚本。
-- `resources.rc`, `resource.h`, `app.ico`, `app.manifest`: Windows 资源和图标。
+- `src/resources.rc`, `src/resource.h`, `src/app.ico`, `src/app.manifest`: Windows 资源和图标。
 
 归档文档在 `.plan/` 目录（不提交 git）：
 

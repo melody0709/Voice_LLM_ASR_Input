@@ -116,7 +116,7 @@ Settings 是普通 Win32 窗口，目前分 4 个 tab：
 
 **FireRed VAD**：小红书团队开源的 DFSMN 流式 VAD，准确率更高（F1 97.57 vs 95.95，误报率 2.69% vs 9.41%）。
 
-- `firered_vad.h` header-only 模块，使用 `kaldi_native_fbank` 提取 80 维 fbank 特征 + `onnxruntime` 加载模型
+- `src/firered_vad.h` header-only 模块，使用 `kaldi_native_fbank` 提取 80 维 fbank 特征 + `onnxruntime` 加载模型
 - 模型：`models/fireredvad_stream_vad_with_cache.onnx`（2.2MB）
 - CMVN 参数：`models/cmvn.ark`（硬编码进代码）
 - 流式推理，每帧更新 DFSMN 缓存 `[8, 1, 128, 19]`
@@ -129,11 +129,11 @@ Settings 是普通 Win32 窗口，目前分 4 个 tab：
 
 ### ASR 引擎
 
-`AsrEngine` 类（`main.cpp` 内部）封装 sherpa-onnx C++ API：
+`AsrEngine` 类（`src/main.cpp` 内部）封装 sherpa-onnx C++ API：
 
 - `OfflineRecognizer`：ASR 识别（FireRedASR2 CTC/AED、SenseVoice）
 - `VoiceActivityDetector`：Silero VAD
-- `firered_vad::FireRedVad`：FireRed VAD（`firered_vad.h`）
+- `firered_vad::FireRedVad`：FireRed VAD（`src/firered_vad.h`）
 - `OfflinePunctuation`：CT-Transformer 标点
 
 模型加载后缓存，同一配置不会重复加载。切换模型或 Reload 时清除缓存，下次识别自动重新加载。
@@ -235,7 +235,7 @@ flowchart LR
 
 ### 保守纠错
 
-v0.2.0 起已接入云端 LLM 纠错（`llm_refine.h`）。默认关闭，需在 Settings 中将 Punctuation 设为 `Auto punctuate + LLM` 并配置供应商 API Key。
+v0.2.0 起已接入云端 LLM 纠错（`src/llm_refine.h`）。默认关闭，需在 Settings 中将 Punctuation 设为 `Auto punctuate + LLM` 并配置供应商 API Key。
 
 建议后续补充：
 

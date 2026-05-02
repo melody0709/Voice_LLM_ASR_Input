@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.2.2 (2026-05-02)
+
+### Added
+
+- **GitHub 发布准备**：目录结构重组，源代码移入 `src/` 目录
+  - 运行时 DLL 移入 `dll/` 目录并打包到 git（约 20MB）
+  - 新增 `third_party/sherpa-onnx/` 头文件和导入库
+  - 新增 `download_models.ps1` 模型下载脚本
+- **模型下载优化**：集成 aria2c 多连接下载（4 连接并行）
+  - 支持交互式菜单选择下载模型
+  - 支持命令行参数 `-Models 1,3` 或 `-Models all`
+  - 显示下载进度和速度
+- **新用户引导**：首次启动检测模型目录，提示下载
+  - 检查是否有任意 ASR 模型目录存在
+  - Settings Recognition tab 新增 "Download" 按钮
+- **内置 VAD 模型**：Silero VAD 和 FireRed VAD 打包到 git（约 2.5MB）
+
+### Changed
+
+- `.gitignore` 更新：允许 `models/silero_vad.int8.onnx` 和 `models/fireredvad_stream_vad_with_cache.onnx` 提交
+- `build.bat` 更新：从 `dll/` 目录复制 DLL，从 `third_party/sherpa-onnx/` 获取头文件
+- `CMakeLists.txt` 更新：源文件路径和 include 目录
+- `.clangd` 更新：添加 `-Isrc` 和 `-Ithird_party/sherpa-onnx/include`
+
 ## v0.2.1 (2026-04-30)
 
 ### Added
@@ -31,7 +55,7 @@
 ### Added
 
 - **FireRedVAD 接入**：Settings 新增 VAD 模型下拉框，可在 Silero VAD 和 FireRed VAD 之间切换
-  - 新增 `firered_vad.h` header-only 模块：使用 `kaldi_native_fbank` 提取 80 维 fbank 特征 + `onnxruntime` 加载 DFSMN 流式模型
+  - 新增 `src/firered_vad.h` header-only 模块：使用 `kaldi_native_fbank` 提取 80 维 fbank 特征 + `onnxruntime` 加载 DFSMN 流式模型
   - FireRedVAD 准确率显著优于 Silero VAD（F1 97.57 vs 95.95，误报率 2.69% vs 9.41%），模型仅 2.2MB
   - 新增 `third_party/kaldi_native_fbank/` 和 `third_party/onnxruntime/` 依赖
   - `build.bat` 和 `CMakeLists.txt` 同步更新链接配置

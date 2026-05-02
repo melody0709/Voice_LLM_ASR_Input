@@ -14,9 +14,9 @@
 
 ## 当前技术栈
 
-- 前端：单文件 Win32 C++，主要在 `main.cpp`。
+- 前端：单文件 Win32 C++，主要在 `src/main.cpp`。
 - ASR：C++ 直接调用 `sherpa-onnx-cxx-api`（`OfflineRecognizer`、`VoiceActivityDetector`、`OfflinePunctuation`）。
-- VAD：Silero VAD（sherpa-onnx 内置）或 FireRed VAD（`firered_vad.h`，用 `kaldi_native_fbank` + `onnxruntime`）。
+- VAD：Silero VAD（sherpa-onnx 内置）或 FireRed VAD（`src/firered_vad.h`，用 `kaldi_native_fbank` + `onnxruntime`）。
 - 构建：`build.bat` 调用 Visual Studio 2022 `cl` 和 `rc`。
 - 运行时 DLL：`sherpa-onnx-cxx-api.dll`、`sherpa-onnx-c-api.dll`、`onnxruntime.dll`、`kaldi-native-fbank-core.dll`。
 - 模型目录：`models/`，不提交到 git。
@@ -30,6 +30,11 @@
   - `#pragma comment(lib, "...")`
   - `build.bat`
   - `CMakeLists.txt`
+- **更新版本号时必须同步更新以下文件**：
+  - `src/resource.h`：APP_VERSION_MAJOR/MINOR/PATCH/BUILD
+  - `src/resources.rc`：FileVersion 和 ProductVersion 字符串
+  - `README.md`：当前版本
+  - `CHANGELOG.md`：添加新版本记录
 - sherpa-onnx `cxx-api.h` 包含非 ASCII 注释，编译时需要 `/utf-8` 标志。
 - UI 修改后必须重新编译，并尽量实际打开 Settings 看是否裁切/重叠。
 - HUD 修改后要特别检查高 DPI 缩放：DirectWrite/Direct2D 使用 DIP，Win32 `SetWindowPos` 使用物理像素，二者不能混用。
@@ -49,7 +54,7 @@ Get-Process VoiceLLMASRInput -ErrorAction SilentlyContinue | Stop-Process -Force
 
 ## 当前实现脉络
 
-### `main.cpp`
+### `src/main.cpp`
 
 负责：
 
@@ -71,7 +76,7 @@ C++ 类，封装 sherpa-onnx API，缓存模型实例：
 
 - `OfflineRecognizer`：ASR 识别（FireRedASR2 CTC/AED、SenseVoice）。
 - `VoiceActivityDetector`：Silero VAD。
-- `firered_vad::FireRedVad`：FireRed VAD（`firered_vad.h`）。
+- `firered_vad::FireRedVad`：FireRed VAD（`src/firered_vad.h`）。
 - `OfflinePunctuation`：CT-Transformer 标点。
 - 同一模型不重复加载；切换模型或 Reload 时清除缓存。
 - 启用 VAD 时保守裁剪头尾静音，中间停顿保留。无人声则直接返回空文本。
@@ -92,7 +97,7 @@ C++ 类，封装 sherpa-onnx API，缓存模型实例：
 
 ## LLM 纠错
 
-v0.2.0 起新增 LLM 文本纠错模块 `llm_refine.h`（header-only，`llm::` 命名空间）。
+v0.2.0 起新增 LLM 文本纠错模块 `src/llm_refine.h`（header-only，`llm::` 命名空间）。
 
 v0.2.1 起新增多供应商预设系统：
 
@@ -108,7 +113,7 @@ v0.2.1 起新增多供应商预设系统：
 
 v0.1.4 起移除了 Python worker，改为 C++ 直接调用 sherpa-onnx。
 
-`AsrEngine` 类位于 `main.cpp` 内部，通过 `g_asrEngine` 全局实例访问。模型加载在后台线程完成，不阻塞 UI。
+`AsrEngine` 类位于 `src/main.cpp` 内部，通过 `g_asrEngine` 全局实例访问。模型加载在后台线程完成，不阻塞 UI。
 
 ## 后续优先级建议
 
