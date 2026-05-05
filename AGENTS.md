@@ -59,7 +59,7 @@ Get-Process VoiceLLMASRInput -ErrorAction SilentlyContinue | Stop-Process -Force
 | 文件 | 职责 |
 |------|------|
 | `src/globals.h` | 共享常量、控件 ID、结构体、extern 全局变量声明 |
-| `src/engine.h` / `src/engine.cpp` | 后端：字符串/路径工具、JSON 配置持久化、音频采集、`AsrEngine` 类 |
+| `src/engine.h` / `src/engine.cpp` | 后端：字符串/路径工具、JSON 配置持久化、音频采集、`AsrEngine` 类、`PreloadAsrEngine()` |
 | `src/hud.h` / `src/hud.cpp` | HUD 窗口、Direct2D 渲染、托盘图标、UI 资源创建/销毁 |
 | `src/hotkey.h` / `src/hotkey.cpp` | 热键配置、CapsLock 长按、`WH_KEYBOARD_LL` Hook、HotkeyEdit 自绘控件 |
 | `src/settings.h` / `src/settings.cpp` | Settings 窗口、tab UI、控件创建、加载/保存、Provider 管理、输入对话框 |
@@ -145,6 +145,14 @@ v0.1.4 起移除了 Python worker，改为 C++ 直接调用 sherpa-onnx。
 
 
   
+## 延迟加载 & 预加载
+
+- `onnxruntime.dll`、`sherpa-onnx-cxx-api.dll`、`kaldi-native-fbank-core.dll` 通过 MSVC `/DELAYLOAD` 延迟加载，只在本地 ASR 实际使用时才加载到内存。纯云端模式空闲内存 ~12 MB。
+- `engine.cpp` 中 `TryLoadAsrDlls()` 安全检查 DLL 是否可用，缺失时优雅返回 false。
+- 本地模式启动时，`PreloadAsrEngine()` 在后台线程预加载当前模型（ASR + VAD + 标点），消除首次按热键延迟。
+- Settings Save 后如果 `asrBackend == "local"`，会 Reload + 后台预加载新模型。
+- 预加载完成后发送 `kPreloadDoneMessage`，HUD 显示 "ASR ready: xxx"。
+
 ## 踩坑规则
 
 > AI 在完成重大修改或解决复杂报错后，可追加规则。

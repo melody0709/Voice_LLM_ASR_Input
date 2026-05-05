@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  当前版本：<code>v0.6.0</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
+  当前版本：<code>v0.6.1</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -183,6 +183,7 @@ CHANGELOG.md        — 版本变更记录
 详见 [CHANGELOG.md](CHANGELOG.md)
 
 **最近更新：**
+- **v0.6.1** — ASR 模型启动预加载、onnxruntime/sherpa-onnx DLL 延迟加载、火山引擎 LLM 纠错修复
 - **v0.6.0** — 源码从单文件重构为多模块架构
 - **v0.5.0** — Cloud ASR UI 重构、async 模式修复、Shortcut 合并到 Recognition
 - **v0.4.0** — 火山引擎（豆包）流式 ASR 接入（WebSocket）

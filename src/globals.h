@@ -29,6 +29,7 @@ constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kReloadMessage = WM_APP + 2;
 constexpr UINT kAsrResultMessage = WM_APP + 3;
 constexpr UINT kLlmResultMessage = WM_APP + 4;
+constexpr UINT kPreloadDoneMessage = WM_APP + 5;
 constexpr UINT kTrayId = 1;
 constexpr UINT_PTR kHudHideTimer = 1;
 constexpr UINT_PTR kCapsLockLongPressTimer = 2;

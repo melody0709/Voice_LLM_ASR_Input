@@ -13,6 +13,7 @@
 #include <thread>
 #include <shlobj.h>
 #include <knownfolders.h>
+#include <delayimp.h>
 
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -507,11 +508,22 @@ int ResolveThreads(const std::wstring& threads) {
     return std::clamp(_wtoi(threads.c_str()), 1, 8);
 }
 
+static bool TryLoadAsrDlls() {
+    __try {
+        HMODULE h = LoadLibraryW(L"sherpa-onnx-cxx-api.dll");
+        if (h) { FreeLibrary(h); return true; }
+        return false;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 std::string AsrEngine::MakeKey(const std::wstring& modelId, const std::wstring& modelDir, int threads) {
     return WideToUtf8(modelId) + "|" + WideToUtf8(modelDir) + "|" + std::to_string(threads);
 }
 
 bool AsrEngine::EnsureRecognizer(const Config& config) {
+    if (!TryLoadAsrDlls()) return false;
     const std::wstring modelDir = config.modelDir.empty() ? DefaultModelDir(config.modelId) : config.modelDir;
     const int threads = ResolveThreads(config.threads);
     const std::string key = MakeKey(config.modelId, modelDir, threads);
@@ -540,6 +552,7 @@ bool AsrEngine::EnsureRecognizer(const Config& config) {
 }
 
 bool AsrEngine::EnsureVad(int threads) {
+    if (!TryLoadAsrDlls()) return false;
     const std::string key = "vad|" + std::to_string(threads);
     if (vad && vadKey == key) return true;
 
@@ -564,6 +577,7 @@ bool AsrEngine::EnsureVad(int threads) {
 }
 
 bool AsrEngine::EnsureFireRedVad() {
+    if (!TryLoadAsrDlls()) return false;
     const std::string key = "firered_vad";
     if (fireRedVad && fireRedVadKey == key) return true;
 
@@ -579,6 +593,7 @@ bool AsrEngine::EnsureFireRedVad() {
 }
 
 bool AsrEngine::EnsurePunctuation(int threads) {
+    if (!TryLoadAsrDlls()) return false;
     const std::string key = "punct|" + std::to_string(threads);
     if (punctuation && punctKey == key) return true;
 
@@ -680,4 +695,20 @@ std::vector<float> PcmToFloat(const std::vector<BYTE>& pcm) {
         samples[i] = static_cast<float>(raw[i]) / 32768.0f;
     }
     return samples;
+}
+
+void PreloadAsrEngine(const Config& config) {
+    const int threads = ResolveThreads(config.threads);
+    std::lock_guard<std::mutex> g(g_asrEngine.lock);
+    g_asrEngine.EnsureRecognizer(config);
+    if (config.enableVad) {
+        if (config.vadModel == L"firered") {
+            g_asrEngine.EnsureFireRedVad();
+        } else {
+            g_asrEngine.EnsureVad(threads);
+        }
+    }
+    if (config.postprocess == L"itn" || config.postprocess == L"punct" || config.postprocess == L"llm") {
+        g_asrEngine.EnsurePunctuation(threads);
+    }
 }

@@ -73,3 +73,5 @@ public:
 };
 
 std::vector<float> PcmToFloat(const std::vector<BYTE>& pcm);
+
+void PreloadAsrEngine(const Config& config);

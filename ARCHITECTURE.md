@@ -41,7 +41,7 @@ Since v0.6.0, the source code is organized into multiple modules:
 | File | Responsibility |
 |------|---------------|
 | `src/globals.h` | Shared constants, control IDs, struct definitions, extern global variable declarations |
-| `src/engine.h` / `src/engine.cpp` | Backend: string/path utilities, JSON config persistence, audio capture, `AsrEngine` class |
+| `src/engine.h` / `src/engine.cpp` | Backend: string/path utilities, JSON config persistence, audio capture, `AsrEngine` class, `PreloadAsrEngine()` |
 | `src/hud.h` / `src/hud.cpp` | HUD window, Direct2D/DirectWrite rendering, tray icon, UI resource creation/deletion |
 | `src/hotkey.h` / `src/hotkey.cpp` | Hotkey config, CapsLock long-press logic, `WH_KEYBOARD_LL` hook, `HotkeyEdit` custom control |
 | `src/settings.h` / `src/settings.cpp` | Settings window, tab UI, control creation, load/save, provider management, input dialog |
@@ -52,6 +52,16 @@ Since v0.6.0, the source code is organized into multiple modules:
 | `src/firered_vad.h` | FireRed VAD module (header-only) |
 
 Global variables are defined in `main.cpp` and accessed by other modules via `extern` declarations in `globals.h`.
+
+### Delay-Loaded DLLs
+
+`onnxruntime.dll`, `sherpa-onnx-cxx-api.dll`, and `kaldi-native-fbank-core.dll` are delay-loaded via MSVC `/DELAYLOAD` linker flag. They are only loaded into memory when local ASR functions are actually called. In cloud-only mode, these DLLs are never loaded, keeping idle memory at ~12 MB.
+
+`engine.cpp` includes `TryLoadAsrDlls()` which safely checks DLL availability before calling sherpa-onnx functions, returning `false` gracefully if DLLs are missing.
+
+### Model Preloading
+
+When `asrBackend` is `local` and the model directory exists, `PreloadAsrEngine()` is called in a background thread at startup. This preloads the ASR model, VAD model (if enabled), and punctuation model (if enabled), eliminating first-press latency. After Settings Save, if the backend is `local`, models are reloaded and preloaded again. A `kPreloadDoneMessage` is posted to the main window to show an HUD notification.
 
 ## Main Modules
 

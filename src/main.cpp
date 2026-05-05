@@ -188,17 +188,18 @@ void StartRecordingSession() {
     g_recording = true;
 
     if (g_config.asrBackend == L"volcengine") {
+        const Config config = g_config;
         volc_asr::VolcConfig vcfg;
-        vcfg.apiKey = g_config.volcApiKey;
-        vcfg.resourceId = g_config.volcResourceId;
-        vcfg.mode = g_config.volcMode;
-        if (!g_config.volcLanguage.empty()) vcfg.language = g_config.volcLanguage;
+        vcfg.apiKey = config.volcApiKey;
+        vcfg.resourceId = config.volcResourceId;
+        vcfg.mode = config.volcMode;
+        if (!config.volcLanguage.empty()) vcfg.language = config.volcLanguage;
 
         g_volcStreaming = true;
         ShowHud(L"Listening... Volcano Engine");
 
         if (g_volcThread.joinable()) g_volcThread.join();
-        g_volcThread = std::thread([vcfg]() {
+        g_volcThread = std::thread([vcfg, config]() {
             if (!volc_asr::OpenSession(g_volcSession, vcfg)) {
                 g_volcSession.connected = false;
                 std::wstring errMsg = L"VolcEngine connect failed";
@@ -288,8 +289,21 @@ void StartRecordingSession() {
             if (finalText.empty()) finalText = lastPartial;
 
             if (finalText.empty()) finalText = L"(empty result)";
-            PostMessageW(g_mainWindow, kAsrResultMessage, 0,
-                         reinterpret_cast<LPARAM>(new std::wstring(finalText)));
+
+            bool needLlm = (config.postprocess == L"llm")
+                         && !config.llmEndpoint.empty()
+                         && !config.llmApiKey.empty()
+                         && !finalText.empty()
+                         && finalText.rfind(L"VolcEngine error", 0) != 0;
+
+            if (needLlm) {
+                PostMessageW(g_mainWindow, kAsrResultMessage, 1,
+                             reinterpret_cast<LPARAM>(new std::wstring(finalText)));
+                RefineWithLlmAsync(finalText, config);
+            } else {
+                PostMessageW(g_mainWindow, kAsrResultMessage, 0,
+                             reinterpret_cast<LPARAM>(new std::wstring(finalText)));
+            }
         });
         return;
     }
@@ -360,8 +374,17 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     case kReloadMessage:
         g_asrEngine.Reload();
-        ShowHud(L"ASR engine reloaded: " + ModelDisplayName(g_config.modelId));
-        SetTimer(g_hudWindow, kHudHideTimer, 1200, nullptr);
+        if (g_config.asrBackend == L"local") {
+            const Config cfg = g_config;
+            std::thread([cfg]() {
+                PreloadAsrEngine(cfg);
+                PostMessageW(g_mainWindow, kPreloadDoneMessage, 0, 0);
+            }).detach();
+        }
+        return 0;
+    case kPreloadDoneMessage:
+        ShowHud(L"ASR ready: " + ModelDisplayName(g_config.modelId));
+        if (g_hudWindow) SetTimer(g_hudWindow, kHudHideTimer, 1500, nullptr);
         return 0;
     case kAsrResultMessage: {
         std::unique_ptr<std::wstring> result(reinterpret_cast<std::wstring*>(lParam));
@@ -483,6 +506,17 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     CreateUiResources();
 
     LoadConfig();
+
+    if (g_config.asrBackend == L"local") {
+        const std::wstring modelDir = g_config.modelDir.empty() ? DefaultModelDir(g_config.modelId) : g_config.modelDir;
+        if (ModelDirExists(modelDir)) {
+            const Config cfg = g_config;
+            std::thread([cfg]() {
+                PreloadAsrEngine(cfg);
+                PostMessageW(g_mainWindow, kPreloadDoneMessage, 0, 0);
+            }).detach();
+        }
+    }
 
     if (!AnyModelDirExists()) {
         int ret = MessageBoxW(nullptr,

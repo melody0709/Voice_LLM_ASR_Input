@@ -2,6 +2,21 @@
 
 > 🇨🇳 [中文版](doc/CHANGELOG_zh.md)
 
+## v0.6.1 (2026-05-06)
+
+### Changed
+
+- **ASR model preload on startup**: When `asrBackend` is `local` and model directory exists, models (ASR + VAD + punctuation) are preloaded in a background thread at startup, eliminating first-press latency
+- **DELAYLOAD for onnxruntime/sherpa-onnx/kaldi DLLs**: `onnxruntime.dll`, `sherpa-onnx-cxx-api.dll`, and `kaldi-native-fbank-core.dll` are now delay-loaded — they are only loaded into memory when local ASR is actually used. Cloud-only mode stays at ~12 MB idle memory (down from ~20 MB)
+- **Preload after Settings Save**: When switching to local ASR backend or changing models in Settings, the new model is preloaded in the background after Save
+- **HUD notification on preload complete**: Shows "ASR ready: \<model\>" when preload finishes
+
+### Fixed
+
+- **Volcengine ASR now supports LLM refine**: Previously, Volcengine results always skipped LLM correction even when `postprocess` was set to `Auto punctuate + LLM`. Now all three ASR backends (local, Baidu, Volcengine) consistently support LLM refine
+- **`SaveConfig` now persists `llm_endpoint`, `llm_api_key`, `llm_model`** fields (previously omitted)
+- Removed unused `g_volcFinalText` global variable
+
 ## v0.6.0 (2026-05-06)
 
 ### Changed

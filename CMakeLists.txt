@@ -21,6 +21,7 @@ add_compile_definitions(UNICODE _UNICODE)
 
 set_target_properties(VoiceLLMASRInput PROPERTIES
     WIN32_EXECUTABLE YES
+    LINK_FLAGS "/DELAYLOAD:sherpa-onnx-cxx-api.dll /DELAYLOAD:onnxruntime.dll /DELAYLOAD:kaldi-native-fbank-core.dll"
 )
 
 target_include_directories(VoiceLLMASRInput PRIVATE
@@ -51,4 +52,5 @@ target_link_libraries(VoiceLLMASRInput
     winmm
     winhttp
     crypt32
+    delayimp
 )
