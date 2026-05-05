@@ -2,6 +2,22 @@
 
 > 🇬🇧 [English](../CHANGELOG.md)
 
+## v0.6.2 (2026-05-06)
+
+### 变更
+
+- **Settings UI 样式统一化**：在 `globals.h` 中引入 `UiStyle` 命名空间，集中管理所有布局常量，替换 `settings.cpp` 和 `hud.cpp` 中散落的魔数
+  - 行间距统一为 52px（Recognition、LLM、LLM Prompt、Cloud ASR 所有 tab）——此前 Cloud ASR 仅 36px（过紧），LLM 为 46-64px（不均匀）
+  - `RowInputY(row)` / `RowLabelY(row)` 辅助函数自动计算第 N 行的 Y 坐标
+  - 所有控件尺寸（高度、宽度）定义为命名常量（`EditH`、`BtnH`、`ComboW` 等）
+  - 所有颜色值（`BgColor`、`TextColor`、`DividerColor` 等）定义为命名常量
+  - 所有边距/位置值（`Margin`、`ContentLeft`、`InputLeft` 等）定义为命名常量
+
+### 修复
+
+- **`WM_PAINT` footerTop 最小值不一致**：`LayoutSettingsWindow` 用 `460` 但 `WM_PAINT` 用 `390`，现统一使用 `UiStyle::FooterMinTop`（460）
+- **`footerHeight` 重复硬编码**：原两处各写 `78`，现统一引用 `UiStyle::FooterHeight`
+
 ## v0.6.1 (2026-05-06)
 
 ### 变更

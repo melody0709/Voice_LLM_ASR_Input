@@ -2,6 +2,22 @@
 
 > 🇨🇳 [中文版](doc/CHANGELOG_zh.md)
 
+## v0.6.2 (2026-05-06)
+
+### Changed
+
+- **Settings UI style unification**: Introduced `UiStyle` namespace in `globals.h` to centralize all layout constants, replacing scattered magic numbers across `settings.cpp` and `hud.cpp`
+  - Row spacing unified to 52px across all tabs (Recognition, LLM, LLM Prompt, Cloud ASR) — previously Cloud ASR had 36px (too tight), LLM had 46-64px (uneven)
+  - `RowInputY(row)` / `RowLabelY(row)` helper functions for automatic Y coordinate calculation
+  - All control sizes (heights, widths) defined as named constants (`EditH`, `BtnH`, `ComboW`, etc.)
+  - All color values (`BgColor`, `TextColor`, `DividerColor`, etc.) defined as named constants
+  - All margin/position values (`Margin`, `ContentLeft`, `InputLeft`, etc.) defined as named constants
+
+### Fixed
+
+- **`WM_PAINT` footerTop minimum value inconsistency**: `LayoutSettingsWindow` used `460` but `WM_PAINT` used `390`, now both use `UiStyle::FooterMinTop` (460)
+- **`footerHeight` duplicated hardcode**: Was `78` in two places, now uses `UiStyle::FooterHeight`
+
 ## v0.6.1 (2026-05-06)
 
 ### Changed

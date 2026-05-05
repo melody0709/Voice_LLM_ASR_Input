@@ -45,6 +45,41 @@ constexpr float kHudGap = 14.0f;
 constexpr float kHudRightPad = 22.0f;
 constexpr float kHudTextSlack = 18.0f;
 
+namespace UiStyle {
+constexpr int Margin = 12;
+constexpr int ContentLeft = 42;
+constexpr int InputLeft = 188;
+constexpr int LabelWidth = 130;
+constexpr int RowHeight = 52;
+constexpr int FirstRowY = 76;
+constexpr int LabelYOffset = 6;
+constexpr int LabelH = 30;
+constexpr int EditH = 32;
+constexpr int ComboH = 150;
+constexpr int BtnH = 34;
+constexpr int ActionBtnH = 36;
+constexpr int CheckH = 26;
+constexpr int HotkeyEditH = 38;
+constexpr int InputW = 480;
+constexpr int InputWFull = 580;
+constexpr int ComboW = 250;
+constexpr int SideBtnW = 92;
+constexpr int SideBtnX = 682;
+constexpr int SmallBtnW = 62;
+constexpr int SmallBtnX = 532;
+constexpr int ActionBtnW = 140;
+constexpr int FooterBtnW = 84;
+constexpr int FooterHeight = 78;
+constexpr int FooterMinTop = 460;
+constexpr COLORREF BgColor = RGB(246, 248, 251);
+constexpr COLORREF ControlBgColor = RGB(255, 255, 255);
+constexpr COLORREF TextColor = RGB(30, 41, 59);
+constexpr COLORREF InputTextColor = RGB(17, 24, 39);
+constexpr COLORREF DividerColor = RGB(226, 232, 240);
+constexpr int RowInputY(int row) { return FirstRowY + row * RowHeight; }
+constexpr int RowLabelY(int row) { return FirstRowY + LabelYOffset + row * RowHeight; }
+}
+
 constexpr UINT ID_TRAY_VERSION = 1001;
 constexpr UINT ID_TRAY_SETTINGS = 1002;
 constexpr UINT ID_TRAY_RELOAD = 1003;

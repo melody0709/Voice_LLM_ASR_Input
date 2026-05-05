@@ -155,9 +155,9 @@ void CreateUiResources() {
     if (!g_uiFont) g_uiFont = MakeFont(9, FW_NORMAL);
     if (!g_titleFont) g_titleFont = MakeFont(14, FW_SEMIBOLD);
     if (!g_sectionFont) g_sectionFont = MakeFont(9, FW_SEMIBOLD);
-    if (!g_settingsBgBrush) g_settingsBgBrush = CreateSolidBrush(RGB(246, 248, 251));
-    if (!g_cardBrush) g_cardBrush = CreateSolidBrush(RGB(255, 255, 255));
-    if (!g_controlBgBrush) g_controlBgBrush = CreateSolidBrush(RGB(255, 255, 255));
+    if (!g_settingsBgBrush) g_settingsBgBrush = CreateSolidBrush(UiStyle::BgColor);
+    if (!g_cardBrush) g_cardBrush = CreateSolidBrush(UiStyle::ControlBgColor);
+    if (!g_controlBgBrush) g_controlBgBrush = CreateSolidBrush(UiStyle::ControlBgColor);
     if (!g_d2dFactory) {
         D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &g_d2dFactory);
     }
