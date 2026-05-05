@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  当前版本：<code>v0.5.0</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
+  当前版本：<code>v0.6.0</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -144,11 +144,16 @@ v0.2.0 起新增可选的云端 LLM 文本纠错。默认关闭，需手动启�
 
 ```
 src/
-  main.cpp          — 托盘、Settings、HUD、快捷键、录音、ASR 引擎
+  main.cpp          — 入口、录音会话编排、LLM 纠错调度
+  engine.h / .cpp   — 配置持久化、ASR 引擎、音频采集、工具函数
+  hud.h / .cpp      — HUD 窗口、Direct2D 渲染、托盘图标、UI 资源
+  hotkey.h / .cpp   — 热键逻辑、CapsLock、键盘 Hook、HotkeyEdit 控件
+  settings.h / .cpp — Settings 窗口、控件、加载/保存、Provider 管理
   baidu_asr.h       — 百度智能云 ASR 模块（header-only）
   volcengine_asr.h  — 火山引擎（豆包）ASR 模块（header-only, WebSocket）
   firered_vad.h     — FireRed VAD 模块（header-only）
   llm_refine.h      — LLM 纠错模块（header-only）
+  globals.h         — 共享常量、控件 ID、extern 全局变量声明
   resources.rc / resource.h / app.ico / app.manifest
 dll/                — 运行时 DLL（sherpa-onnx、onnxruntime 等）
 third_party/        — 头文件和导入库
@@ -178,6 +183,7 @@ CHANGELOG.md        — 版本变更记录
 详见 [CHANGELOG.md](CHANGELOG.md)
 
 **最近更新：**
+- **v0.6.0** — 源码从单文件重构为多模块架构
 - **v0.5.0** — Cloud ASR UI 重构、async 模式修复、Shortcut 合并到 Recognition
 - **v0.4.0** — 火山引擎（豆包）流式 ASR 接入（WebSocket）
 - **v0.3.0** — 百度智能云 ASR 接入

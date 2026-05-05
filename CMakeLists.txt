@@ -10,6 +10,10 @@ set(KNF_DIR "${CMAKE_SOURCE_DIR}/third_party/kaldi_native_fbank")
 
 add_executable(VoiceLLMASRInput WIN32
     src/main.cpp
+    src/engine.cpp
+    src/hud.cpp
+    src/hotkey.cpp
+    src/settings.cpp
     src/resources.rc
 )
 
@@ -45,4 +49,6 @@ target_link_libraries(VoiceLLMASRInput
     dwrite
     shlwapi
     winmm
+    winhttp
+    crypt32
 )

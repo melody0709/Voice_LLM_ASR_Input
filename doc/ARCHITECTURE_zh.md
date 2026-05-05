@@ -34,6 +34,25 @@ flowchart LR
 
 `AsrEngine` 内部缓存 `OfflineRecognizer`、`VoiceActivityDetector`、`OfflinePunctuation`，同一模型不会重复加载。
 
+## 源码结构
+
+自 v0.6.0 起，源码组织为多个模块：
+
+| 文件 | 职责 |
+|------|------|
+| `src/globals.h` | 共享常量、控件 ID、结构体定义、extern 全局变量声明 |
+| `src/engine.h` / `src/engine.cpp` | 后端：字符串/路径工具、JSON 配置持久化、音频采集、`AsrEngine` 类 |
+| `src/hud.h` / `src/hud.cpp` | HUD 窗口、Direct2D/DirectWrite 渲染、托盘图标、UI 资源创建/销毁 |
+| `src/hotkey.h` / `src/hotkey.cpp` | 热键配置、CapsLock 长按逻辑、`WH_KEYBOARD_LL` Hook、`HotkeyEdit` 自绘控件 |
+| `src/settings.h` / `src/settings.cpp` | Settings 窗口、tab UI、控件创建、加载/保存、Provider 管理、输入对话框 |
+| `src/main.cpp` | 入口（`wWinMain`）、主窗口过程、录音会话编排、LLM 纠错 |
+| `src/llm_refine.h` | LLM 纠错模块（header-only，`llm::` 命名空间） |
+| `src/baidu_asr.h` | 百度智能云 ASR 模块（header-only） |
+| `src/volcengine_asr.h` | 火山引擎（豆包）ASR 模块（header-only，WebSocket） |
+| `src/firered_vad.h` | FireRed VAD 模块（header-only） |
+
+全局变量在 `main.cpp` 中定义，其他模块通过 `globals.h` 的 `extern` 声明引用。
+
 ## 主要模块
 
 ### 托盘和主窗口
@@ -50,10 +69,10 @@ flowchart LR
 
 Settings 是普通 Win32 窗口，目前分 4 个 tab：
 
-- `Recognition`: 模型、模型目录、线程、VAD、Partial、Punctuation。
-- `Shortcut`: 长按录音快捷键，默认 `CapsLock`。
+- `Recognition`: ASR Backend、模型、模型目录、线程、VAD、VAD 模型、Punctuation、快捷键配置。
 - `LLM`: 供应商选择（Provider dropdown + [+] / [−]）、API Base URL、API Key、Model、Test Connection、Debug log、Extra Params。
 - `LLM Prompt`: System Prompt 编辑（多行）、Basic Fix / Deep Fix 预设按钮。
+- `Cloud ASR`: 云端供应商选择、百度/火山引擎专属字段。
 
 打开 Settings 时：
 
@@ -131,7 +150,7 @@ Settings 是普通 Win32 窗口，目前分 4 个 tab：
 
 ### ASR 引擎
 
-`AsrEngine` 类（`src/main.cpp` 内部）封装 sherpa-onnx C++ API：
+`AsrEngine` 类（`src/engine.h` / `src/engine.cpp`）封装 sherpa-onnx C++ API：
 
 - `OfflineRecognizer`：ASR 识别（FireRedASR2 CTC/AED、SenseVoice）
 - `VoiceActivityDetector`：Silero VAD
@@ -148,7 +167,7 @@ Settings 是普通 Win32 窗口，目前分 4 个 tab：
 
 ### 模型适配
 
-`asr_worker.py` 根据 `model_id` 创建不同 recognizer：
+`AsrEngine` 根据 `model_id` 创建不同 recognizer：
 
 | model_id | 模型 | 文件 |
 | --- | --- | --- |
@@ -187,7 +206,7 @@ models/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8/model.
 配置保存到：
 
 ```text
-%APPDATA%\VoiceLLMASRInput\config.json
+<app-root>/config.json
 ```
 
 当前结构是扁平 JSON：

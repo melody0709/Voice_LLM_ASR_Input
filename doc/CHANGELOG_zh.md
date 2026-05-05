@@ -2,6 +2,27 @@
 
 > 🇬🇧 [English](../CHANGELOG.md)
 
+## v0.6.0 (2026-05-06)
+
+### 变更
+
+- **源码从单文件重构为多模块架构**：`src/main.cpp`（3269 行）拆分为 5 个编译单元，职责清晰分离
+  - `src/globals.h` — 共享常量、控件 ID、结构体定义、extern 全局变量声明
+  - `src/engine.h` / `src/engine.cpp`（~750 行）— 后端：配置持久化、ASR 引擎、音频采集、工具函数
+  - `src/hud.h` / `src/hud.cpp`（~380 行）— HUD 窗口、Direct2D 渲染、托盘图标、UI 资源管理
+  - `src/hotkey.h` / `src/hotkey.cpp`（~330 行）— 热键逻辑、CapsLock 长按、键盘 Hook、HotkeyEdit 自绘控件
+  - `src/settings.h` / `src/settings.cpp`（~1190 行）— Settings 窗口、控件、加载/保存、Provider 管理、输入对话框
+  - `src/main.cpp`（~560 行）— 入口（WinMain）、主窗口过程、录音会话编排、LLM 纠错
+- 全局变量在 `main.cpp` 中定义，其他模块通过 `globals.h` 的 `extern` 声明引用
+- `build.bat` 更新：`cl` 命令现在编译 5 个源文件
+- `CMakeLists.txt` 更新：`add_executable` 包含新 `.cpp` 文件，新增 `winhttp` 和 `crypt32` 链接依赖
+- `.clangd` 更新：添加 UTF-8 字符集标志以兼容 sherpa-onnx 头文件
+
+### 修复
+
+- `SaveConfig` 现在正确持久化 `llm_endpoint`、`llm_api_key`、`llm_model` 字段（此前遗漏）
+- 移除未使用的 `g_volcFinalText` 全局变量
+
 ## v0.5.0 (2026-05-05)
 
 ### 新增

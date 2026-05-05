@@ -14,7 +14,7 @@
 
 ## 当前技术栈
 
-- 前端：单文件 Win32 C++，主要在 `src/main.cpp`。
+- 前端：Win32 C++ 多模块架构，入口在 `src/main.cpp`，后端在 `src/engine.cpp`，UI 在 `src/settings.cpp` / `src/hud.cpp`，热键在 `src/hotkey.cpp`。
 - ASR：C++ 直接调用 `sherpa-onnx-cxx-api`（`OfflineRecognizer`、`VoiceActivityDetector`、`OfflinePunctuation`）。
 - VAD：Silero VAD（sherpa-onnx 内置）或 FireRed VAD（`src/firered_vad.h`，用 `kaldi_native_fbank` + `onnxruntime`）。
 - 构建：`build.bat` 调用 Visual Studio 2022 `cl` 和 `rc`。
@@ -54,25 +54,36 @@ Get-Process VoiceLLMASRInput -ErrorAction SilentlyContinue | Stop-Process -Force
 
 ## 当前实现脉络
 
+### 源码模块（v0.6.0 起）
+
+| 文件 | 职责 |
+|------|------|
+| `src/globals.h` | 共享常量、控件 ID、结构体、extern 全局变量声明 |
+| `src/engine.h` / `src/engine.cpp` | 后端：字符串/路径工具、JSON 配置持久化、音频采集、`AsrEngine` 类 |
+| `src/hud.h` / `src/hud.cpp` | HUD 窗口、Direct2D 渲染、托盘图标、UI 资源创建/销毁 |
+| `src/hotkey.h` / `src/hotkey.cpp` | 热键配置、CapsLock 长按、`WH_KEYBOARD_LL` Hook、HotkeyEdit 自绘控件 |
+| `src/settings.h` / `src/settings.cpp` | Settings 窗口、tab UI、控件创建、加载/保存、Provider 管理、输入对话框 |
+| `src/main.cpp` | 入口（`wWinMain`）、主窗口过程、录音会话编排、LLM 纠错 |
+
+全局变量在 `main.cpp` 中定义，其他模块通过 `globals.h` 的 `extern` 声明引用。
+
 ### `src/main.cpp`
 
 负责：
 
+- 全局变量定义（所有 `g_` 变量的实际存储）。
 - 单实例互斥。
+- `WriteLlmLog` / `RefineWithLlmAsync`：LLM 纠错日志和异步调用。
+- `RecognizeAsync`：ASR 识别异步调度（本地 / 百度 / 火山引擎）。
+- `StartRecordingSession` / `StopRecordingSession`：录音会话编排。
 - 托盘菜单。
-- Settings 窗口和 tab UI。
-- 自绘 hotkey edit 控件。
-- 打开 Settings 时暂停全局键盘 hook，关闭后恢复。
-- `WH_KEYBOARD_LL` 长按快捷键录音。
-- 默认 `CapsLock` 使用 300ms 长按判定：短按交还系统切换大小写，长按录音，结束后恢复按下前 Caps Lock 状态。
-- `waveIn` 采集 16kHz mono PCM。
-- Direct2D/DirectWrite 绘制底部 HUD，5 根音量条由 `waveIn` buffer 的 RMS 实时驱动。
-- `AsrEngine` 直接调用 sherpa-onnx C++ API 完成 VAD、ASR、标点（无需 Python）。
-- 收到文本后写剪贴板并发送 `Ctrl+V`。
+- `MainWndProc`：主窗口消息处理。
+- `RegisterWindowClasses`：注册所有窗口类。
+- `wWinMain`：程序入口。
 
 ### `AsrEngine`
 
-C++ 类，封装 sherpa-onnx API，缓存模型实例：
+C++ 类，位于 `src/engine.h` / `src/engine.cpp`，封装 sherpa-onnx API，缓存模型实例：
 
 - `OfflineRecognizer`：ASR 识别（FireRedASR2 CTC/AED、SenseVoice）。
 - `VoiceActivityDetector`：Silero VAD。
@@ -86,10 +97,10 @@ C++ 类，封装 sherpa-onnx API，缓存模型实例：
 
 - Settings 不要再放页面大标题，标题栏已有窗口名。
 - 当前 Settings 使用 4 个 tab：
-  - `Recognition`
-  - `Shortcut`
+  - `Recognition`（含快捷键配置）
   - `LLM`（供应商配置、API Key、Model、Test Connection、Extra Params）
   - `LLM Prompt`（System Prompt 编辑、Basic Fix / Deep Fix 预设）
+  - `Cloud ASR`（百度智能云 / 火山引擎豆包）
 - 底部 `Status / Save / Close` 通过 `LayoutSettingsWindow()` 按客户区底部动态定位。
 - 高 DPI 下 Win32 控件容易裁字；控件高度宁可留大一点。
 - tab 字体已故意设小，避免占用空间。
@@ -113,7 +124,7 @@ v0.2.1 起新增多供应商预设系统：
 
 v0.1.4 起移除了 Python worker，改为 C++ 直接调用 sherpa-onnx。
 
-`AsrEngine` 类位于 `src/main.cpp` 内部，通过 `g_asrEngine` 全局实例访问。模型加载在后台线程完成，不阻塞 UI。
+`AsrEngine` 类位于 `src/engine.h` / `src/engine.cpp`，通过 `g_asrEngine` 全局实例访问。模型加载在后台线程完成，不阻塞 UI。
 
 ## 后续优先级建议
 

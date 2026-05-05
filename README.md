@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  Current version: <code>v0.5.0</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
+  Current version: <code>v0.6.0</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -144,11 +144,16 @@ Features:
 
 ```
 src/
-  main.cpp          — Tray, Settings, HUD, hotkeys, recording, ASR engine
+  main.cpp          — Entry point, recording session, LLM refine orchestration
+  engine.h / .cpp   — Config, ASR engine, audio capture, utility functions
+  hud.h / .cpp      — HUD window, Direct2D rendering, tray icon, UI resources
+  hotkey.h / .cpp   — Hotkey logic, CapsLock, keyboard hook, HotkeyEdit control
+  settings.h / .cpp — Settings window, controls, load/save, provider management
   baidu_asr.h       — Baidu Cloud ASR module (header-only)
   volcengine_asr.h  — Volcengine (豆包) ASR module (header-only, WebSocket)
   firered_vad.h     — FireRed VAD module (header-only)
   llm_refine.h      — LLM correction module (header-only)
+  globals.h         — Shared constants, control IDs, extern global variables
   resources.rc / resource.h / app.ico / app.manifest
 dll/                — Runtime DLLs (sherpa-onnx, onnxruntime, etc.)
 third_party/        — Headers and import libraries
@@ -178,6 +183,7 @@ CHANGELOG.md        — Version change log
 See [CHANGELOG.md](CHANGELOG.md)
 
 **Recent Updates:**
+- **v0.6.0** — Source code refactored from single-file to multi-module architecture
 - **v0.5.0** — Cloud ASR UI overhaul, async mode fix, Shortcut merged into Recognition
 - **v0.4.0** — Volcengine (豆包) streaming ASR integration via WebSocket
 - **v0.3.0** — Baidu Cloud ASR integration

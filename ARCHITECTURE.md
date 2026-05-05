@@ -34,6 +34,25 @@ Single process. Responsibilities:
 
 `AsrEngine` internally caches `OfflineRecognizer`, `VoiceActivityDetector`, and `OfflinePunctuation`. The same model is not loaded repeatedly.
 
+## Source Code Structure
+
+Since v0.6.0, the source code is organized into multiple modules:
+
+| File | Responsibility |
+|------|---------------|
+| `src/globals.h` | Shared constants, control IDs, struct definitions, extern global variable declarations |
+| `src/engine.h` / `src/engine.cpp` | Backend: string/path utilities, JSON config persistence, audio capture, `AsrEngine` class |
+| `src/hud.h` / `src/hud.cpp` | HUD window, Direct2D/DirectWrite rendering, tray icon, UI resource creation/deletion |
+| `src/hotkey.h` / `src/hotkey.cpp` | Hotkey config, CapsLock long-press logic, `WH_KEYBOARD_LL` hook, `HotkeyEdit` custom control |
+| `src/settings.h` / `src/settings.cpp` | Settings window, tab UI, control creation, load/save, provider management, input dialog |
+| `src/main.cpp` | Entry point (`wWinMain`), main window procedure, recording session orchestration, LLM refine |
+| `src/llm_refine.h` | LLM correction module (header-only, `llm::` namespace) |
+| `src/baidu_asr.h` | Baidu Cloud ASR module (header-only) |
+| `src/volcengine_asr.h` | Volcengine (豆包) ASR module (header-only, WebSocket) |
+| `src/firered_vad.h` | FireRed VAD module (header-only) |
+
+Global variables are defined in `main.cpp` and accessed by other modules via `extern` declarations in `globals.h`.
+
 ## Main Modules
 
 ### Tray and Main Window
@@ -50,10 +69,10 @@ Tray menu:
 
 Settings is a standard Win32 window with 4 tabs:
 
-- `Recognition`: Model, model directory, threads, VAD, Partial, Punctuation.
-- `Shortcut`: Long-press recording hotkey, default `CapsLock`.
+- `Recognition`: ASR Backend, model, model directory, threads, VAD, VAD model, Punctuation, hotkey config.
 - `LLM`: Provider selection (Provider dropdown + [+] / [−]), API Base URL, API Key, Model, Test Connection, Debug log, Extra Params.
 - `LLM Prompt`: System Prompt editor (multi-line), Basic Fix / Deep Fix preset buttons.
+- `Cloud ASR`: Cloud provider selection, Baidu/Volcengine provider-specific fields.
 
 When Settings is opened:
 
@@ -131,7 +150,7 @@ Current strategy (shared by both VADs):
 
 ### ASR Engine
 
-`AsrEngine` class (inside `src/main.cpp`) encapsulates the sherpa-onnx C++ API:
+`AsrEngine` class (in `src/engine.h` / `src/engine.cpp`) encapsulates the sherpa-onnx C++ API:
 
 - `OfflineRecognizer`: ASR recognition (FireRedASR2 CTC/AED, SenseVoice)
 - `VoiceActivityDetector`: Silero VAD
@@ -148,7 +167,7 @@ Runtime DLL dependencies:
 
 ### Model Adaptation
 
-`asr_worker.py` creates different recognizers based on `model_id`:
+`AsrEngine` creates different recognizers based on `model_id`:
 
 | model_id | Model | Files |
 | --- | --- | --- |
@@ -187,7 +206,7 @@ Future improvements:
 Configuration is saved to:
 
 ```text
-%APPDATA%\VoiceLLMASRInput\config.json
+<app-root>/config.json
 ```
 
 Current structure is a flat JSON:

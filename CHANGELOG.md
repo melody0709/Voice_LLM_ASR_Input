@@ -2,6 +2,27 @@
 
 > 🇨🇳 [中文版](doc/CHANGELOG_zh.md)
 
+## v0.6.0 (2026-05-06)
+
+### Changed
+
+- **Source code refactored from single-file to multi-module architecture**: `src/main.cpp` (3269 lines) split into 5 compilation units with clear separation of concerns
+  - `src/globals.h` — Shared constants, control IDs, struct definitions, extern global variable declarations
+  - `src/engine.h` / `src/engine.cpp` (~750 lines) — Backend: Config persistence, ASR engine, audio capture, utility functions
+  - `src/hud.h` / `src/hud.cpp` (~380 lines) — HUD window, Direct2D rendering, tray icon, UI resource management
+  - `src/hotkey.h` / `src/hotkey.cpp` (~330 lines) — Hotkey logic, CapsLock long-press, keyboard hook, HotkeyEdit custom control
+  - `src/settings.h` / `src/settings.cpp` (~1190 lines) — Settings window, controls, load/save, provider management, input dialog
+  - `src/main.cpp` (~560 lines) — Entry point (WinMain), main window procedure, recording session orchestration, LLM refine
+- Global variables defined in `main.cpp`, other modules access via `extern` declarations in `globals.h`
+- `build.bat` updated: `cl` command now compiles 5 source files
+- `CMakeLists.txt` updated: `add_executable` includes new `.cpp` files, added `winhttp` and `crypt32` link dependencies
+- `.clangd` updated: Added UTF-8 charset flags for sherpa-onnx header compatibility
+
+### Fixed
+
+- `SaveConfig` now correctly persists `llm_endpoint`, `llm_api_key`, `llm_model` fields (previously omitted)
+- Removed unused `g_volcFinalText` global variable
+
 ## v0.5.0 (2026-05-05)
 
 ### Added
