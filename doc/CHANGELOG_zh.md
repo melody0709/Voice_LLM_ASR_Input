@@ -2,6 +2,39 @@
 
 > 🇬🇧 [English](../CHANGELOG.md)
 
+## v0.5.0 (2026-05-05)
+
+### 新增
+
+- **Cloud ASR UI 重构**：合并 "Baidu ASR" 和 "豆包ASR" 两个 Tab 为一个 "Cloud ASR" Tab，顶部 Provider 下拉框切换
+  - Provider ComboBox 切换 "百度智能云" 和 "火山引擎（豆包）"，下方控件动态显示/隐藏
+  - 分组标题根据选中的 Provider 动态更新
+- **ASR Backend 选择器移至 Recognition Tab**：作为全局设置放在 Recognition Tab 顶部
+- **Shortcut 设置合并到 Recognition Tab**：删除独立 Shortcut Tab，快捷键配置移至 Recognition Tab 底部，加分隔线
+- **豆包 ASR Mode 排序调整**：File Recognition (nostream) 排第一（推荐默认）
+- **豆包 Model Version 清理**：删除 BigASR 1.0 选项，仅保留 Seed-ASR 2.0 (duration/concurrent)
+- **Cloud ASR 报告**：新增 `.trae/documents/cloud_asr_report.md`，记录协议细节、调试指南和踩坑记录
+
+### 变更
+
+- Settings Tab 从 6 个减为 4 个：`Recognition` / `LLM` / `LLM Prompt` / `Cloud ASR`
+- 豆包默认模式改为 `bigmodel_nostream`（录音文件识别）
+
+### 修复
+
+- **豆包 nostream 空结果**：`SendAudio(isLast=true)` 返回值被丢弃，现已保存到 `lastPartial` 作为回退
+- **ReceiveResult 超时未生效**：`timeoutMs` 参数被忽略，始终使用 2000ms；现通过 `WinHttpSetOption` 动态设置
+- **豆包 async 模式超时**：`bigmodel_async` 模式因 `ReceiveResult` 阻塞音频发送导致 8 秒超时；修复为发送/接收线程分离
+  - 发送线程：只发音频包，不阻塞在接收上，保证 200ms 间隔
+  - 接收线程（drainThread）：持续排空 WebSocket 接收缓冲区，有部分结果就更新 HUD
+- **百度 App ID 移除**：确认百度 REST API 不使用 App ID，从 BaiduConfig、UI、config.json 中移除
+
+### 移除
+
+- 移除 `IDC_BAIDU_APP_ID` 控件和 `baiduAppId` 配置字段
+- 移除 "Shortcut" Tab（合并到 Recognition）
+- 移除 BigASR 1.0 模型版本选项
+
 ## v0.2.2 (2026-05-02)
 
 ### Added

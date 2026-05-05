@@ -27,6 +27,8 @@
 #include "sherpa-onnx/c-api/cxx-api.h"
 #include "firered_vad.h"
 #include "llm_refine.h"
+#include "baidu_asr.h"
+#include "volcengine_asr.h"
 
 #include "resource.h"
 
@@ -98,6 +100,20 @@ constexpr int IDC_LLM_PROVIDER_ADD = 2031;
 constexpr int IDC_LLM_PROVIDER_DEL = 2032;
 constexpr int IDC_LLM_EXTRA_RESET = 2033;
 constexpr int IDC_DOWNLOAD_MODELS = 2034;
+constexpr int IDC_ASR_BACKEND = 2035;
+constexpr int IDC_BAIDU_API_KEY = 2037;
+constexpr int IDC_BAIDU_SECRET_KEY = 2038;
+constexpr int IDC_BAIDU_DEV_PID = 2039;
+constexpr int IDC_BAIDU_TEST = 2040;
+constexpr int IDC_BAIDU_SHOW_KEY = 2041;
+constexpr int IDC_CLOUD_PROVIDER = 2042;
+constexpr int IDC_VOLC_API_KEY = 2043;
+constexpr int IDC_VOLC_RESOURCE = 2044;
+constexpr int IDC_VOLC_LANGUAGE = 2045;
+constexpr int IDC_VOLC_TEST = 2046;
+constexpr int IDC_VOLC_SHOW_KEY = 2047;
+constexpr int IDC_BAIDU_SHOW_API_KEY = 2048;
+constexpr int IDC_VOLC_MODE = 2049;
 
 struct Config {
     std::wstring modelId = L"firered_ctc";
@@ -116,6 +132,15 @@ struct Config {
     std::wstring llmExtraParams;
     bool enableLlmDebug = false;
     std::wstring llmProvidersJson;
+    std::wstring asrBackend = L"local";
+    std::wstring baiduApiKey;
+    std::wstring baiduSecretKey;
+    int baiduDevPid = 1537;
+    std::wstring cloudProvider = L"baidu";
+    std::wstring volcApiKey;
+    std::wstring volcResourceId = L"volc.seedasr.sauc.duration";
+    std::wstring volcMode = L"bigmodel";
+    std::wstring volcLanguage;   // empty = auto
 };
 
 HINSTANCE g_instance = nullptr;
@@ -158,8 +183,20 @@ std::vector<HWND> g_recognitionControls;
 std::vector<HWND> g_shortcutControls;
 std::vector<HWND> g_llmControls;
 std::vector<HWND> g_promptControls;
+std::vector<HWND> g_cloudAsrControls;
+std::vector<HWND> g_baiduControls;
+std::vector<HWND> g_volcengineControls;
 bool g_hudIsRefining = false;
 bool g_llmKeyVisible = false;
+bool g_baiduKeyVisible = false;
+bool g_baiduApiKeyVisible = false;
+bool g_volcKeyVisible = false;
+volc_asr::VolcSession g_volcSession;
+bool g_volcStreaming = false;
+std::wstring g_volcFinalText;
+std::thread g_volcThread;
+CRITICAL_SECTION g_volcAudioCs;
+std::vector<BYTE> g_volcPendingAudio;
 
 struct HotkeyConfig {
     bool ctrl = false;
@@ -589,6 +626,16 @@ void LoadConfig() {
     g_config.llmModel = ExtractJsonString(json, "llm_model", g_config.llmModel);
     g_config.llmPrompt = ExtractJsonString(json, "llm_prompt", L"");
     g_config.enableLlmDebug = ExtractJsonBool(json, "enable_llm_debug", false);
+    g_config.asrBackend = ExtractJsonString(json, "asr_backend", g_config.asrBackend);
+    g_config.baiduApiKey = ExtractJsonString(json, "baidu_api_key", L"");
+    g_config.baiduSecretKey = llm::DecryptString(ExtractJsonString(json, "baidu_secret_key", L""));
+    g_config.baiduDevPid = _wtoi(ExtractJsonString(json, "baidu_dev_pid", L"1537").c_str());
+    g_config.cloudProvider = ExtractJsonString(json, "cloud_provider", L"baidu");
+    if (g_config.cloudProvider.empty()) g_config.cloudProvider = L"baidu";
+    g_config.volcApiKey = llm::DecryptString(ExtractJsonString(json, "volc_api_key", L""));
+    g_config.volcResourceId = ExtractJsonString(json, "volc_resource_id", L"volc.seedasr.sauc.duration");
+    g_config.volcMode = ExtractJsonString(json, "volc_mode", L"bigmodel");
+    g_config.volcLanguage = ExtractJsonString(json, "volc_language", L"");
     if (g_config.modelDir.empty()) {
         g_config.modelDir = DefaultModelDir(g_config.modelId);
     }
@@ -624,13 +671,24 @@ void SaveConfig() {
          << "  \"llm_provider\": \"" << EscapeJson(g_config.llmProvider) << "\",\n"
          << "  \"llm_providers_json\": \"" << EscapeJson(g_config.llmProvidersJson) << "\",\n"
          << "  \"llm_prompt\": \"" << EscapeJson(g_config.llmPrompt) << "\",\n"
-         << "  \"enable_llm_debug\": " << (g_config.enableLlmDebug ? "true" : "false") << "\n"
+         << "  \"enable_llm_debug\": " << (g_config.enableLlmDebug ? "true" : "false") << ",\n"
+         << "  \"asr_backend\": \"" << EscapeJson(g_config.asrBackend) << "\",\n"
+         << "  \"baidu_api_key\": \"" << EscapeJson(g_config.baiduApiKey) << "\",\n"
+         << "  \"baidu_secret_key\": \"" << EscapeJson(llm::EncryptString(g_config.baiduSecretKey)) << "\",\n"
+         << "  \"baidu_dev_pid\": " << g_config.baiduDevPid << ",\n"
+         << "  \"cloud_provider\": \"" << EscapeJson(g_config.cloudProvider) << "\",\n"
+         << "  \"volc_api_key\": \"" << EscapeJson(llm::EncryptString(g_config.volcApiKey)) << "\",\n"
+         << "  \"volc_resource_id\": \"" << EscapeJson(g_config.volcResourceId) << "\",\n"
+         << "  \"volc_mode\": \"" << EscapeJson(g_config.volcMode) << "\",\n"
+         << "  \"volc_language\": \"" << EscapeJson(g_config.volcLanguage) << "\"\n"
          << "}\n";
 }
 
 std::wstring ModelDisplayName(const std::wstring& modelId) {
     if (modelId == L"firered_aed") return L"FireRedASR2 AED";
     if (modelId == L"sensevoice") return L"SenseVoiceSmall";
+    if (modelId == L"baidu") return L"Baidu Cloud";
+    if (modelId == L"volcengine") return L"Volcano Engine";
     return L"FireRedASR2 CTC";
 }
 
@@ -713,6 +771,20 @@ void DeleteUiResources() {
 void SetStatus(HWND hwnd, const std::wstring& text) {
     SetWindowTextW(GetDlgItem(hwnd, IDC_STATUS), text.c_str());
 }
+
+struct VolcMapping {
+    int comboIdx; const wchar_t* resourceId;
+};
+constexpr VolcMapping kVolcResources[] = {
+    {0, L"volc.seedasr.sauc.duration"},
+    {1, L"volc.seedasr.sauc.concurrent"},
+    {2, L"volc.bigasr.sauc.duration"},
+    {3, L"volc.bigasr.sauc.concurrent"},
+};
+constexpr const wchar_t* kVolcLanguages[] = {
+    L"", L"en-US", L"ja-JP", L"ko-KR", L"fr-FR",
+    L"de-DE", L"es-MX", L"pt-BR", L"id-ID",
+};
 
 void AddTrayIcon(HWND hwnd) {
     NOTIFYICONDATAW nid = {};
@@ -937,6 +1009,12 @@ void CALLBACK WaveInProc(HWAVEIN waveIn, UINT msg, DWORD_PTR, DWORD_PTR param1, 
         EnterCriticalSection(&g_audioLock);
         g_audioData.insert(g_audioData.end(), begin, begin + header->dwBytesRecorded);
         LeaveCriticalSection(&g_audioLock);
+
+        if (g_volcStreaming && g_volcSession.connected) {
+            EnterCriticalSection(&g_volcAudioCs);
+            g_volcPendingAudio.insert(g_volcPendingAudio.end(), begin, begin + header->dwBytesRecorded);
+            LeaveCriticalSection(&g_volcAudioCs);
+        }
     }
 
     if (g_captureActive) {
@@ -1258,6 +1336,35 @@ void RefineWithLlmAsync(const std::wstring& asrText, const Config& config) {
 
 void RecognizeAsync(const std::vector<BYTE>& pcm) {
     const Config config = g_config;
+
+    if (config.asrBackend == L"baidu") {
+        std::thread([config, pcm]() {
+            baidu_asr::BaiduConfig bcfg;
+            bcfg.apiKey = config.baiduApiKey;
+            bcfg.secretKey = config.baiduSecretKey;
+            bcfg.devPid = config.baiduDevPid;
+
+            std::wstring text = baidu_asr::Recognize(pcm, bcfg);
+            if (text.empty()) {
+                text = L"(empty result)";
+            }
+
+            bool needLlm = (config.postprocess == L"llm")
+                         && !config.llmEndpoint.empty()
+                         && !config.llmApiKey.empty()
+                         && !text.empty()
+                         && text.rfind(L"Baidu ASR error:", 0) != 0;
+
+            if (needLlm) {
+                PostMessageW(g_mainWindow, kAsrResultMessage, 1, reinterpret_cast<LPARAM>(new std::wstring(text)));
+                RefineWithLlmAsync(text, config);
+            } else {
+                PostMessageW(g_mainWindow, kAsrResultMessage, 0, reinterpret_cast<LPARAM>(new std::wstring(text)));
+            }
+        }).detach();
+        return;
+    }
+
     std::thread([config, pcm]() {
         auto samples = PcmToFloat(pcm);
         std::wstring text = g_asrEngine.Recognize(samples, 16000, config);
@@ -1289,12 +1396,137 @@ void StartRecordingSession() {
         return;
     }
     g_recording = true;
-    ShowHud(L"Listening... " + ModelDisplayName(g_config.modelId));
+
+    if (g_config.asrBackend == L"volcengine") {
+        volc_asr::VolcConfig vcfg;
+        vcfg.apiKey = g_config.volcApiKey;
+        vcfg.resourceId = g_config.volcResourceId;
+        vcfg.mode = g_config.volcMode;
+        if (!g_config.volcLanguage.empty()) vcfg.language = g_config.volcLanguage;
+
+        g_volcStreaming = true;
+        g_volcFinalText.clear();
+        ShowHud(L"Listening... Volcano Engine");
+
+        if (g_volcThread.joinable()) g_volcThread.join();
+        g_volcThread = std::thread([vcfg]() {
+            if (!volc_asr::OpenSession(g_volcSession, vcfg)) {
+                g_volcSession.connected = false;
+                std::wstring errMsg = L"VolcEngine connect failed";
+                if (!g_volcSession.lastError.empty()) {
+                    errMsg = g_volcSession.lastError;
+                }
+                ShowHud(errMsg);
+                if (g_hudWindow) SetTimer(g_hudWindow, kHudHideTimer, 4000, nullptr);
+                return;
+            }
+            g_volcSession.connected = true;
+
+            constexpr size_t kChunkBytes = 6400;
+            bool asyncMode = (vcfg.mode == L"bigmodel_async");
+            std::vector<BYTE> chunk;
+            chunk.reserve(kChunkBytes);
+
+            std::wstring lastPartial;
+            std::wstring asyncPartial;
+            bool asyncDrainDone = false;
+            std::thread drainThread;
+
+            if (asyncMode) {
+                drainThread = std::thread([&]() {
+                    while (!asyncDrainDone && g_volcSession.hWebSocket) {
+                        std::wstring partial = volc_asr::DrainReceiveBuffer(g_volcSession.hWebSocket);
+                        if (!partial.empty() && partial != asyncPartial) {
+                            asyncPartial = partial;
+                            ShowHud(L"Listening... Volcano Engine\n" + partial);
+                        }
+                    }
+                    while (g_volcSession.hWebSocket) {
+                        std::wstring partial = volc_asr::DrainReceiveBuffer(g_volcSession.hWebSocket);
+                        if (!partial.empty()) {
+                            asyncPartial = partial;
+                        } else {
+                            break;
+                        }
+                    }
+                });
+            }
+
+            while (true) {
+                bool hasData = false;
+                EnterCriticalSection(&g_volcAudioCs);
+                while (!g_volcPendingAudio.empty() && chunk.size() < kChunkBytes) {
+                    size_t take = (std::min)(kChunkBytes - chunk.size(), g_volcPendingAudio.size());
+                    chunk.insert(chunk.end(), g_volcPendingAudio.begin(), g_volcPendingAudio.begin() + take);
+                    g_volcPendingAudio.erase(g_volcPendingAudio.begin(), g_volcPendingAudio.begin() + take);
+                    hasData = true;
+                }
+                bool streaming = g_volcStreaming;
+                LeaveCriticalSection(&g_volcAudioCs);
+
+                if (hasData && chunk.size() >= kChunkBytes) {
+                    std::wstring partial = volc_asr::SendAudio(g_volcSession, chunk, false, asyncMode);
+                    chunk.clear();
+                    if (!asyncMode && !partial.empty() && partial != lastPartial) {
+                        lastPartial = partial;
+                        ShowHud(L"Listening... Volcano Engine\n" + partial);
+                    }
+                } else if (!streaming) {
+                    break;
+                } else {
+                    Sleep(20);
+                }
+            }
+
+            if (!chunk.empty()) {
+                std::wstring partial = volc_asr::SendAudio(g_volcSession, chunk, false, asyncMode);
+                if (!asyncMode && !partial.empty()) lastPartial = partial;
+            }
+
+            {
+                std::vector<BYTE> empty;
+                std::wstring lastResult = volc_asr::SendAudio(g_volcSession, empty, true);
+                if (!lastResult.empty()) lastPartial = lastResult;
+            }
+
+            if (asyncMode) {
+                asyncDrainDone = true;
+                if (drainThread.joinable()) drainThread.join();
+                if (!asyncPartial.empty()) lastPartial = asyncPartial;
+            }
+
+            std::wstring finalText = volc_asr::CloseSession(g_volcSession);
+            if (finalText.empty()) finalText = lastPartial;
+
+            if (finalText.empty()) finalText = L"(empty result)";
+            PostMessageW(g_mainWindow, kAsrResultMessage, 0,
+                         reinterpret_cast<LPARAM>(new std::wstring(finalText)));
+        });
+        return;
+    }
+
+    std::wstring name = (g_config.asrBackend == L"baidu") ? L"Baidu Cloud" : ModelDisplayName(g_config.modelId);
+    ShowHud(L"Listening... " + name);
 }
 
 void StopRecordingSession() {
     if (!g_recording) return;
     g_recording = false;
+
+    if (g_config.asrBackend == L"volcengine" && g_volcStreaming) {
+        g_volcStreaming = false;
+        const std::vector<BYTE> pcm = StopAudioCapture();
+        if (pcm.size() < 8000) {
+            ShowHud(L"Too short");
+            SetTimer(g_hudWindow, kHudHideTimer, 1200, nullptr);
+            if (g_volcThread.joinable()) g_volcThread.join();
+            volc_asr::CloseSession(g_volcSession);
+            return;
+        }
+        ShowHud(L"Recognizing... Volcano Engine");
+        return;
+    }
+
     const std::vector<BYTE> pcm = StopAudioCapture();
     if (pcm.size() < 8000) {
         ShowHud(L"Too short");
@@ -1302,7 +1534,8 @@ void StopRecordingSession() {
         return;
     }
 
-    ShowHud(L"Recognizing... " + ModelDisplayName(g_config.modelId));
+    std::wstring name = (g_config.asrBackend == L"baidu") ? L"Baidu Cloud" : ModelDisplayName(g_config.modelId);
+    ShowHud(L"Recognizing... " + name);
     RecognizeAsync(pcm);
 }
 
@@ -1463,14 +1696,6 @@ LRESULT CALLBACK HotkeyEditWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         FillRect(hdc, &rc, bg);
         DeleteObject(bg);
 
-        HPEN border = CreatePen(PS_SOLID, 1, state && state->capturing ? RGB(0, 120, 215) : RGB(205, 213, 224));
-        HGDIOBJ oldPen = SelectObject(hdc, border);
-        HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-        RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 6, 6);
-        SelectObject(hdc, oldBrush);
-        SelectObject(hdc, oldPen);
-        DeleteObject(border);
-
         std::wstring text = L"CapsLock";
         COLORREF color = RGB(25, 31, 40);
         if (state) {
@@ -1496,7 +1721,7 @@ LRESULT CALLBACK HotkeyEditWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
 }
 
 HWND CreateHotkeyEdit(HWND parent, int id, int x, int y, int w, int h, const HotkeyConfig& initial) {
-    HWND edit = CreateWindowExW(0, kHotkeyEditClass, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+    HWND edit = CreateWindowExW(WS_EX_CLIENTEDGE, kHotkeyEditClass, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                                 x, y, w, h, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_instance, nullptr);
     auto* state = reinterpret_cast<HotkeyEditState*>(GetWindowLongPtrW(edit, GWLP_USERDATA));
     if (state) {
@@ -1529,18 +1754,53 @@ void AddPromptControl(HWND hwnd) {
     if (hwnd) g_promptControls.push_back(hwnd);
 }
 
+void AddCloudAsrControl(HWND hwnd) {
+    if (hwnd) g_cloudAsrControls.push_back(hwnd);
+}
+
+void AddBaiduControl(HWND hwnd) {
+    if (hwnd) g_baiduControls.push_back(hwnd);
+}
+
+void AddVolcengineControl(HWND hwnd) {
+    if (hwnd) g_volcengineControls.push_back(hwnd);
+}
+
+int g_cloudProviderIdx = 0;
+HWND g_cloudSectionLabel = nullptr;
+
+void ShowCloudSubPage(HWND hwnd, int providerIdx) {
+    g_cloudProviderIdx = providerIdx;
+    for (HWND c : g_baiduControls) ShowWindow(c, providerIdx == 0 ? SW_SHOW : SW_HIDE);
+    for (HWND c : g_volcengineControls) ShowWindow(c, providerIdx == 1 ? SW_SHOW : SW_HIDE);
+    if (g_cloudSectionLabel) {
+        SetWindowTextW(g_cloudSectionLabel, providerIdx == 0
+            ? L"\u2500\u2500 \u767E\u5EA6\u667A\u80FD\u4E91 \u2500\u2500"
+            : L"\u2500\u2500 \u706B\u5C71\u5F15\u64CE\uFF08\u8C46\u5305\uFF09 \u2500\u2500");
+    }
+}
+
 void ShowSettingsPage(HWND hwnd, int page) {
     for (HWND control : g_recognitionControls) {
         ShowWindow(control, page == 0 ? SW_SHOW : SW_HIDE);
     }
     for (HWND control : g_shortcutControls) {
-        ShowWindow(control, page == 1 ? SW_SHOW : SW_HIDE);
+        ShowWindow(control, page == 0 ? SW_SHOW : SW_HIDE);
     }
     for (HWND control : g_llmControls) {
-        ShowWindow(control, page == 2 ? SW_SHOW : SW_HIDE);
+        ShowWindow(control, page == 1 ? SW_SHOW : SW_HIDE);
     }
     for (HWND control : g_promptControls) {
+        ShowWindow(control, page == 2 ? SW_SHOW : SW_HIDE);
+    }
+    for (HWND control : g_cloudAsrControls) {
         ShowWindow(control, page == 3 ? SW_SHOW : SW_HIDE);
+    }
+    if (page == 3) {
+        ShowCloudSubPage(hwnd, g_cloudProviderIdx);
+    } else {
+        for (HWND c : g_baiduControls) ShowWindow(c, SW_HIDE);
+        for (HWND c : g_volcengineControls) ShowWindow(c, SW_HIDE);
     }
     InvalidateRect(hwnd, nullptr, TRUE);
 }
@@ -1548,13 +1808,13 @@ void ShowSettingsPage(HWND hwnd, int page) {
 void LayoutSettingsWindow(HWND hwnd) {
     RECT rc;
     GetClientRect(hwnd, &rc);
-    const int margin = 24;
+    const int margin = 12;
     const int footerHeight = 78;
     const int footerTop = (rc.bottom - footerHeight > 460) ? rc.bottom - footerHeight : 460;
     const int tabBottom = footerTop - 24;
     HWND tab = GetDlgItem(hwnd, IDC_SETTINGS_TAB);
     if (tab) {
-        MoveWindow(tab, margin, 28, rc.right - margin * 2, tabBottom - 28, TRUE);
+        MoveWindow(tab, margin, 16, rc.right - margin * 2, tabBottom - 16, TRUE);
     }
     HWND status = GetDlgItem(hwnd, IDC_STATUS);
     if (status) {
@@ -1683,8 +1943,95 @@ void LoadSettingsControls(HWND hwnd) {
     HWND showKeyBtn = GetDlgItem(hwnd, IDC_LLM_SHOW_KEY);
     if (showKeyBtn) SetWindowTextW(showKeyBtn, L"Show");
     HWND keyEdit = GetDlgItem(hwnd, IDC_LLM_KEY);
-    if (keyEdit) SendMessageW(keyEdit, EM_SETPASSWORDCHAR, L'•', 0);
+    if (keyEdit) SendMessageW(keyEdit, EM_SETPASSWORDCHAR, L'●', 0);
     Button_SetCheck(GetDlgItem(hwnd, IDC_LLM_DEBUG), g_config.enableLlmDebug ? BST_CHECKED : BST_UNCHECKED);
+
+    HWND backendCombo = GetDlgItem(hwnd, IDC_ASR_BACKEND);
+    ComboBox_AddString(backendCombo, L"Local (sherpa-onnx)");
+    ComboBox_AddString(backendCombo, L"Baidu Cloud");
+    ComboBox_AddString(backendCombo, L"Volcano Engine");
+    int backendIdx = 0;
+    if (g_config.asrBackend == L"baidu") backendIdx = 1;
+    else if (g_config.asrBackend == L"volcengine") backendIdx = 2;
+    ComboBox_SetCurSel(backendCombo, backendIdx);
+
+    HWND cloudProviderCombo = GetDlgItem(hwnd, IDC_CLOUD_PROVIDER);
+    ComboBox_AddString(cloudProviderCombo, L"\u767E\u5EA6\u667A\u80FD\u4E91");
+    ComboBox_AddString(cloudProviderCombo, L"\u706B\u5C71\u5F15\u64CE\uFF08\u8C46\u5305\uFF09");
+    int cloudIdx = (g_config.cloudProvider == L"volcengine") ? 1 : 0;
+    ComboBox_SetCurSel(cloudProviderCombo, cloudIdx);
+    g_cloudProviderIdx = cloudIdx;
+
+    g_baiduKeyVisible = false;
+    HWND showBaiduBtn = GetDlgItem(hwnd, IDC_BAIDU_SHOW_KEY);
+    if (showBaiduBtn) SetWindowTextW(showBaiduBtn, L"Show");
+    HWND baiduKeyEdit = GetDlgItem(hwnd, IDC_BAIDU_SECRET_KEY);
+    if (baiduKeyEdit) SendMessageW(baiduKeyEdit, EM_SETPASSWORDCHAR, L'●', 0);
+
+    g_baiduApiKeyVisible = false;
+    HWND showBaiduApiBtn = GetDlgItem(hwnd, IDC_BAIDU_SHOW_API_KEY);
+    if (showBaiduApiBtn) SetWindowTextW(showBaiduApiBtn, L"Show");
+    HWND baiduApiKeyEdit = GetDlgItem(hwnd, IDC_BAIDU_API_KEY);
+    if (baiduApiKeyEdit) SendMessageW(baiduApiKeyEdit, EM_SETPASSWORDCHAR, L'●', 0);
+
+    g_volcKeyVisible = false;
+    HWND showVolcBtn = GetDlgItem(hwnd, IDC_VOLC_SHOW_KEY);
+    if (showVolcBtn) SetWindowTextW(showVolcBtn, L"Show");
+    HWND volcKeyEdit = GetDlgItem(hwnd, IDC_VOLC_API_KEY);
+    if (volcKeyEdit) SendMessageW(volcKeyEdit, EM_SETPASSWORDCHAR, L'●', 0);
+
+    SetWindowTextW(GetDlgItem(hwnd, IDC_BAIDU_API_KEY), g_config.baiduApiKey.c_str());
+    SetWindowTextW(GetDlgItem(hwnd, IDC_BAIDU_SECRET_KEY), g_config.baiduSecretKey.c_str());
+
+    HWND devPidCombo = GetDlgItem(hwnd, IDC_BAIDU_DEV_PID);
+    ComboBox_AddString(devPidCombo, L"Mandarin (1537)");
+    ComboBox_AddString(devPidCombo, L"English (1737)");
+    ComboBox_AddString(devPidCombo, L"Cantonese (1637)");
+    ComboBox_AddString(devPidCombo, L"Sichuanese (1837)");
+    int devPidIdx = 0;
+    if (g_config.baiduDevPid == 1737) devPidIdx = 1;
+    else if (g_config.baiduDevPid == 1637) devPidIdx = 2;
+    else if (g_config.baiduDevPid == 1837) devPidIdx = 3;
+    ComboBox_SetCurSel(devPidCombo, devPidIdx);
+
+    SetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_API_KEY), g_config.volcApiKey.c_str());
+
+    HWND volcModeCombo = GetDlgItem(hwnd, IDC_VOLC_MODE);
+    ComboBox_AddString(volcModeCombo, L"File Recognition (nostream)");
+    ComboBox_AddString(volcModeCombo, L"Streaming (bigmodel)");
+    ComboBox_AddString(volcModeCombo, L"Streaming Optimized (async)");
+    int modeIdx = 0;
+    if (g_config.volcMode == L"bigmodel") modeIdx = 1;
+    else if (g_config.volcMode == L"bigmodel_async") modeIdx = 2;
+    ComboBox_SetCurSel(volcModeCombo, modeIdx);
+
+    HWND volcResCombo = GetDlgItem(hwnd, IDC_VOLC_RESOURCE);
+    ComboBox_AddString(volcResCombo, L"Seed-ASR 2.0 (duration)");
+    ComboBox_AddString(volcResCombo, L"Seed-ASR 2.0 (concurrent)");
+    int resIdx = 0;
+    if (g_config.volcResourceId == L"volc.seedasr.sauc.concurrent") resIdx = 1;
+    ComboBox_SetCurSel(volcResCombo, resIdx);
+
+    HWND volcLangCombo = GetDlgItem(hwnd, IDC_VOLC_LANGUAGE);
+    ComboBox_AddString(volcLangCombo, L"Auto (Chinese+English+Dialects)");
+    ComboBox_AddString(volcLangCombo, L"English (en-US)");
+    ComboBox_AddString(volcLangCombo, L"Japanese (ja-JP)");
+    ComboBox_AddString(volcLangCombo, L"Korean (ko-KR)");
+    ComboBox_AddString(volcLangCombo, L"French (fr-FR)");
+    ComboBox_AddString(volcLangCombo, L"German (de-DE)");
+    ComboBox_AddString(volcLangCombo, L"Spanish (es-MX)");
+    ComboBox_AddString(volcLangCombo, L"Portuguese (pt-BR)");
+    ComboBox_AddString(volcLangCombo, L"Indonesian (id-ID)");
+    int langIdx = 0;
+    if (g_config.volcLanguage == L"en-US") langIdx = 1;
+    else if (g_config.volcLanguage == L"ja-JP") langIdx = 2;
+    else if (g_config.volcLanguage == L"ko-KR") langIdx = 3;
+    else if (g_config.volcLanguage == L"fr-FR") langIdx = 4;
+    else if (g_config.volcLanguage == L"de-DE") langIdx = 5;
+    else if (g_config.volcLanguage == L"es-MX") langIdx = 6;
+    else if (g_config.volcLanguage == L"pt-BR") langIdx = 7;
+    else if (g_config.volcLanguage == L"id-ID") langIdx = 8;
+    ComboBox_SetCurSel(volcLangCombo, langIdx);
 
     SetStatus(hwnd, L"Ready.");
 }
@@ -1747,6 +2094,47 @@ void SaveSettingsControls(HWND hwnd) {
     g_config.llmProvider = ComboText(GetDlgItem(hwnd, IDC_LLM_PROVIDER));
 
     g_config.enableLlmDebug = Button_GetCheck(GetDlgItem(hwnd, IDC_LLM_DEBUG)) == BST_CHECKED;
+
+    {
+        int sel = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_ASR_BACKEND));
+        if (sel == 1) g_config.asrBackend = L"baidu";
+        else if (sel == 2) g_config.asrBackend = L"volcengine";
+        else g_config.asrBackend = L"local";
+    }
+    {
+        int cloudIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_CLOUD_PROVIDER));
+        g_config.cloudProvider = (cloudIdx == 1) ? L"volcengine" : L"baidu";
+    }
+    wchar_t baiduApiKey[256] = {};
+    GetWindowTextW(GetDlgItem(hwnd, IDC_BAIDU_API_KEY), baiduApiKey, 256);
+    g_config.baiduApiKey = baiduApiKey;
+    wchar_t baiduSecretKey[256] = {};
+    GetWindowTextW(GetDlgItem(hwnd, IDC_BAIDU_SECRET_KEY), baiduSecretKey, 256);
+    g_config.baiduSecretKey = baiduSecretKey;
+    {
+        int devPidIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_BAIDU_DEV_PID));
+        int pids[] = {1537, 1737, 1637, 1837};
+        if (devPidIdx >= 0 && devPidIdx < 4) g_config.baiduDevPid = pids[devPidIdx];
+    }
+
+    wchar_t volcApiKey[256] = {};
+    GetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_API_KEY), volcApiKey, 256);
+    g_config.volcApiKey = volcApiKey;
+    {
+        int modeIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_VOLC_MODE));
+        if (modeIdx == 1) g_config.volcMode = L"bigmodel";
+        else if (modeIdx == 2) g_config.volcMode = L"bigmodel_async";
+        else g_config.volcMode = L"bigmodel_nostream";
+    }
+    {
+        int resIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_VOLC_RESOURCE));
+        if (resIdx == 1) g_config.volcResourceId = L"volc.seedasr.sauc.concurrent";
+        else g_config.volcResourceId = L"volc.seedasr.sauc.duration";
+    }
+    {
+        int langIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_VOLC_LANGUAGE));
+        if (langIdx >= 0 && langIdx < 9) g_config.volcLanguage = kVolcLanguages[langIdx];
+    }
 
     SaveConfig();
     SetStatus(hwnd, L"Saved. ASR engine reloaded.");
@@ -2175,121 +2563,189 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         g_shortcutControls.clear();
         g_llmControls.clear();
         g_promptControls.clear();
+        g_cloudAsrControls.clear();
+        g_baiduControls.clear();
+        g_volcengineControls.clear();
 
         HWND tab = CreateWindowW(WC_TABCONTROLW, nullptr, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
-                                24, 28, 786, 330, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_TAB)), g_instance, nullptr);
+                                12, 16, 786, 330, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_TAB)), g_instance, nullptr);
         ApplyUiFont(tab);
         TCITEMW item = {};
         item.mask = TCIF_TEXT;
         item.pszText = const_cast<LPWSTR>(L"Recognition");
         TabCtrl_InsertItem(tab, 0, &item);
-        item.pszText = const_cast<LPWSTR>(L"Shortcut");
-        TabCtrl_InsertItem(tab, 1, &item);
         item.pszText = const_cast<LPWSTR>(L"LLM");
-        TabCtrl_InsertItem(tab, 2, &item);
+        TabCtrl_InsertItem(tab, 1, &item);
         item.pszText = const_cast<LPWSTR>(L"LLM Prompt");
+        TabCtrl_InsertItem(tab, 2, &item);
+        item.pszText = const_cast<LPWSTR>(L"Cloud ASR");
         TabCtrl_InsertItem(tab, 3, &item);
 
-        HWND control = CreateLabel(hwnd, 54, 82, 130, 30, L"ASR model");
+        HWND control = CreateLabel(hwnd, 42, 82, 130, 30, L"ASR Backend");
         AddRecognitionControl(control);
-        AddRecognitionControl(CreateCombo(hwnd, IDC_MODEL, 200, 76, 330, 180));
+        AddRecognitionControl(CreateCombo(hwnd, IDC_ASR_BACKEND, 188, 76, 330, 150));
 
-        control = CreateLabel(hwnd, 54, 134, 130, 30, L"Model folder");
+        control = CreateLabel(hwnd, 42, 124, 130, 30, L"ASR model");
+        AddRecognitionControl(control);
+        AddRecognitionControl(CreateCombo(hwnd, IDC_MODEL, 188, 118, 330, 180));
+
+        control = CreateLabel(hwnd, 42, 176, 130, 30, L"Model folder");
         AddRecognitionControl(control);
         HWND modelDir = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                                        200, 128, 480, 32, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_MODEL_DIR)), g_instance, nullptr);
+                                        188, 170, 480, 32, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_MODEL_DIR)), g_instance, nullptr);
         ApplyUiFont(modelDir);
         AddRecognitionControl(modelDir);
-        AddRecognitionControl(CreateButton(hwnd, IDC_BROWSE, 694, 127, 92, 34, L"Browse..."));
-        AddRecognitionControl(CreateButton(hwnd, IDC_DOWNLOAD_MODELS, 694, 167, 92, 34, L"Download"));
+        AddRecognitionControl(CreateButton(hwnd, IDC_BROWSE, 682, 169, 92, 34, L"Browse..."));
+        AddRecognitionControl(CreateButton(hwnd, IDC_DOWNLOAD_MODELS, 682, 209, 92, 34, L"Download"));
 
-        control = CreateLabel(hwnd, 54, 186, 130, 30, L"Threads");
+        control = CreateLabel(hwnd, 42, 228, 130, 30, L"Threads");
         AddRecognitionControl(control);
-        AddRecognitionControl(CreateCombo(hwnd, IDC_THREADS, 200, 180, 130, 150));
+        AddRecognitionControl(CreateCombo(hwnd, IDC_THREADS, 188, 222, 130, 150));
         HWND vad = CreateWindowW(L"BUTTON", L"Enable VAD", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                 370, 184, 140, 30, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VAD)), g_instance, nullptr);
+                                 358, 226, 140, 30, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VAD)), g_instance, nullptr);
         HWND partial = CreateWindowW(L"BUTTON", L"Partial result", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                     530, 184, 160, 30, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PARTIAL)), g_instance, nullptr);
+                                     518, 226, 160, 30, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PARTIAL)), g_instance, nullptr);
         ApplyUiFont(vad);
         ApplyUiFont(partial);
         AddRecognitionControl(vad);
         AddRecognitionControl(partial);
 
-        control = CreateLabel(hwnd, 54, 238, 130, 30, L"VAD model");
+        control = CreateLabel(hwnd, 42, 280, 130, 30, L"VAD model");
         AddRecognitionControl(control);
-        AddRecognitionControl(CreateCombo(hwnd, IDC_VAD_MODEL, 200, 232, 250, 150));
+        AddRecognitionControl(CreateCombo(hwnd, IDC_VAD_MODEL, 188, 274, 250, 150));
 
-        control = CreateLabel(hwnd, 54, 290, 130, 30, L"Punctuation");
+        control = CreateLabel(hwnd, 42, 332, 130, 30, L"Punctuation");
         AddRecognitionControl(control);
-        AddRecognitionControl(CreateCombo(hwnd, IDC_POSTPROCESS, 200, 284, 250, 150));
+        AddRecognitionControl(CreateCombo(hwnd, IDC_POSTPROCESS, 188, 326, 250, 150));
 
-        control = CreateLabel(hwnd, 54, 82, 130, 30, L"Hold hotkey");
-        AddShortcutControl(control);
-        AddShortcutControl(CreateHotkeyEdit(hwnd, IDC_HOTKEY, 200, 74, 300, 38, CurrentConfiguredHotkey()));
-        control = CreateLabel(hwnd, 54, 134, 640, 30, L"Click the field, then press the key or key combination to use while recording.");
-        AddShortcutControl(control);
-        control = CreateLabel(hwnd, 54, 174, 640, 30, L"Esc cancels recording a shortcut. Backspace/Delete clears it.");
-        AddShortcutControl(control);
+        HWND shortcutGroup = CreateWindowW(L"BUTTON", L"Shortcut", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+                                           30, 366, 788, 170, hwnd, nullptr, g_instance, nullptr);
+        ApplyUiFont(shortcutGroup);
+        AddRecognitionControl(shortcutGroup);
 
-        control = CreateLabel(hwnd, 54, 82, 130, 30, L"Provider");
+        control = CreateLabel(hwnd, 42, 394, 130, 30, L"Hold hotkey");
+        AddRecognitionControl(control);
+        AddRecognitionControl(CreateHotkeyEdit(hwnd, IDC_HOTKEY, 188, 386, 300, 38, CurrentConfiguredHotkey()));
+        control = CreateLabel(hwnd, 42, 434, 740, 30, L"Click the field, then press the key or key combination to use while recording.");
+        AddRecognitionControl(control);
+        control = CreateLabel(hwnd, 42, 464, 740, 30, L"Esc cancels recording a shortcut. Backspace/Delete clears it.");
+        AddRecognitionControl(control);
+
+        control = CreateLabel(hwnd, 42, 82, 130, 30, L"Provider");
         AddLlmControl(control);
-        AddLlmControl(CreateCombo(hwnd, IDC_LLM_PROVIDER, 200, 76, 480, 400));
-        AddLlmControl(CreateButton(hwnd, IDC_LLM_PROVIDER_ADD, 694, 75, 44, 34, L"+"));
-        AddLlmControl(CreateButton(hwnd, IDC_LLM_PROVIDER_DEL, 742, 75, 44, 34, L"\u2212"));
+        AddLlmControl(CreateCombo(hwnd, IDC_LLM_PROVIDER, 188, 76, 480, 400));
+        AddLlmControl(CreateButton(hwnd, IDC_LLM_PROVIDER_ADD, 682, 75, 44, 34, L"+"));
+        AddLlmControl(CreateButton(hwnd, IDC_LLM_PROVIDER_DEL, 730, 75, 44, 34, L"\u2212"));
 
-        control = CreateLabel(hwnd, 54, 146, 130, 30, L"API Base URL");
+        control = CreateLabel(hwnd, 42, 146, 130, 30, L"API Base URL");
         AddLlmControl(control);
         HWND llmEndpoint = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                                           200, 140, 580, 32, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_ENDPOINT)), g_instance, nullptr);
+                                           188, 140, 580, 32, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_ENDPOINT)), g_instance, nullptr);
         ApplyUiFont(llmEndpoint);
         AddLlmControl(llmEndpoint);
 
-        control = CreateLabel(hwnd, 54, 192, 130, 30, L"API Key");
+        control = CreateLabel(hwnd, 42, 192, 130, 30, L"API Key");
         AddLlmControl(control);
         HWND llmKey = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD,
-                                      200, 186, 480, 32, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_KEY)), g_instance, nullptr);
+                                      188, 186, 480, 32, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_KEY)), g_instance, nullptr);
         ApplyUiFont(llmKey);
         AddLlmControl(llmKey);
-        AddLlmControl(CreateButton(hwnd, IDC_LLM_SHOW_KEY, 694, 185, 92, 34, L"Show"));
+        AddLlmControl(CreateButton(hwnd, IDC_LLM_SHOW_KEY, 682, 185, 92, 34, L"Show"));
 
-        control = CreateLabel(hwnd, 54, 238, 130, 30, L"Model");
+        control = CreateLabel(hwnd, 42, 238, 130, 30, L"Model");
         AddLlmControl(control);
         HWND llmModel = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                                        200, 232, 580, 32, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_MODEL)), g_instance, nullptr);
+                                        188, 232, 580, 32, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_MODEL)), g_instance, nullptr);
         ApplyUiFont(llmModel);
         AddLlmControl(llmModel);
 
-        AddLlmControl(CreateButton(hwnd, IDC_LLM_TEST, 200, 280, 140, 36, L"Test Connection"));
+        AddLlmControl(CreateButton(hwnd, IDC_LLM_TEST, 188, 280, 140, 36, L"Test Connection"));
         HWND llmDebug = CreateWindowW(L"BUTTON", L"Log refine before/after", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                      360, 286, 220, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_DEBUG)), g_instance, nullptr);
+                                      348, 286, 220, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_DEBUG)), g_instance, nullptr);
         ApplyUiFont(llmDebug);
         AddLlmControl(llmDebug);
 
-        control = CreateLabel(hwnd, 54, 336, 130, 30, L"Extra Params");
+        control = CreateLabel(hwnd, 42, 336, 130, 30, L"Extra Params");
         AddLlmControl(control);
         HWND llmExtra = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                                        200, 330, 480, 32, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_EXTRA)), g_instance, nullptr);
+                                        188, 330, 480, 32, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_EXTRA)), g_instance, nullptr);
         ApplyUiFont(llmExtra);
         AddLlmControl(llmExtra);
-        AddLlmControl(CreateButton(hwnd, IDC_LLM_EXTRA_RESET, 694, 329, 92, 34, L"Reset"));
+        AddLlmControl(CreateButton(hwnd, IDC_LLM_EXTRA_RESET, 682, 329, 92, 34, L"Reset"));
         {
             HWND hint = CreateWindowW(L"STATIC",
                 L"JSON snippet merged into request body. e.g. \"thinking\":{\"type\":\"disabled\"}",
-                WS_CHILD | WS_VISIBLE, 200, 364, 480, 20, hwnd, nullptr, g_instance, nullptr);
+                WS_CHILD | WS_VISIBLE, 188, 364, 480, 20, hwnd, nullptr, g_instance, nullptr);
             ApplyUiFont(hint);
             AddLlmControl(hint);
         }
 
-        AddPromptControl(CreateButton(hwnd, IDC_LLM_PRESET1, 200, 76, 120, 32, L"Basic Fix"));
-        AddPromptControl(CreateButton(hwnd, IDC_LLM_PRESET2, 340, 76, 120, 32, L"Deep Fix"));
+        AddPromptControl(CreateButton(hwnd, IDC_LLM_PRESET1, 188, 76, 120, 32, L"Basic Fix"));
+        AddPromptControl(CreateButton(hwnd, IDC_LLM_PRESET2, 328, 76, 120, 32, L"Deep Fix"));
 
-        control = CreateLabel(hwnd, 54, 126, 130, 30, L"System Prompt");
+        control = CreateLabel(hwnd, 42, 126, 130, 30, L"System Prompt");
         AddPromptControl(control);
         HWND llmPrompt = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr,
                                           WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_WANTRETURN,
-                                          200, 120, 580, 340, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_PROMPT)), g_instance, nullptr);
+                                          188, 120, 580, 340, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_PROMPT)), g_instance, nullptr);
         ApplyUiFont(llmPrompt);
         AddPromptControl(llmPrompt);
+
+        control = CreateLabel(hwnd, 42, 82, 130, 30, L"Provider");
+        AddCloudAsrControl(control);
+        AddCloudAsrControl(CreateCombo(hwnd, IDC_CLOUD_PROVIDER, 188, 76, 300, 150));
+
+        control = CreateLabel(hwnd, 42, 116, 200, 30, L"\u2500\u2500 \u767E\u5EA6\u667A\u80FD\u4E91 \u2500\u2500");
+        AddCloudAsrControl(control);
+        g_cloudSectionLabel = control;
+
+        control = CreateLabel(hwnd, 42, 146, 130, 30, L"API Key");
+        AddBaiduControl(control);
+        HWND baiduApiKey = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD,
+                                           188, 140, 330, 32, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_BAIDU_API_KEY)), g_instance, nullptr);
+        ApplyUiFont(baiduApiKey);
+        AddBaiduControl(baiduApiKey);
+        AddBaiduControl(CreateButton(hwnd, IDC_BAIDU_SHOW_API_KEY, 532, 139, 62, 34, L"Show"));
+
+        control = CreateLabel(hwnd, 42, 182, 130, 30, L"Secret Key");
+        AddBaiduControl(control);
+        HWND baiduSecretKey = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD,
+                                              188, 176, 330, 32, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_BAIDU_SECRET_KEY)), g_instance, nullptr);
+        ApplyUiFont(baiduSecretKey);
+        AddBaiduControl(baiduSecretKey);
+        AddBaiduControl(CreateButton(hwnd, IDC_BAIDU_SHOW_KEY, 532, 175, 62, 34, L"Show"));
+
+        control = CreateLabel(hwnd, 42, 218, 130, 30, L"Language Model");
+        AddBaiduControl(control);
+        AddBaiduControl(CreateCombo(hwnd, IDC_BAIDU_DEV_PID, 188, 212, 250, 150));
+
+        AddBaiduControl(CreateButton(hwnd, IDC_BAIDU_TEST, 188, 254, 140, 36, L"Test Connection"));
+
+        control = CreateLabel(hwnd, 42, 146, 130, 30, L"API Key (X-Api-Key)");
+        AddVolcengineControl(control);
+        HWND volcApiKey = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD,
+                                          188, 140, 330, 32, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_API_KEY)), g_instance, nullptr);
+        ApplyUiFont(volcApiKey);
+        AddVolcengineControl(volcApiKey);
+        AddVolcengineControl(CreateButton(hwnd, IDC_VOLC_SHOW_KEY, 532, 139, 62, 34, L"Show"));
+
+        control = CreateLabel(hwnd, 42, 182, 130, 30, L"ASR Mode");
+        AddVolcengineControl(control);
+        AddVolcengineControl(CreateCombo(hwnd, IDC_VOLC_MODE, 188, 176, 300, 150));
+
+        control = CreateLabel(hwnd, 42, 218, 130, 30, L"Model Version");
+        AddVolcengineControl(control);
+        AddVolcengineControl(CreateCombo(hwnd, IDC_VOLC_RESOURCE, 188, 212, 300, 150));
+
+        control = CreateLabel(hwnd, 42, 254, 130, 30, L"Language (optional)");
+        AddVolcengineControl(control);
+        AddVolcengineControl(CreateCombo(hwnd, IDC_VOLC_LANGUAGE, 188, 248, 250, 150));
+
+        AddVolcengineControl(CreateButton(hwnd, IDC_VOLC_TEST, 188, 290, 140, 36, L"Test Connection"));
+
+        control = CreateLabel(hwnd, 42, 330, 640, 50,
+            L"Cloud ASR sends audio to remote servers.\nAll keys are encrypted with DPAPI locally.");
+        AddCloudAsrControl(control);
 
         HWND status = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE,
                                     24, 530, 520, 30, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), g_instance, nullptr);
@@ -2409,7 +2865,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             g_llmKeyVisible = !g_llmKeyVisible;
             HWND keyEdit = GetDlgItem(hwnd, IDC_LLM_KEY);
             if (keyEdit) {
-                SendMessageW(keyEdit, EM_SETPASSWORDCHAR, g_llmKeyVisible ? 0 : L'•', 0);
+                SendMessageW(keyEdit, EM_SETPASSWORDCHAR, g_llmKeyVisible ? 0 : L'●', 0);
                 InvalidateRect(keyEdit, nullptr, TRUE);
             }
             HWND btn = GetDlgItem(hwnd, IDC_LLM_SHOW_KEY);
@@ -2429,6 +2885,91 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             }
             return 0;
         }
+        case IDC_ASR_BACKEND:
+            if (HIWORD(wParam) == CBN_SELCHANGE) {
+                return 0;
+            }
+            break;
+        case IDC_CLOUD_PROVIDER:
+            if (HIWORD(wParam) == CBN_SELCHANGE) {
+                int idx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_CLOUD_PROVIDER));
+                ShowCloudSubPage(hwnd, idx);
+                return 0;
+            }
+            break;
+        case IDC_BAIDU_SHOW_KEY: {
+            g_baiduKeyVisible = !g_baiduKeyVisible;
+            HWND keyEdit = GetDlgItem(hwnd, IDC_BAIDU_SECRET_KEY);
+            if (keyEdit) {
+                SendMessageW(keyEdit, EM_SETPASSWORDCHAR, g_baiduKeyVisible ? 0 : L'●', 0);
+                InvalidateRect(keyEdit, nullptr, TRUE);
+            }
+            HWND btn = GetDlgItem(hwnd, IDC_BAIDU_SHOW_KEY);
+            if (btn) SetWindowTextW(btn, g_baiduKeyVisible ? L"Hide" : L"Show");
+            return 0;
+        }
+        case IDC_BAIDU_SHOW_API_KEY: {
+            g_baiduApiKeyVisible = !g_baiduApiKeyVisible;
+            HWND keyEdit = GetDlgItem(hwnd, IDC_BAIDU_API_KEY);
+            if (keyEdit) {
+                SendMessageW(keyEdit, EM_SETPASSWORDCHAR, g_baiduApiKeyVisible ? 0 : L'●', 0);
+                InvalidateRect(keyEdit, nullptr, TRUE);
+            }
+            HWND btn = GetDlgItem(hwnd, IDC_BAIDU_SHOW_API_KEY);
+            if (btn) SetWindowTextW(btn, g_baiduApiKeyVisible ? L"Hide" : L"Show");
+            return 0;
+        }
+        case IDC_VOLC_SHOW_KEY: {
+            g_volcKeyVisible = !g_volcKeyVisible;
+            HWND keyEdit = GetDlgItem(hwnd, IDC_VOLC_API_KEY);
+            if (keyEdit) {
+                SendMessageW(keyEdit, EM_SETPASSWORDCHAR, g_volcKeyVisible ? 0 : L'●', 0);
+                InvalidateRect(keyEdit, nullptr, TRUE);
+            }
+            HWND btn = GetDlgItem(hwnd, IDC_VOLC_SHOW_KEY);
+            if (btn) SetWindowTextW(btn, g_volcKeyVisible ? L"Hide" : L"Show");
+            return 0;
+        }
+        case IDC_BAIDU_TEST: {
+            baidu_asr::BaiduConfig bcfg;
+            wchar_t tmp[256] = {};
+            GetWindowTextW(GetDlgItem(hwnd, IDC_BAIDU_API_KEY), tmp, 256);
+            bcfg.apiKey = tmp;
+            GetWindowTextW(GetDlgItem(hwnd, IDC_BAIDU_SECRET_KEY), tmp, 256);
+            bcfg.secretKey = tmp;
+            int devPidIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_BAIDU_DEV_PID));
+            int pids[] = {1537, 1737, 1637, 1837};
+            if (devPidIdx >= 0 && devPidIdx < 4) bcfg.devPid = pids[devPidIdx];
+            SetStatus(hwnd, L"Testing Baidu ASR connection...");
+            std::thread([hwnd, bcfg]() {
+                baidu_asr::TestResult result = baidu_asr::TestConnection(bcfg);
+                PostMessageW(hwnd, WM_APP + 10, result.ok ? 0 : 1,
+                    reinterpret_cast<LPARAM>(new std::wstring(result.message)));
+            }).detach();
+            return 0;
+        }
+        case IDC_VOLC_TEST: {
+            volc_asr::VolcConfig vcfg;
+            wchar_t tmp[256] = {};
+            GetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_API_KEY), tmp, 256);
+            vcfg.apiKey = tmp;
+            int modeIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_VOLC_MODE));
+            if (modeIdx == 1) vcfg.mode = L"bigmodel";
+            else if (modeIdx == 2) vcfg.mode = L"bigmodel_async";
+            else vcfg.mode = L"bigmodel_nostream";
+            int resIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_VOLC_RESOURCE));
+            if (resIdx == 1) vcfg.resourceId = L"volc.seedasr.sauc.concurrent";
+            else vcfg.resourceId = L"volc.seedasr.sauc.duration";
+            int langIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_VOLC_LANGUAGE));
+            if (langIdx >= 0 && langIdx < 9) vcfg.language = kVolcLanguages[langIdx];
+            SetStatus(hwnd, L"Testing Volcano Engine ASR connection...");
+            std::thread([hwnd, vcfg]() {
+                volc_asr::TestResult result = volc_asr::TestConnection(vcfg);
+                PostMessageW(hwnd, WM_APP + 10, result.ok ? 0 : 1,
+                    reinterpret_cast<LPARAM>(new std::wstring(result.message)));
+            }).detach();
+            return 0;
+        }
         default:
             break;
         }
@@ -2446,9 +2987,14 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         if (wParam == 0) {
             SetStatus(hwnd, msg ? msg->c_str() : L"OK");
         } else {
-            std::wstring err = L"Connection failed: ";
-            if (msg) err += *msg;
-            SetStatus(hwnd, err.c_str());
+            std::wstring shortMsg = L"Connection failed";
+            if (msg) {
+                size_t nl = msg->find(L'\n');
+                shortMsg = L"Connection failed: " + (nl != std::wstring::npos ? msg->substr(0, nl) : *msg);
+                MessageBoxW(hwnd, msg->c_str(), L"Connection Test Failed",
+                            MB_ICONERROR | MB_OK);
+            }
+            SetStatus(hwnd, shortMsg.c_str());
         }
         return 0;
     }
@@ -2471,7 +3017,7 @@ void ShowSettingsWindow(HWND owner) {
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             850,
-            640,
+            680,
             owner,
             nullptr,
             g_instance,
@@ -2520,6 +3066,12 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             ShowSettingsWindow(hwnd);
         }
         return 0;
+    case WM_APP + 10: {
+        std::unique_ptr<std::wstring> msg(reinterpret_cast<std::wstring*>(lParam));
+        const std::wstring text = msg ? *msg : L"";
+        SetStatus(hwnd, text.empty() ? L"Test completed." : text);
+        return 0;
+    }
     case kReloadMessage:
         g_asrEngine.Reload();
         ShowHud(L"ASR engine reloaded: " + ModelDisplayName(g_config.modelId));
@@ -2638,6 +3190,7 @@ bool RegisterWindowClasses() {
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     g_instance = instance;
     InitializeCriticalSection(&g_audioLock);
+    InitializeCriticalSection(&g_volcAudioCs);
     InitCommonControls();
     g_appIcon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_APP_ICON));
     if (!g_appIcon) {

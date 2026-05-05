@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  当前版本：<code>v0.2.2</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
+  当前版本：<code>v0.5.0</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -31,6 +31,7 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 - **实时 HUD** — 录音时底部显示悬浮胶囊窗，5 根音量条随声音跳动
 - **双 VAD 可选** — Silero VAD（轻量）/ FireRed VAD（高精度 F1 97.57），智能跳过静音
 - **LLM 纠错（可选）** — 支持 DeepSeek / OpenRouter / SiliconFlow 等多供应商，一键配置
+- **Cloud ASR（可选）** — 支持百度智能云和火山引擎（豆包）流式 ASR 作为替代后端
 
 ## Quick Start
 
@@ -66,7 +67,8 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 <summary><strong>⚙️ Settings 说明</strong></summary>
 
 **Recognition tab**
-- `ASR model` — 语音识别模型：
+- `ASR Backend` — 选择 `Local (sherpa-onnx)` / `Baidu Cloud` / `Volcano Engine`
+- `ASR model` — 语音识别模型（仅 Local 后端）：
   - `FireRedASR2 CTC` — 速度快，适合日常输入
   - `FireRedASR2 AED` — 质量更好，长句更准
   - `SenseVoiceSmall` — 轻量模型，适合低资源机器
@@ -80,11 +82,9 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
   - `Disabled` — 不处理，输出 ASR 原文
   - `Auto punctuate` — 本地 CT-Transformer 自动补标点（无需网络）
   - `Auto punctuate + LLM` — 本地标点 + 云端 LLM 纠错（需在 LLM tab 配置供应商和 API Key，详见下方 LLM 纠错区块）
-
-**Shortcut tab**
-- 点击输入框后按快捷键录入
-- `Esc` 取消本次录入，`Backspace/Delete` 清空快捷键
-- 默认 CapsLock：短按切换大小写，长按 300ms 触发语音输入
+- `Hold hotkey` — 点击输入框后按快捷键录入
+  - `Esc` 取消本次录入，`Backspace/Delete` 清空快捷键
+  - 默认 CapsLock：短按切换大小写，长按 300ms 触发语音输入
 
 **LLM tab**
 - `Provider` — 供应商下拉框，内置 DeepSeek / OpenRouter / SiliconFlow 预设，选择后自动填充下方字段
@@ -98,6 +98,14 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 **LLM Prompt tab**
 - `System Prompt` — 多行编辑器，自定义 LLM 纠错的系统提示词（留空使用内置默认）
 - `Basic Fix` / `Deep Fix` — 预设按钮，一键填入不同纠错力度的 System Prompt
+
+**Cloud ASR tab**
+- `Provider` — 选择 `百度智能云` 或 `火山引擎（豆包）`，下方控件动态切换
+- **百度**：`API Key` / `Secret Key`（DPAPI 加密）+ `Language Model`（普通话/英语/粤语/四川话）+ `Test Connection`
+- **豆包**：`API Key`（DPAPI 加密）+ `ASR Mode` + `Model Version` + `Language` + `Test Connection`
+  - ASR Mode：`File Recognition (nostream)`（推荐，准确率最高）/ `Streaming (bigmodel)`（实时部分结果）/ `Streaming Optimized (async)`（最佳延迟）
+  - Model Version：`Seed-ASR 2.0 (duration)`（按时长计费）/ `Seed-ASR 2.0 (concurrent)`（按并发计费）
+- 云端 ASR 自带标点；使用云端后端时 VAD 和本地标点模型不生效
 
 </details>
 
@@ -137,6 +145,8 @@ v0.2.0 起新增可选的云端 LLM 文本纠错。默认关闭，需手动启�
 ```
 src/
   main.cpp          — 托盘、Settings、HUD、快捷键、录音、ASR 引擎
+  baidu_asr.h       — 百度智能云 ASR 模块（header-only）
+  volcengine_asr.h  — 火山引擎（豆包）ASR 模块（header-only, WebSocket）
   firered_vad.h     — FireRed VAD 模块（header-only）
   llm_refine.h      — LLM 纠错模块（header-only）
   resources.rc / resource.h / app.ico / app.manifest
@@ -168,7 +178,9 @@ CHANGELOG.md        — 版本变更记录
 详见 [CHANGELOG.md](CHANGELOG.md)
 
 **最近更新：**
-- **v0.2.2** — GitHub 发布准备：目录重组、aria2c 多连接下载、新用户引导
+- **v0.5.0** — Cloud ASR UI 重构、async 模式修复、Shortcut 合并到 Recognition
+- **v0.4.0** — 火山引擎（豆包）流式 ASR 接入（WebSocket）
+- **v0.3.0** — 百度智能云 ASR 接入
 - **v0.2.1** — 多供应商预设系统、LLM Prompt 独立 Tab、Extra Params
 - **v0.2.0** — FireRedVAD 接入、云端 LLM 纠错模块
 - **v0.1.4** — C++ 直接调用 sherpa-onnx，移除 Python 依赖
@@ -184,3 +196,5 @@ CHANGELOG.md        — 版本变更记录
 - [FireRed VAD](https://github.com/FireRedTeam/FireRedAudio) — 高精度 VAD 模型
 - [Silero VAD](https://github.com/snakers4/silero-vad) — 轻量 VAD 模型
 - [onnxruntime](https://github.com/microsoft/onnxruntime) — ONNX 推理引擎
+- [百度智能云](https://ai.baidu.com/tech/speech/asr) — 百度云端 ASR API
+- [火山引擎语音技术](https://www.volcengine.com/docs/6561/1354869) — 火山引擎（豆包）流式 ASR API

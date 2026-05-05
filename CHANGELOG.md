@@ -2,6 +2,88 @@
 
 > 🇨🇳 [中文版](doc/CHANGELOG_zh.md)
 
+## v0.5.0 (2026-05-05)
+
+### Added
+
+- **Cloud ASR UI Overhaul**: Merged "Baidu ASR" and "Volcengine ASR" tabs into a single "Cloud ASR" tab with Provider dropdown
+  - Provider ComboBox switches between "百度智能云" and "火山引擎（豆包）" with dynamic control visibility
+  - Section title label updates dynamically based on selected provider
+- **ASR Backend Selector moved to Recognition tab**: Now at the top of Recognition tab as a global setting
+- **Shortcut settings merged into Recognition tab**: Shortcut tab removed, hotkey config now at bottom of Recognition tab with separator line
+- **Volcengine ASR Mode reorder**: "File Recognition (nostream)" now listed first (recommended default)
+- **Volcengine Model Version cleanup**: Removed BigASR 1.0 options, only Seed-ASR 2.0 (duration/concurrent) remain
+- **Cloud ASR Report**: Added `.trae/documents/cloud_asr_report.md` with protocol details, debugging guide, and pitfall records
+
+### Changed
+
+- Settings tabs reduced from 6 to 4: `Recognition` / `LLM` / `LLM Prompt` / `Cloud ASR`
+- Default Volcengine mode changed to `bigmodel_nostream` (File Recognition)
+
+### Fixed
+
+- **Volcengine nostream empty result**: `SendAudio(isLast=true)` return value was discarded; now saved to `lastPartial` as fallback
+- **ReceiveResult timeout not applied**: `timeoutMs` parameter was ignored, always used 2000ms; now dynamically set via `WinHttpSetOption`
+- **Volcengine async mode timeout**: `bigmodel_async` mode caused 8-second timeout because `ReceiveResult` blocked audio sending; fixed with send/receive thread separation
+  - Sending thread: only sends audio packets, never blocks on receive
+  - Drain thread: continuously drains WebSocket receive buffer, updates HUD with partial results
+- **Baidu App ID removed**: Confirmed unused by Baidu REST API, removed from BaiduConfig, UI, and config.json
+
+### Removed
+
+- Removed `IDC_BAIDU_APP_ID` control and `baiduAppId` config field
+- Removed "Shortcut" tab (merged into Recognition)
+- Removed BigASR 1.0 model version options
+
+## v0.4.0 (2026-05-04)
+
+### Added
+
+- **Volcengine (豆包) Streaming ASR Integration**: Added Volcengine BigModel streaming ASR via WebSocket binary protocol
+  - New `src/volcengine_asr.h` header-only module for real-time streaming ASR with WinHTTP WebSocket
+  - Streaming mode: audio chunks sent during recording, partial results displayed in real-time HUD
+  - Multi-vendor Cloud ASR UI: "Local (sherpa-onnx)" / "Baidu Cloud" / "Volcano Engine" backend selector
+  - Settings now shows dynamic provider-specific fields (API Key, Resource ID, Language) based on Cloud Provider selection
+  - WebSocket binary protocol: custom 4-byte frame header + payload (supporting full client request, audio-only, and server response frames)
+  - X-Api-Key authentication (single key, no OAuth2 needed for Volcengine)
+  - Test Connection button for quick WebSocket upgrade verification
+  - API Key DPAPI encrypted in config file
+
+### Changed
+
+- `src/main.cpp`: Extended Config with `cloudProvider`, `volcApiKey`, `volcResourceId`, `volcLanguage`
+- Cloud ASR tab restructured: ASR Backend (3 options) + Cloud Provider (2 options) with dynamic UI visibility
+- `RecognizeAsync()` now routes to local/Baidu/Volcengine backends
+- `StartRecordingSession()`: Volcengine path spawns WebSocket connect + streaming thread
+- `StopRecordingSession()`: Volcengine path gracefully closes WS and returns final accumulated text
+- `WaveInProc`: Added volcengine audio buffer push for real-time streaming
+- Version bumped to v0.4.0
+
+## v0.3.0 (2026-05-04)
+
+### Added
+
+- **Baidu Cloud ASR Integration**: Added optional cloud ASR backend via Baidu Intelligent Cloud short speech recognition API
+  - New `src/baidu_asr.h` header-only module for Baidu OAuth2.0 authentication and REST API calls
+  - Huge free quota: 200K~2M calls for standard edition, 50K for express edition
+  - RAW mode upload: Audio sent as raw PCM binary, no base64 encoding overhead
+  - Token auto-caching with 30-day expiry management (in-memory only)
+  - Settings → New "Cloud ASR" tab with:
+    - ASR Backend selector: "Local (sherpa-onnx)" / "Baidu Cloud"
+    - App ID, API Key, Secret Key fields (Secret Key DPAPI encrypted)
+    - Language model dropdown: Mandarin / English / Cantonese / Sichuanese
+    - Test Connection button
+    - Privacy notice: "Cloud ASR sends audio to Baidu servers"
+  - Baidu Cloud ASR returns text with built-in punctuation (no local punct model needed)
+  - LLM correction works with both local and cloud ASR backends
+  - HUD displays "Baidu Cloud" during recording/recognizing when selected
+
+### Changed
+
+- `src/main.cpp`: Extended Config struct with `asrBackend`, `baiduAppId`, `baiduApiKey`, `baiduSecretKey`, `baiduDevPid`
+- `RecognizeAsync()` now routes to Baidu ASR or local sherpa-onnx based on `asrBackend` setting
+- Settings window now has 5 tabs (added "Cloud ASR")
+
 ## v0.2.2 (2026-05-02)
 
 ### Added

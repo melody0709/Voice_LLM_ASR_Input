@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  Current version: <code>v0.2.2</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
+  Current version: <code>v0.5.0</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -31,6 +31,7 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 - **Real-time HUD** — Bottom floating capsule window during recording, 5 volume bars responding to sound
 - **Dual VAD Options** — Silero VAD (lightweight) / FireRed VAD (high precision F1 97.57), intelligently skips silence
 - **LLM Correction (Optional)** — Supports DeepSeek / OpenRouter / SiliconFlow and other providers, one-click configuration
+- **Cloud ASR (Optional)** — Supports Baidu Intelligent Cloud and Volcengine (豆包) streaming ASR as alternative backends
 
 ## Quick Start
 
@@ -66,7 +67,8 @@ Right-click the tray icon to open Settings, hold the hotkey to start recording, 
 <summary><strong>Settings Guide</strong></summary>
 
 **Recognition tab**
-- `ASR model` — Speech recognition model:
+- `ASR Backend` — Select between `Local (sherpa-onnx)`, `Baidu Cloud`, and `Volcano Engine`
+- `ASR model` — Speech recognition model (only for Local backend):
   - `FireRedASR2 CTC` — Fast, suitable for daily input
   - `FireRedASR2 AED` — Better quality, more accurate for long sentences
   - `SenseVoiceSmall` — Lightweight model, suitable for low-resource machines
@@ -80,11 +82,9 @@ Right-click the tray icon to open Settings, hold the hotkey to start recording, 
   - `Disabled` — No processing, outputs ASR raw text
   - `Auto punctuate` — Local CT-Transformer auto-punctuation (no network required)
   - `Auto punctuate + LLM` — Local punctuation + cloud LLM correction (requires configuring provider and API Key in LLM tab, see LLM Correction section below)
-
-**Shortcut tab**
-- Click the input box then press the hotkey to record
-- `Esc` cancels this recording, `Backspace/Delete` clears the hotkey
-- Default CapsLock: Short press toggles Caps Lock, long press 300ms triggers voice input
+- `Hold hotkey` — Click the input box then press the hotkey to record
+  - `Esc` cancels this recording, `Backspace/Delete` clears the hotkey
+  - Default CapsLock: Short press toggles Caps Lock, long press 300ms triggers voice input
 
 **LLM tab**
 - `Provider` — Provider dropdown, built-in DeepSeek / OpenRouter / SiliconFlow presets, auto-fills fields below on selection
@@ -98,6 +98,14 @@ Right-click the tray icon to open Settings, hold the hotkey to start recording, 
 **LLM Prompt tab**
 - `System Prompt` — Multi-line editor, customize LLM correction system prompt (leave empty to use built-in default)
 - `Basic Fix` / `Deep Fix` — Preset buttons, one-click fill for different correction intensity System Prompts
+
+**Cloud ASR tab**
+- `Provider` — Select between `百度智能云` (Baidu) and `火山引擎（豆包）` (Volcengine), controls below update dynamically
+- **Baidu**: `API Key` / `Secret Key` (DPAPI encrypted) + `Language Model` (Mandarin/English/Cantonese/Sichuanese) + `Test Connection`
+- **Volcengine**: `API Key` (DPAPI encrypted) + `ASR Mode` + `Model Version` + `Language` + `Test Connection`
+  - ASR Mode: `File Recognition (nostream)` (recommended, highest accuracy) / `Streaming (bigmodel)` (real-time partial) / `Streaming Optimized (async)` (best latency)
+  - Model Version: `Seed-ASR 2.0 (duration)` (per-hour billing) / `Seed-ASR 2.0 (concurrent)` (per-connection billing)
+- Cloud ASR includes built-in punctuation; VAD and local punct models are bypassed when using cloud backends
 
 </details>
 
@@ -137,6 +145,8 @@ Features:
 ```
 src/
   main.cpp          — Tray, Settings, HUD, hotkeys, recording, ASR engine
+  baidu_asr.h       — Baidu Cloud ASR module (header-only)
+  volcengine_asr.h  — Volcengine (豆包) ASR module (header-only, WebSocket)
   firered_vad.h     — FireRed VAD module (header-only)
   llm_refine.h      — LLM correction module (header-only)
   resources.rc / resource.h / app.ico / app.manifest
@@ -168,7 +178,9 @@ CHANGELOG.md        — Version change log
 See [CHANGELOG.md](CHANGELOG.md)
 
 **Recent Updates:**
-- **v0.2.2** — GitHub release preparation: directory reorganization, aria2c multi-connection download, new user guidance
+- **v0.5.0** — Cloud ASR UI overhaul, async mode fix, Shortcut merged into Recognition
+- **v0.4.0** — Volcengine (豆包) streaming ASR integration via WebSocket
+- **v0.3.0** — Baidu Cloud ASR integration
 - **v0.2.1** — Multi-provider preset system, LLM Prompt independent Tab, Extra Params
 - **v0.2.0** — FireRedVAD integration, cloud LLM correction module
 - **v0.1.4** — C++ direct sherpa-onnx calls, removed Python dependency
@@ -184,3 +196,5 @@ See [CHANGELOG.md](CHANGELOG.md)
 - [FireRed VAD](https://github.com/FireRedTeam/FireRedAudio) — High precision VAD model
 - [Silero VAD](https://github.com/snakers4/silero-vad) — Lightweight VAD model
 - [onnxruntime](https://github.com/microsoft/onnxruntime) — ONNX inference engine
+- [Baidu Intelligent Cloud](https://ai.baidu.com/tech/speech/asr) — Baidu Cloud ASR API
+- [Volcengine Speech](https://www.volcengine.com/docs/6561/1354869) — Volcengine (豆包) streaming ASR API
