@@ -203,6 +203,7 @@ void BrowseModelDirectory(HWND hwnd) {
 }
 
 static std::wstring s_customPromptBackup;
+static bool s_isCustomMode = false;
 
 void LoadSettingsControls(HWND hwnd) {
     if (g_config.modelDir.empty()) {
@@ -283,10 +284,14 @@ void LoadSettingsControls(HWND hwnd) {
             ComboBox_SetCurSel(presetCombo, matchedPreset);
             SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_PRESET_DESC), llm::kPromptPresets[matchedPreset].description);
             s_customPromptBackup.clear();
+            s_isCustomMode = false;
+            SendMessageW(GetDlgItem(hwnd, IDC_LLM_PROMPT), EM_SETREADONLY, TRUE, 0);
         } else {
             ComboBox_SetCurSel(presetCombo, llm::kPromptPresetCount);
             SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_PRESET_DESC), L"Custom prompt");
             s_customPromptBackup = g_config.llmPrompt;
+            s_isCustomMode = true;
+            SendMessageW(GetDlgItem(hwnd, IDC_LLM_PROMPT), EM_SETREADONLY, FALSE, 0);
         }
     }
     RefreshProviderDropdown(hwnd);
@@ -1090,21 +1095,27 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         case IDC_LLM_PRESET_COMBO:
             if (HIWORD(wParam) == CBN_SELCHANGE) {
                 int sel = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_LLM_PRESET_COMBO));
+                HWND promptEdit = GetDlgItem(hwnd, IDC_LLM_PROMPT);
                 if (sel >= 0 && sel < llm::kPromptPresetCount) {
-                    // Save current prompt as custom backup before switching to preset
-                    HWND promptEdit = GetDlgItem(hwnd, IDC_LLM_PROMPT);
-                    int len = GetWindowTextLengthW(promptEdit);
-                    std::wstring current(len + 1, L'\0');
-                    GetWindowTextW(promptEdit, &current[0], len + 1);
-                    current.resize(len);
-                    s_customPromptBackup = current;
-                    // Set preset prompt
+                    // Save custom content only when switching FROM Custom to preset
+                    if (s_isCustomMode) {
+                        int len = GetWindowTextLengthW(promptEdit);
+                        std::wstring current(len + 1, L'\0');
+                        GetWindowTextW(promptEdit, &current[0], len + 1);
+                        current.resize(len);
+                        s_customPromptBackup = current;
+                        s_isCustomMode = false;
+                    }
+                    // Set preset prompt and readonly
                     SetWindowTextW(promptEdit, llm::kPromptPresets[sel].prompt);
                     SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_PRESET_DESC), llm::kPromptPresets[sel].description);
+                    SendMessageW(promptEdit, EM_SETREADONLY, TRUE, 0);
                 } else if (sel == llm::kPromptPresetCount) {
-                    // Restore custom prompt backup
-                    SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_PROMPT), s_customPromptBackup.c_str());
+                    // Switch to Custom: restore backup and allow editing
+                    s_isCustomMode = true;
+                    SetWindowTextW(promptEdit, s_customPromptBackup.c_str());
                     SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_PRESET_DESC), L"Custom prompt");
+                    SendMessageW(promptEdit, EM_SETREADONLY, FALSE, 0);
                 }
             }
             return 0;
