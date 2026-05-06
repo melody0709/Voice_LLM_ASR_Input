@@ -20,11 +20,11 @@
 #include "volcengine_asr.h"
 #include "resource.h"
 
-constexpr wchar_t kAppName[] = L"Voice LLM ASR Input";
-constexpr wchar_t kMainClass[] = L"VoiceLLMASRInput.Main";
-constexpr wchar_t kSettingsClass[] = L"VoiceLLMASRInput.Settings";
-constexpr wchar_t kHudClass[] = L"VoiceLLMASRInput.Hud";
-constexpr wchar_t kHotkeyEditClass[] = L"VoiceLLMASRInput.HotkeyEdit";
+constexpr wchar_t kAppName[] = L"VoxType";
+constexpr wchar_t kMainClass[] = L"VoxType.Main";
+constexpr wchar_t kSettingsClass[] = L"VoxType.Settings";
+constexpr wchar_t kHudClass[] = L"VoxType.Hud";
+constexpr wchar_t kHotkeyEditClass[] = L"VoxType.HotkeyEdit";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kReloadMessage = WM_APP + 2;
 constexpr UINT kAsrResultMessage = WM_APP + 3;

@@ -348,7 +348,7 @@ inline bool OpenSession(VolcSession& sess, const VolcConfig& cfg) {
     std::wstring cleanKey = TrimWhitespace(cfg.apiKey);
     if (cleanKey.empty()) return false;
 
-    sess.hSession = WinHttpOpen(L"VoiceLLMASRInput/1.0",
+    sess.hSession = WinHttpOpen(L"VoxType/1.0",
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
         WINHTTP_NO_PROXY_BYPASS, 0);
     if (!sess.hSession) return false;
@@ -597,7 +597,7 @@ inline TestResult TestConnection(const VolcConfig& cfg) {
         return res;
     }
 
-    HINTERNET hSession = WinHttpOpen(L"VoiceLLMASRInput/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+    HINTERNET hSession = WinHttpOpen(L"VoxType/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                      WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) {
         res.message = L"WinHttpOpen failed.";

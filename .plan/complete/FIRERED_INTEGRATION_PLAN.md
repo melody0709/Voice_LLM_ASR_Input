@@ -247,9 +247,9 @@ models/
 ### 目录结构
 
 ```
-Voice_LLM_ASR_Input/
+VoxType/
   build/
-    VoiceLLMASRInput.exe
+    VoxType.exe
   runtime/                          # 嵌入式 Python，不提交 git
     python.exe                      # Python 3.10 embeddable
     python310.zip
@@ -351,8 +351,8 @@ Remove-Item -Recurse -Force runtime/pip -ErrorAction SilentlyContinue
 ### 传播方式
 
 ```
-VoiceLLMASRInput-v0.2.0.zip        # ~450 MB（不含模型）
-  ├── build/VoiceLLMASRInput.exe
+VoxType-v0.2.0.zip        # ~450 MB（不含模型）
+  ├── build/VoxType.exe
   ├── runtime/
   ├── asr_worker.py
   └── README.md

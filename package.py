@@ -29,14 +29,14 @@ def main():
         print(f"错误: {BUILD_DIR} 不存在，请先运行 build.bat")
         sys.exit(1)
 
-    exe = BUILD_DIR / "VoiceLLMASRInput.exe"
+    exe = BUILD_DIR / "VoxType.exe"
     if not exe.exists():
         print(f"错误: {exe} 不存在，请先运行 build.bat")
         sys.exit(1)
 
     version = get_version()
     date_str = datetime.datetime.now().strftime("%Y%m%d")
-    archive_name = f"VoiceLLMASRInput_v{version}_{date_str}.7z"
+    archive_name = f"VoxType_v{version}_{date_str}.7z"
 
     OUTPUT_DIR.mkdir(exist_ok=True)
     archive_path = OUTPUT_DIR / archive_name
@@ -47,7 +47,7 @@ def main():
         sys.exit(1)
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        staging = Path(tmpdir) / f"VoiceLLMASRInput_v{version}"
+        staging = Path(tmpdir) / f"VoxType_v{version}"
         staging.mkdir()
 
         print(f"版本: v{version}")

@@ -55,9 +55,9 @@ inline std::wstring GetMachineCuid() {
     wchar_t name[MAX_COMPUTERNAME_LENGTH + 1] = {};
     DWORD size = MAX_COMPUTERNAME_LENGTH + 1;
     if (GetComputerNameW(name, &size)) {
-        return L"voice_llm_" + std::wstring(name);
+        return L"voxtype_" + std::wstring(name);
     }
-    return L"voice_llm_unknown";
+    return L"voxtype_unknown";
 }
 
 inline std::wstring UrlEncode(const std::wstring& src) {
@@ -78,7 +78,7 @@ inline std::wstring UrlEncode(const std::wstring& src) {
 }
 
 inline std::wstring HttpGet(const std::wstring& url, const std::wstring& host, INTERNET_PORT port, bool useSsl) {
-    HINTERNET hSession = WinHttpOpen(L"VoiceLLMASRInput/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+    HINTERNET hSession = WinHttpOpen(L"VoxType/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                      WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) return L"";
 
@@ -203,7 +203,7 @@ inline std::wstring Recognize(const std::vector<BYTE>& pcm, const BaiduConfig& c
                         L"&token=" + UrlEncode(token) +
                         L"&dev_pid=" + std::to_wstring(cfg.devPid);
 
-    HINTERNET hSession = WinHttpOpen(L"VoiceLLMASRInput/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+    HINTERNET hSession = WinHttpOpen(L"VoxType/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                      WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) return L"Baidu ASR error: WinHttpOpen failed";
 
@@ -318,7 +318,7 @@ inline TestResult TestConnection(const BaiduConfig& cfg) {
                         L"&token=" + UrlEncode(token) +
                         L"&dev_pid=" + std::to_wstring(cfg.devPid);
 
-    HINTERNET hSession = WinHttpOpen(L"VoiceLLMASRInput/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+    HINTERNET hSession = WinHttpOpen(L"VoxType/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                      WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) {
         res.message = L"WinHttpOpen failed.";

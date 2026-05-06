@@ -62,7 +62,7 @@
   - `Text Postprocess`：`None`, `ITN/Punctuation`, `Conservative LLM`；v1 的 `ITN/Punctuation` 使用本地 CT-Transformer 标点模型。
   - `Hotkey`：默认长按 `CapsLock`，支持录制组合键；短按 `CapsLock` 保留系统大小写切换。
   - `LLM`：启用开关、API Base URL、API Key、Model。
-- 保存路径：`%APPDATA%\VoiceLLMASRInput\config.json`。
+- 保存路径：`%APPDATA%\VoxType\config.json`。
 
 ## 配置结构
 ```json

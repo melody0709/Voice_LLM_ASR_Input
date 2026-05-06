@@ -79,7 +79,7 @@ std::wstring AppDataDir() {
         const size_t slash = result.find_last_of(L"\\/");
         if (slash != std::wstring::npos) result.resize(slash);
     }
-    result += L"\\VoiceLLMASRInput";
+    result += L"\\VoxType";
     CreateDirectoryW(result.c_str(), nullptr);
     return result;
 }

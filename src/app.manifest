@@ -2,7 +2,7 @@
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <assemblyIdentity
     type="win32"
-    name="VoiceLLMASRInput"
+    name="VoxType"
     version="0.1.3.0"
     processorArchitecture="*"
   />

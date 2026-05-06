@@ -8,7 +8,7 @@
 
 ```mermaid
 flowchart LR
-    User["用户长按快捷键"] --> Frontend["VoiceLLMASRInput.exe<br/>Win32 托盘前端"]
+    User["用户长按快捷键"] --> Frontend["VoxType.exe<br/>Win32 托盘前端"]
     Frontend --> Recorder["waveIn 录音<br/>16kHz mono PCM"]
     Recorder --> Engine["AsrEngine (C++)<br/>sherpa-onnx-cxx-api"]
     Engine --> VAD["VAD<br/>Silero / FireRed"]
@@ -20,7 +20,7 @@ flowchart LR
 
 ## 进程
 
-### `VoiceLLMASRInput.exe`
+### `VoxType.exe`
 
 单进程。职责：
 
@@ -122,7 +122,7 @@ Settings 是普通 Win32 窗口，目前分 4 个 tab：
 停止录音后写入：
 
 ```text
-%APPDATA%\VoiceLLMASRInput\last_recording.wav
+%APPDATA%\VoxType\last_recording.wav
 ```
 
 短于约 8000 bytes 的录音会被判定为 `Too short`。

@@ -61,7 +61,7 @@
 ### 3. 性能日志落地
 
 - [ ] C++ 记录录音时长、VAD 耗时、ASR 耗时、标点耗时、粘贴耗时
-- [ ] 写入 `%APPDATA%\VoiceLLMASRInput\logs\app.log`
+- [ ] 写入 `%APPDATA%\VoxType\logs\app.log`
 - [ ] 日志滚动：最多保留最近 5 个文件，每个文件最多 1-2 MB
 - [ ] Settings 或托盘菜单增加 `Open Logs`
 
@@ -106,7 +106,7 @@
 
 ### 6. 术语替换和用户词库
 
-- [ ] 增加 `%APPDATA%\VoiceLLMASRInput\terms.json`
+- [ ] 增加 `%APPDATA%\VoxType\terms.json`
 - [ ] 支持简单替换：错误词 -> 正确词
 - [ ] 支持大小写敏感选项
 - [ ] 支持中文技术词：派森 -> Python，杰森 -> JSON，温三十二 -> Win32

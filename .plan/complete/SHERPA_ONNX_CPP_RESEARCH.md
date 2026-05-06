@@ -112,7 +112,7 @@ class OfflinePunctuation {
 
 ```cmake
 cmake_minimum_required(VERSION 3.15)
-project(VoiceLLMASRInput)
+project(VoxType)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -121,22 +121,22 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 # sherpa-onnx 路径
 set(SHERPA_DIR "${CMAKE_SOURCE_DIR}/runtime/Lib/site-packages/sherpa_onnx")
 
-add_executable(VoiceLLMASRInput WIN32
+add_executable(VoxType WIN32
     main.cpp
     resources.rc
 )
 
 add_compile_definitions(UNICODE _UNICODE)
 
-target_include_directories(VoiceLLMASRInput PRIVATE
+target_include_directories(VoxType PRIVATE
     "${SHERPA_DIR}/include"
 )
 
-target_link_directories(VoiceLLMASRInput PRIVATE
+target_link_directories(VoxType PRIVATE
     "${SHERPA_DIR}/lib"
 )
 
-target_link_libraries(VoiceLLMASRInput
+target_link_libraries(VoxType
     sherpa-onnx-cxx-api
     user32 gdi32 shell32 ole32 comctl32
     d2d1 dwrite shlwapi winmm ws2_32
@@ -242,7 +242,7 @@ sherpa-onnx 的 `OfflineRecognizer` 是线程安全的（内部有锁），可�
 运行时需要以下文件与 exe 同目录（或在 PATH 中）：
 
 ```
-VoiceLLMASRInput.exe
+VoxType.exe
 sherpa-onnx-cxx-api.dll
 sherpa-onnx-c-api.dll
 onnxruntime.dll

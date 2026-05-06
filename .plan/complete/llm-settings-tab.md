@@ -149,7 +149,7 @@ std::wstring DecryptString(const std::wstring& enc);    // Base64 + DPAPI
 
 ```cpp
 void RefineWithLlm(const std::wstring& asrText) {
-    // 1. WinHttpOpen(L"VoiceLLMASRInput", WINHTTP_ACCESS_TYPE_DEFAULT, ...)
+    // 1. WinHttpOpen(L"VoxType", WINHTTP_ACCESS_TYPE_DEFAULT, ...)
     // 2. WinHttpConnect + WinHttpOpenRequest
     // 3. 构造 JSON body
     // 4. WinHttpSendRequest with WINHTTP_FLAG_ASYNC

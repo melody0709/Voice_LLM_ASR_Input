@@ -629,7 +629,7 @@ bool ShowInputDialog(HWND parent, const wchar_t* title, std::wstring& out) {
         wc.lpfnWndProc = InputWndProc;
         wc.hInstance = g_instance;
         wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
-        wc.lpszClassName = L"VoiceLLMInputDlg";
+        wc.lpszClassName = L"VoxTypeInputDlg";
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         RegisterClassExW(&wc);
         registered = true;
@@ -642,7 +642,7 @@ bool ShowInputDialog(HWND parent, const wchar_t* title, std::wstring& out) {
     int x = work.left + (work.right - work.left - w) / 2;
     int y = work.top + (work.bottom - work.top - h) / 2;
     HWND dlg = CreateWindowExW(WS_EX_APPWINDOW | WS_EX_DLGMODALFRAME,
-                               L"VoiceLLMInputDlg", title,
+                               L"VoxTypeInputDlg", title,
                                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
                                x, y, w, h, parent, nullptr, g_instance, &data);
     if (!dlg) return false;
@@ -1163,7 +1163,7 @@ void ShowSettingsWindow(HWND owner) {
         g_settingsWindow = CreateWindowExW(
             WS_EX_APPWINDOW,
             kSettingsClass,
-            L"Voice LLM ASR Input Settings",
+            L"VoxType Settings",
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
             CW_USEDEFAULT,
             CW_USEDEFAULT,

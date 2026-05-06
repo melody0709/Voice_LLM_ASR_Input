@@ -525,7 +525,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             L"This will open a PowerShell window.\n\n"
             L"[Yes] - Download models\n"
             L"[No]  - Open Settings manually",
-            L"Voice LLM ASR Input - Setup",
+            L"VoxType - Setup",
             MB_YESNO | MB_ICONQUESTION);
 
         if (ret == IDYES) {
@@ -533,9 +533,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         }
     }
 
-    HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\VoiceLLMASRInput.SingleInstance");
+    HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\VoxType.SingleInstance");
     if (mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
-        MessageBoxW(nullptr, L"Voice LLM ASR Input is already running.", kAppName, MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(nullptr, L"VoxType is already running.", kAppName, MB_OK | MB_ICONINFORMATION);
         CloseHandle(mutex);
         DeleteUiResources();
         DeleteCriticalSection(&g_audioLock);

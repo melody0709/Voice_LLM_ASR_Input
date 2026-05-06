@@ -8,7 +8,7 @@ This document describes the current implementation, not the final ideal design. 
 
 ```mermaid
 flowchart LR
-    User["User holds hotkey"] --> Frontend["VoiceLLMASRInput.exe<br/>Win32 tray frontend"]
+    User["User holds hotkey"] --> Frontend["VoxType.exe<br/>Win32 tray frontend"]
     Frontend --> Recorder["waveIn recording<br/>16kHz mono PCM"]
     Recorder --> Engine["AsrEngine (C++)<br/>sherpa-onnx-cxx-api"]
     Engine --> VAD["VAD<br/>Silero / FireRed"]
@@ -20,7 +20,7 @@ flowchart LR
 
 ## Process
 
-### `VoiceLLMASRInput.exe`
+### `VoxType.exe`
 
 Single process. Responsibilities:
 
@@ -122,7 +122,7 @@ Currently uses `waveIn`:
 After recording stops, the audio is saved to:
 
 ```text
-%APPDATA%\VoiceLLMASRInput\last_recording.wav
+%APPDATA%\VoxType\last_recording.wav
 ```
 
 Recordings shorter than approximately 8000 bytes are judged as `Too short`.

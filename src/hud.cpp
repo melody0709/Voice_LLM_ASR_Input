@@ -19,7 +19,7 @@ void AddTrayIcon(HWND hwnd) {
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid.uCallbackMessage = kTrayMessage;
     nid.hIcon = g_appIcon;
-    wcscpy_s(nid.szTip, L"Voice LLM ASR Input");
+    wcscpy_s(nid.szTip, L"VoxType");
     Shell_NotifyIconW(NIM_ADD, &nid);
     nid.uVersion = NOTIFYICON_VERSION_4;
     Shell_NotifyIconW(NIM_SETVERSION, &nid);

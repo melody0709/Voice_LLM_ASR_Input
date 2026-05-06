@@ -45,10 +45,10 @@
 .\build.bat
 ```
 
-如果链接失败并提示不能打开 `build\VoiceLLMASRInput.exe`，通常是旧程序还在运行：
+如果链接失败并提示不能打开 `build\VoxType.exe`，通常是旧程序还在运行：
 
 ```powershell
-Get-Process VoiceLLMASRInput -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process VoxType -ErrorAction SilentlyContinue | Stop-Process -Force
 .\build.bat
 ```
 

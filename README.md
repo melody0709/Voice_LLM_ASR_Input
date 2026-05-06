@@ -1,18 +1,18 @@
 <p align="center">
-  <img src="./src/app.ico" width="64" alt="Voice LLM ASR Input icon" />
+  <img src="./src/app.ico" width="64" alt="VoxType icon" />
 </p>
 
-<h1 align="center">Voice LLM ASR Input</h1>
+<h1 align="center">VoxType</h1>
 
 <p align="center">
-  <strong>Local voice input for Windows. Press, speak, paste.</strong><br/>
-  Windows 11 local voice input tool — hold to speak, release to paste, no cloud required
+  <strong>Voice typing for Windows. Press, speak, paste.</strong><br/>
+  Windows voice typing tool — hold to speak, release to paste, local & cloud ASR
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows%2011-blue?logo=windows" alt="Platform" />
-  <img src="https://img.shields.io/github/license/melody0709/Voice_LLM_ASR_Input" alt="License" />
-  <img src="https://img.shields.io/github/v/release/melody0709/Voice_LLM_ASR_Input" alt="Release" />
+  <img src="https://img.shields.io/github/license/melody0709/VoxType" alt="License" />
+  <img src="https://img.shields.io/github/v/release/melody0709/VoxType" alt="Release" />
   <img src="https://img.shields.io/badge/CPU-only-green" alt="CPU Only" />
 </p>
 
@@ -56,7 +56,7 @@ Requires Visual Studio 2022 (C++ desktop development workload).
 ### 3. Run
 
 ```powershell
-.\build\VoiceLLMASRInput.exe
+.\build\VoxType.exe
 ```
 
 Right-click the tray icon to open Settings, hold the hotkey to start recording, release to recognize and paste.

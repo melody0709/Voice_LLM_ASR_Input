@@ -129,7 +129,7 @@ function Download-Model {
     return $true
 }
 
-Write-Host "=== Voice LLM ASR Input - Model Downloader ===" -ForegroundColor Cyan
+Write-Host "=== VoxType - Model Downloader ===" -ForegroundColor Cyan
 Write-Host ""
 
 if (Test-Path $aria2c) {

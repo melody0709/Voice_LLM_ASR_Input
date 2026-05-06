@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="../src/app.ico" width="64" alt="Voice LLM ASR Input icon" />
+  <img src="../src/app.ico" width="64" alt="VoxType icon" />
 </p>
 
-<h1 align="center">Voice LLM ASR Input</h1>
+<h1 align="center">VoxType</h1>
 
 <p align="center">
   <strong>Local voice input for Windows. Press, speak, paste.</strong><br/>
@@ -11,8 +11,8 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows%2011-blue?logo=windows" alt="Platform" />
-  <img src="https://img.shields.io/github/license/melody0709/Voice_LLM_ASR_Input" alt="License" />
-  <img src="https://img.shields.io/github/v/release/melody0709/Voice_LLM_ASR_Input" alt="Release" />
+  <img src="https://img.shields.io/github/license/melody0709/VoxType" alt="License" />
+  <img src="https://img.shields.io/github/v/release/melody0709/VoxType" alt="Release" />
   <img src="https://img.shields.io/badge/CPU-only-green" alt="CPU Only" />
 </p>
 
@@ -56,7 +56,7 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 ### 3. 运行
 
 ```powershell
-.\build\VoiceLLMASRInput.exe
+.\build\VoxType.exe
 ```
 
 右键托盘图标打开 Settings，按住快捷键开始录音，松开后识别并粘贴。
