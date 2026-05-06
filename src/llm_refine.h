@@ -26,6 +26,16 @@ constexpr wchar_t kSystemPrompt[] =
     L"5. 如果输入文本看起来没有错误，必须原样输出，一个字都不改\n"
     L"6. 只输出纠正后的文本，不要输出任何解释、标注或额外内容";
 
+constexpr wchar_t kPresetStrictFix[] =
+    L"你是一个严格的语音识别纠错助手。你的唯一任务是修复语音识别（ASR）产生的明显错误。\n"
+    L"规则：\n"
+    L"1. 只修复明显的中文谐音错误（如\"新情\"→\"心情\"，\"高心\"→\"高兴\"）\n"
+    L"2. 只修复英文技术术语被错误转为中文的情况（如\"配森\"→\"Python\"，\"杰森\"→\"JSON\"，\"塞昆\"→\"Sequel\"）\n"
+    L"3. 绝对不要改写、润色、增加或删除任何看起来正确的字词\n"
+    L"4. 绝对不要改变句子的语气、风格或表达方式\n"
+    L"5. 如果输入文本看起来没有错误，必须原样输出，一个字都不改\n"
+    L"6. 只输出纠正后的文本，不要输出任何解释、标注或额外内容";
+
 constexpr wchar_t kPresetBasicFix[] =
     L"你是语音识别纠错助手。修复ASR产生的明显错误：\n"
     L"1. 中文谐音错误（如\"新情\"→\"心情\"）\n"
@@ -37,9 +47,31 @@ constexpr wchar_t kPresetDeepFix[] =
     L"你是中文语音识别后处理助手。请：\n"
     L"1. 修正明显的同音错字和别字\n"
     L"2. 将英文术语从中文音译还原（如\"配森\"→\"Python\"）\n"
-    L"3. 修正标点和断句\n"
+    L"3. 修正明显的语法错误\n"
     L"4. 如果整句通顺，直接返回原文\n"
     L"只返回修正后的文本，不要解释。";
+
+constexpr wchar_t kPresetPolish[] =
+    L"你是中文语音识别后处理助手。请在修正识别错误的基础上润色文本：\n"
+    L"1. 修正同音错字和别字\n"
+    L"2. 将英文术语从中文音译还原（如\"配森\"→\"Python\"）\n"
+    L"3. 润色语句使其更通顺自然，但不要改变原意\n"
+    L"4. 修正明显的语法错误\n"
+    L"5. 只输出处理后的文本，不要解释";
+
+struct PromptPreset {
+    const wchar_t* name;
+    const wchar_t* prompt;
+    const wchar_t* description;
+};
+
+constexpr PromptPreset kPromptPresets[] = {
+    {L"Strict Fix", kPresetStrictFix, L"Most conservative: fix homophones and terms only, never change correct text"},
+    {L"Basic Fix",  kPresetBasicFix,  L"Fix homophones, terms, and common typos"},
+    {L"Deep Fix",   kPresetDeepFix,   L"Fix typos, terms, and grammar errors"},
+    {L"Polish",     kPresetPolish,    L"Fix errors and polish expression for smoother text"},
+};
+constexpr int kPromptPresetCount = sizeof(kPromptPresets) / sizeof(kPromptPresets[0]);
 
 struct ProviderPreset {
     const wchar_t* name;

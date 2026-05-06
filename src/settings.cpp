@@ -111,8 +111,8 @@ void ShowCloudSubPage(HWND hwnd, int providerIdx) {
     for (HWND c : g_volcengineControls) ShowWindow(c, providerIdx == 1 ? SW_SHOW : SW_HIDE);
     if (g_cloudSectionLabel) {
         SetWindowTextW(g_cloudSectionLabel, providerIdx == 0
-            ? L"\u2500\u2500 \u767E\u5EA6\u667A\u80FD\u4E91 \u2500\u2500"
-            : L"\u2500\u2500 \u706B\u5C71\u5F15\u64CE\uFF08\u8C46\u5305\uFF09 \u2500\u2500");
+            ? L"\u2500\u2500 Baidu Cloud \u2500\u2500"
+            : L"\u2500\u2500 Volcengine (Doubao) \u2500\u2500");
     }
 }
 
@@ -123,16 +123,16 @@ void ShowSettingsPage(HWND hwnd, int page) {
     for (HWND control : g_shortcutControls) {
         ShowWindow(control, page == 0 ? SW_SHOW : SW_HIDE);
     }
-    for (HWND control : g_llmControls) {
+    for (HWND control : g_cloudAsrControls) {
         ShowWindow(control, page == 1 ? SW_SHOW : SW_HIDE);
     }
-    for (HWND control : g_promptControls) {
+    for (HWND control : g_llmControls) {
         ShowWindow(control, page == 2 ? SW_SHOW : SW_HIDE);
     }
-    for (HWND control : g_cloudAsrControls) {
+    for (HWND control : g_promptControls) {
         ShowWindow(control, page == 3 ? SW_SHOW : SW_HIDE);
     }
-    if (page == 3) {
+    if (page == 1) {
         ShowCloudSubPage(hwnd, g_cloudProviderIdx);
     } else {
         for (HWND c : g_baiduControls) ShowWindow(c, SW_HIDE);
@@ -147,19 +147,20 @@ void LayoutSettingsWindow(HWND hwnd) {
     const int margin = UiStyle::Margin;
     const int footerHeight = UiStyle::FooterHeight;
     const int footerTop = (rc.bottom - footerHeight > UiStyle::FooterMinTop) ? rc.bottom - footerHeight : UiStyle::FooterMinTop;
-    const int tabBottom = footerTop - 24;
+    const int tabBottom = footerTop - 4;
     HWND tab = GetDlgItem(hwnd, IDC_SETTINGS_TAB);
     if (tab) {
-        MoveWindow(tab, margin, 16, rc.right - margin * 2, tabBottom - 16, TRUE);
+        MoveWindow(tab, margin, 12, rc.right - margin * 2, tabBottom - 12, TRUE);
     }
+    const int btnY = footerTop + (footerHeight - UiStyle::ActionBtnH) / 2;
     HWND status = GetDlgItem(hwnd, IDC_STATUS);
     if (status) {
-        MoveWindow(status, margin, footerTop + 28, rc.right - margin * 2 - 300, 32, TRUE);
+        MoveWindow(status, margin, btnY + 4, rc.right - margin * 2 - 300, 32, TRUE);
     }
     HWND save = GetDlgItem(hwnd, IDC_SAVE);
     HWND close = GetDlgItem(hwnd, IDC_CANCEL);
-    if (save) MoveWindow(save, rc.right - margin - 192, footerTop + 22, UiStyle::FooterBtnW, UiStyle::ActionBtnH, TRUE);
-    if (close) MoveWindow(close, rc.right - margin - UiStyle::FooterBtnW, footerTop + 22, UiStyle::FooterBtnW, UiStyle::ActionBtnH, TRUE);
+    if (save) MoveWindow(save, rc.right - margin - 192, btnY, UiStyle::FooterBtnW, UiStyle::ActionBtnH, TRUE);
+    if (close) MoveWindow(close, rc.right - margin - UiStyle::FooterBtnW, btnY, UiStyle::FooterBtnW, UiStyle::ActionBtnH, TRUE);
 }
 
 void HideSettingsWindow(HWND hwnd) {
@@ -200,6 +201,8 @@ void BrowseModelDirectory(HWND hwnd) {
     }
     CoTaskMemFree(pidl);
 }
+
+static std::wstring s_customPromptBackup;
 
 void LoadSettingsControls(HWND hwnd) {
     if (g_config.modelDir.empty()) {
@@ -263,6 +266,29 @@ void LoadSettingsControls(HWND hwnd) {
     SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_KEY), g_config.llmApiKey.c_str());
     SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_MODEL), g_config.llmModel.c_str());
     SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_PROMPT), g_config.llmPrompt.c_str());
+    {
+        HWND presetCombo = GetDlgItem(hwnd, IDC_LLM_PRESET_COMBO);
+        for (int i = 0; i < llm::kPromptPresetCount; ++i) {
+            ComboBox_AddString(presetCombo, llm::kPromptPresets[i].name);
+        }
+        ComboBox_AddString(presetCombo, L"Custom");
+        int matchedPreset = -1;
+        for (int i = 0; i < llm::kPromptPresetCount; ++i) {
+            if (g_config.llmPrompt == llm::kPromptPresets[i].prompt) {
+                matchedPreset = i;
+                break;
+            }
+        }
+        if (matchedPreset >= 0) {
+            ComboBox_SetCurSel(presetCombo, matchedPreset);
+            SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_PRESET_DESC), llm::kPromptPresets[matchedPreset].description);
+            s_customPromptBackup.clear();
+        } else {
+            ComboBox_SetCurSel(presetCombo, llm::kPromptPresetCount);
+            SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_PRESET_DESC), L"Custom prompt");
+            s_customPromptBackup = g_config.llmPrompt;
+        }
+    }
     RefreshProviderDropdown(hwnd);
     {
         wchar_t extra[1024] = {};
@@ -290,8 +316,8 @@ void LoadSettingsControls(HWND hwnd) {
     ComboBox_SetCurSel(backendCombo, backendIdx);
 
     HWND cloudProviderCombo = GetDlgItem(hwnd, IDC_CLOUD_PROVIDER);
-    ComboBox_AddString(cloudProviderCombo, L"\u767E\u5EA6\u667A\u80FD\u4E91");
-    ComboBox_AddString(cloudProviderCombo, L"\u706B\u5C71\u5F15\u64CE\uFF08\u8C46\u5305\uFF09");
+    ComboBox_AddString(cloudProviderCombo, L"Baidu Cloud");
+    ComboBox_AddString(cloudProviderCombo, L"Volcengine (Doubao)");
     int cloudIdx = (g_config.cloudProvider == L"volcengine") ? 1 : 0;
     ComboBox_SetCurSel(cloudProviderCombo, cloudIdx);
     g_cloudProviderIdx = cloudIdx;
@@ -417,9 +443,14 @@ void SaveSettingsControls(HWND hwnd) {
     GetWindowTextW(GetDlgItem(hwnd, IDC_LLM_MODEL), llmModel, 256);
     g_config.llmModel = llmModel;
 
-    wchar_t llmPrompt[2048] = {};
-    GetWindowTextW(GetDlgItem(hwnd, IDC_LLM_PROMPT), llmPrompt, 2048);
-    g_config.llmPrompt = llmPrompt;
+    {
+        HWND promptEdit = GetDlgItem(hwnd, IDC_LLM_PROMPT);
+        int len = GetWindowTextLengthW(promptEdit);
+        std::wstring prompt(len + 1, L'\0');
+        GetWindowTextW(promptEdit, &prompt[0], len + 1);
+        prompt.resize(len);
+        g_config.llmPrompt = prompt;
+    }
 
     wchar_t llmExtra[1024] = {};
     GetWindowTextW(GetDlgItem(hwnd, IDC_LLM_EXTRA), llmExtra, 1024);
@@ -690,7 +721,12 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         return reinterpret_cast<LRESULT>(g_settingsBgBrush);
     case WM_CTLCOLORSTATIC: {
         HDC hdc = reinterpret_cast<HDC>(wParam);
-        SetTextColor(hdc, UiStyle::TextColor);
+        HWND ctl = reinterpret_cast<HWND>(lParam);
+        if (ctl == GetDlgItem(hwnd, IDC_LLM_PROMPT_HINT)) {
+            SetTextColor(hdc, UiStyle::HintTextColor);
+        } else {
+            SetTextColor(hdc, UiStyle::TextColor);
+        }
         SetBkColor(hdc, UiStyle::BgColor);
         return reinterpret_cast<LRESULT>(g_settingsBgBrush);
     }
@@ -724,11 +760,11 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         item.mask = TCIF_TEXT;
         item.pszText = const_cast<LPWSTR>(L"Recognition");
         TabCtrl_InsertItem(tab, 0, &item);
-        item.pszText = const_cast<LPWSTR>(L"LLM");
-        TabCtrl_InsertItem(tab, 1, &item);
-        item.pszText = const_cast<LPWSTR>(L"LLM Prompt");
-        TabCtrl_InsertItem(tab, 2, &item);
         item.pszText = const_cast<LPWSTR>(L"Cloud ASR");
+        TabCtrl_InsertItem(tab, 1, &item);
+        item.pszText = const_cast<LPWSTR>(L"LLM");
+        TabCtrl_InsertItem(tab, 2, &item);
+        item.pszText = const_cast<LPWSTR>(L"LLM Prompt");
         TabCtrl_InsertItem(tab, 3, &item);
 
         HWND control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(0), UiStyle::LabelWidth, UiStyle::LabelH, L"ASR Backend");
@@ -768,7 +804,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         AddRecognitionControl(control);
         AddRecognitionControl(CreateCombo(hwnd, IDC_POSTPROCESS, UiStyle::InputLeft, UiStyle::RowInputY(5), UiStyle::ComboW, UiStyle::ComboH));
 
-        const int shortcutY = UiStyle::RowInputY(5) + 30;
+        const int shortcutY = UiStyle::RowInputY(6);
         HWND shortcutGroup = CreateWindowW(L"BUTTON", L"Shortcut", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
                                            30, shortcutY, 788, 170, hwnd, nullptr, g_instance, nullptr);
         ApplyUiFont(shortcutGroup);
@@ -831,22 +867,50 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             AddLlmControl(hint);
         }
 
-        AddPromptControl(CreateButton(hwnd, IDC_LLM_PRESET1, UiStyle::InputLeft, UiStyle::RowInputY(0), 120, UiStyle::EditH, L"Basic Fix"));
-        AddPromptControl(CreateButton(hwnd, IDC_LLM_PRESET2, UiStyle::InputLeft + 140, UiStyle::RowInputY(0), 120, UiStyle::EditH, L"Deep Fix"));
-
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(1), UiStyle::LabelWidth, UiStyle::LabelH, L"System Prompt");
+        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(0), UiStyle::LabelWidth, UiStyle::LabelH, L"Preset");
         AddPromptControl(control);
+        AddPromptControl(CreateCombo(hwnd, IDC_LLM_PRESET_COMBO, UiStyle::InputLeft, UiStyle::RowInputY(0), 220, 200));
+
+        control = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE,
+                                UiStyle::ContentLeft, UiStyle::RowInputY(0) + UiStyle::EditH + 4,
+                                UiStyle::InputWFull + UiStyle::InputLeft - UiStyle::ContentLeft, 40,
+                                hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_PRESET_DESC)), g_instance, nullptr);
+        ApplyUiFont(control);
+        AddPromptControl(control);
+
+        const int groupBoxY = UiStyle::RowInputY(0) + UiStyle::EditH + 4 + 40 + 8;
+        HWND promptGroup = CreateWindowW(L"BUTTON", L"System Prompt",
+                                          WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+                                          30, groupBoxY, 788, 400,
+                                          hwnd, nullptr, g_instance, nullptr);
+        ApplyUiFont(promptGroup);
+        AddPromptControl(promptGroup);
+
+        const int promptEditY = groupBoxY + 28;
+        const int editWidth = 788 - (UiStyle::ContentLeft - 30) - 8;
+        const int editHeight = 400 - 28 - 8 - 32 - 4;
         HWND llmPrompt = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr,
                                           WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_WANTRETURN,
-                                          UiStyle::InputLeft, UiStyle::RowInputY(1), UiStyle::InputWFull, 340, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_PROMPT)), g_instance, nullptr);
+                                          UiStyle::ContentLeft, promptEditY,
+                                          editWidth, editHeight,
+                                          hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_PROMPT)), g_instance, nullptr);
         ApplyUiFont(llmPrompt);
         AddPromptControl(llmPrompt);
+
+        control = CreateWindowW(L"STATIC",
+                                L"Note: System Prompt only takes effect when Punctuation is set to \"Auto punctuate + LLM\" in the Recognition tab.",
+                                WS_CHILD | WS_VISIBLE,
+                                UiStyle::ContentLeft, promptEditY + editHeight + 4,
+                                editWidth, 32,
+                                hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_PROMPT_HINT)), g_instance, nullptr);
+        ApplyUiFont(control);
+        AddPromptControl(control);
 
         control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(0), UiStyle::LabelWidth, UiStyle::LabelH, L"Provider");
         AddCloudAsrControl(control);
         AddCloudAsrControl(CreateCombo(hwnd, IDC_CLOUD_PROVIDER, UiStyle::InputLeft, UiStyle::RowInputY(0), 300, UiStyle::ComboH));
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(1), 200, UiStyle::LabelH, L"\u2500\u2500 \u767E\u5EA6\u667A\u80FD\u4E91 \u2500\u2500");
+        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(1), 200, UiStyle::LabelH, L"\u2500\u2500 Baidu Cloud \u2500\u2500");
         AddCloudAsrControl(control);
         g_cloudSectionLabel = control;
 
@@ -1023,11 +1087,50 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             if (btn) SetWindowTextW(btn, g_llmKeyVisible ? L"Hide" : L"Show");
             return 0;
         }
-        case IDC_LLM_PRESET1:
-            SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_PROMPT), llm::kPresetBasicFix);
+        case IDC_LLM_PRESET_COMBO:
+            if (HIWORD(wParam) == CBN_SELCHANGE) {
+                int sel = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_LLM_PRESET_COMBO));
+                if (sel >= 0 && sel < llm::kPromptPresetCount) {
+                    // Save current prompt as custom backup before switching to preset
+                    HWND promptEdit = GetDlgItem(hwnd, IDC_LLM_PROMPT);
+                    int len = GetWindowTextLengthW(promptEdit);
+                    std::wstring current(len + 1, L'\0');
+                    GetWindowTextW(promptEdit, &current[0], len + 1);
+                    current.resize(len);
+                    s_customPromptBackup = current;
+                    // Set preset prompt
+                    SetWindowTextW(promptEdit, llm::kPromptPresets[sel].prompt);
+                    SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_PRESET_DESC), llm::kPromptPresets[sel].description);
+                } else if (sel == llm::kPromptPresetCount) {
+                    // Restore custom prompt backup
+                    SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_PROMPT), s_customPromptBackup.c_str());
+                    SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_PRESET_DESC), L"Custom prompt");
+                }
+            }
             return 0;
-        case IDC_LLM_PRESET2:
-            SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_PROMPT), llm::kPresetDeepFix);
+        case IDC_LLM_PROMPT:
+            if (HIWORD(wParam) == EN_CHANGE) {
+                HWND promptEdit = GetDlgItem(hwnd, IDC_LLM_PROMPT);
+                int len = GetWindowTextLengthW(promptEdit);
+                std::wstring current(len + 1, L'\0');
+                GetWindowTextW(promptEdit, &current[0], len + 1);
+                current.resize(len);
+                HWND combo = GetDlgItem(hwnd, IDC_LLM_PRESET_COMBO);
+                int matchedPreset = -1;
+                for (int i = 0; i < llm::kPromptPresetCount; ++i) {
+                    if (current == llm::kPromptPresets[i].prompt) {
+                        matchedPreset = i;
+                        break;
+                    }
+                }
+                if (matchedPreset >= 0) {
+                    ComboBox_SetCurSel(combo, matchedPreset);
+                    SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_PRESET_DESC), llm::kPromptPresets[matchedPreset].description);
+                } else {
+                    ComboBox_SetCurSel(combo, llm::kPromptPresetCount);
+                    SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_PRESET_DESC), L"Custom prompt");
+                }
+            }
             return 0;
         case IDC_LLM_EXTRA_RESET: {
             int pi = FindPresetIndex(g_config.llmProvider);
