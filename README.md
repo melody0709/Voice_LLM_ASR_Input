@@ -103,8 +103,8 @@ Right-click the tray icon to open Settings, hold the hotkey to start recording, 
 - `Provider` — Select between `Volcano Engine (Doubao)` and `Baidu Cloud`, controls below update dynamically
 - **Baidu Cloud**: `API Key` / `Secret Key` (DPAPI encrypted) + `Language Model` (Mandarin/English/Cantonese/Sichuanese) + `Test Connection`
 - **Volcano Engine (Doubao)**: `API Key` (DPAPI encrypted) + `ASR Mode` + `Model Version` + `Language` + `Test Connection`
-  - ASR Mode: `File Recognition (nostream)` (recommended, highest accuracy) / `Streaming (bigmodel)` (real-time partial) / `Streaming Optimized (async)` (best latency)
-  - Model Version: `Seed-ASR 2.0 (duration)` (per-hour billing) / `Seed-ASR 2.0 (concurrent)` (per-connection billing)
+  - ASR Mode: `bigmodel_nostream` (recommended, highest accuracy) / `bigmodel_async` (best latency) / `bigmodel` (real-time partial)
+  - Model Version: `Seed-ASR 2.0 (duration)` / `Seed-ASR 2.0 (concurrent)` / `BigASR 1.0 (duration)` / `BigASR 1.0 (concurrent)`
   - Hotwords ID/Name, Correct ID/Name — Reference hotword and correction tables from the self-learning platform
   - Use history as context — Sends recent recognition results as dialog context for improved accuracy
 - Cloud ASR includes built-in punctuation; VAD and local punct models are bypassed when using cloud backends

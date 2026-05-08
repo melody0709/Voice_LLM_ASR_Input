@@ -103,8 +103,8 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 - `Provider` — 选择 `Volcano Engine (Doubao)` 或 `Baidu Cloud`，下方控件动态切换
 - **Baidu Cloud**：`API Key` / `Secret Key`（DPAPI 加密）+ `Language Model`（普通话/英语/粤语/四川话）+ `Test Connection`
 - **Volcano Engine (Doubao)**：`API Key`（DPAPI 加密）+ `ASR Mode` + `Model Version` + `Language` + `Test Connection`
-  - ASR Mode：`File Recognition (nostream)`（推荐，准确率最高）/ `Streaming (bigmodel)`（实时部分结果）/ `Streaming Optimized (async)`（最佳延迟）
-  - Model Version：`Seed-ASR 2.0 (duration)`（按时长计费）/ `Seed-ASR 2.0 (concurrent)`（按并发计费）
+  - ASR Mode：`bigmodel_nostream`（推荐，准确率最高）/ `bigmodel_async`（最佳延迟）/ `bigmodel`（实时部分结果）
+  - Model Version：`Seed-ASR 2.0 (duration)` / `Seed-ASR 2.0 (concurrent)` / `BigASR 1.0 (duration)` / `BigASR 1.0 (concurrent)`
   - Hotwords ID/Name、Correct ID/Name — 引用自学习平台热词词表和替换词词表
   - Use history as context — 将最近识别结果作为对话上下文发送，提升准确率
 - 云端 ASR 自带标点；使用云端后端时 VAD 和本地标点模型不生效
