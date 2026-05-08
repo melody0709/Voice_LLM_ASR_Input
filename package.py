@@ -53,9 +53,11 @@ def main():
         print(f"版本: v{version}")
         print(f"正在准备文件...")
 
-        # 1. exe + dll + aria2c
+        # 1. 主 exe + dll + aria2c
+        shutil.copy2(exe, staging / exe.name)
+        print(f"  + {exe.name}")
         for f in BUILD_DIR.iterdir():
-            if f.suffix in (".exe", ".dll"):
+            if f.suffix == ".dll":
                 shutil.copy2(f, staging / f.name)
                 print(f"  + {f.name}")
         
@@ -80,12 +82,18 @@ def main():
             shutil.copy2(dl_script, staging / "download_models.ps1")
             print(f"  + download_models.ps1")
 
-        # 4. README
+        # 4. README + 火山引擎接入指南
         readme = ROOT / "README.md"
         if readme.exists():
             shutil.copy2(readme, staging / "README.md")
             print(f"  + README.md")
+        volc_guide = ROOT / "doc" / "volcengine_asr_guide_zh.md"
+        if volc_guide.exists():
+            shutil.copy2(volc_guide, staging / "volcengine_asr_guide_zh.md")
+            print(f"  + volcengine_asr_guide_zh.md")
 
+        # 删除旧包，避免 7z a 追加残留文件
+        archive_path.unlink(missing_ok=True)
         # 打包
         print(f"正在打包: {archive_path}")
         cmd = [sevenz, "a", str(archive_path), str(staging)]

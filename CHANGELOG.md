@@ -22,6 +22,11 @@
 - **Extra Params dialog**: Dedicated dialog for editing additional `request`-level JSON parameters, with preset templates for `sensitive_words_filter` and `result_type`/`vad_segment_duration`
 - **Model Version selector**: New dropdown for `Seed-ASR 2.0 (duration)` / `Seed-ASR 2.0 (concurrent)` / `BigModel 1.0 (duration)` / `BigModel 1.0 (concurrent)`
 
+- **Removed first-start model download dialog**: Cloud-only users are no longer prompted to download models on first launch
+- **Download button moved to ASR model row**: Renamed to "Download Local Model", placed next to the ASR model dropdown with 220px width
+- **Cloud Provider renamed and reordered**: "Volcengine (Doubao)" → "Volcano Engine (Doubao)", now the default selection; Volcano Engine also moved before Baidu Cloud in the ASR Backend dropdown
+- **Cloud mode startup HUD**: When using a cloud ASR backend, the HUD now shows "ASR ready: xxx" on startup
+
 ### Fixed
 
 - **`corpus` fields no longer mutually exclusive**: Previously `boosting_table_id` and `context` were sent with `if/else if`, preventing hotwords and dialog context from being used together. Now all `corpus` sub-fields are merged into a single JSON object

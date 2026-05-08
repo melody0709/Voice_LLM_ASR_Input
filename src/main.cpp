@@ -418,6 +418,12 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     case WM_CREATE:
         AddTrayIcon(hwnd);
         InstallKeyboardHook();
+        if (g_config.asrBackend != L"local") {
+            std::wstring name = (g_config.asrBackend == L"baidu") ? L"Baidu Cloud"
+                : (g_config.asrBackend == L"volcengine") ? L"Volcengine" : L"Cloud";
+            ShowHud(L"ASR ready: " + name);
+            if (g_hudWindow) SetTimer(g_hudWindow, kHudHideTimer, 1500, nullptr);
+        }
         return 0;
     case kTrayMessage:
         if (LOWORD(lParam) == WM_RBUTTONUP || LOWORD(lParam) == WM_CONTEXTMENU) {
@@ -569,21 +575,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                 PreloadAsrEngine(cfg);
                 PostMessageW(g_mainWindow, kPreloadDoneMessage, 0, 0);
             }).detach();
-        }
-    }
-
-    if (!AnyModelDirExists()) {
-        int ret = MessageBoxW(nullptr,
-            L"ASR models not found.\n\n"
-            L"Download models now? (~2.2GB)\n"
-            L"This will open a PowerShell window.\n\n"
-            L"[Yes] - Download models\n"
-            L"[No]  - Open Settings manually",
-            L"VoxType - Setup",
-            MB_YESNO | MB_ICONQUESTION);
-
-        if (ret == IDYES) {
-            RunModelDownloader(nullptr);
         }
     }
 

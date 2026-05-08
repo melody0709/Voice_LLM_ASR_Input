@@ -107,8 +107,8 @@ void AddVolcengineControl(HWND hwnd) {
 
 void ShowCloudSubPage(HWND hwnd, int providerIdx) {
     g_cloudProviderIdx = providerIdx;
-    for (HWND c : g_baiduControls) ShowWindow(c, providerIdx == 0 ? SW_SHOW : SW_HIDE);
-    for (HWND c : g_volcengineControls) ShowWindow(c, providerIdx == 1 ? SW_SHOW : SW_HIDE);
+    for (HWND c : g_baiduControls) ShowWindow(c, providerIdx == 1 ? SW_SHOW : SW_HIDE);
+    for (HWND c : g_volcengineControls) ShowWindow(c, providerIdx == 0 ? SW_SHOW : SW_HIDE);
 }
 
 void ShowSettingsPage(HWND hwnd, int page) {
@@ -316,17 +316,17 @@ void LoadSettingsControls(HWND hwnd) {
 
     HWND backendCombo = GetDlgItem(hwnd, IDC_ASR_BACKEND);
     ComboBox_AddString(backendCombo, L"Local (sherpa-onnx)");
-    ComboBox_AddString(backendCombo, L"Baidu Cloud");
     ComboBox_AddString(backendCombo, L"Volcano Engine");
+    ComboBox_AddString(backendCombo, L"Baidu Cloud");
     int backendIdx = 0;
-    if (g_config.asrBackend == L"baidu") backendIdx = 1;
-    else if (g_config.asrBackend == L"volcengine") backendIdx = 2;
+    if (g_config.asrBackend == L"volcengine") backendIdx = 1;
+    else if (g_config.asrBackend == L"baidu") backendIdx = 2;
     ComboBox_SetCurSel(backendCombo, backendIdx);
 
     HWND cloudProviderCombo = GetDlgItem(hwnd, IDC_CLOUD_PROVIDER);
+    ComboBox_AddString(cloudProviderCombo, L"Volcano Engine (Doubao)");
     ComboBox_AddString(cloudProviderCombo, L"Baidu Cloud");
-    ComboBox_AddString(cloudProviderCombo, L"Volcengine (Doubao)");
-    int cloudIdx = (g_config.cloudProvider == L"volcengine") ? 1 : 0;
+    int cloudIdx = (g_config.cloudProvider == L"baidu") ? 1 : 0;
     ComboBox_SetCurSel(cloudProviderCombo, cloudIdx);
     g_cloudProviderIdx = cloudIdx;
 
@@ -515,13 +515,13 @@ void SaveSettingsControls(HWND hwnd) {
 
     {
         int sel = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_ASR_BACKEND));
-        if (sel == 1) g_config.asrBackend = L"baidu";
-        else if (sel == 2) g_config.asrBackend = L"volcengine";
+        if (sel == 1) g_config.asrBackend = L"volcengine";
+        else if (sel == 2) g_config.asrBackend = L"baidu";
         else g_config.asrBackend = L"local";
     }
     {
         int cloudIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_CLOUD_PROVIDER));
-        g_config.cloudProvider = (cloudIdx == 1) ? L"volcengine" : L"baidu";
+        g_config.cloudProvider = (cloudIdx == 1) ? L"baidu" : L"volcengine";
     }
     wchar_t baiduApiKey[256] = {};
     GetWindowTextW(GetDlgItem(hwnd, IDC_BAIDU_API_KEY), baiduApiKey, 256);
@@ -1005,6 +1005,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(1), UiStyle::LabelWidth, UiStyle::LabelH, L"ASR model");
         AddRecognitionControl(control);
         AddRecognitionControl(CreateCombo(hwnd, IDC_MODEL, UiStyle::InputLeft, UiStyle::RowInputY(1), 330, 180));
+        AddRecognitionControl(CreateButton(hwnd, IDC_DOWNLOAD_MODELS, UiStyle::InputLeft + 350, UiStyle::RowInputY(1) - 1, 220, UiStyle::BtnH, L"Download Local Model"));
 
         control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(2), UiStyle::LabelWidth, UiStyle::LabelH, L"Model folder");
         AddRecognitionControl(control);
@@ -1013,7 +1014,6 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         ApplyUiFont(modelDir);
         AddRecognitionControl(modelDir);
         AddRecognitionControl(CreateButton(hwnd, IDC_BROWSE, UiStyle::SideBtnX, UiStyle::RowInputY(2) - 1, UiStyle::SideBtnW, UiStyle::BtnH, L"Browse..."));
-        AddRecognitionControl(CreateButton(hwnd, IDC_DOWNLOAD_MODELS, UiStyle::SideBtnX, UiStyle::RowInputY(2) + UiStyle::EditH + 7, UiStyle::SideBtnW, UiStyle::BtnH, L"Download"));
 
         control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(3), UiStyle::LabelWidth, UiStyle::LabelH, L"Threads");
         AddRecognitionControl(control);

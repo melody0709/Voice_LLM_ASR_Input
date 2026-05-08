@@ -22,6 +22,11 @@
 - **Extra Params 对话框**：专用对话框编辑额外的 `request` 级 JSON 参数，提供 `sensitive_words_filter` 和 `result_type`/`vad_segment_duration` 预设模板
 - **模型版本选择器**：新增下拉框，支持 `Seed-ASR 2.0 (duration)` / `Seed-ASR 2.0 (concurrent)` / `BigModel 1.0 (duration)` / `BigModel 1.0 (concurrent)`
 
+- **移除首次启动模型下载对话框**：纯云端用户不再被强制弹窗下载模型
+- **Download 按钮移至 ASR model 行**：更名为 "Download Local Model"，放在 ASR 模型下拉框右侧，宽度 220px
+- **Cloud Provider 更名与排序调整**："Volcengine (Doubao)" → "Volcano Engine (Doubao)"，并设为默认选项；ASR Backend 下拉中 Volcano Engine 也移至 Baidu Cloud 前面
+- **云端模式启动 HUD 提示**：使用云端 ASR 后端启动时，HUD 显示 "ASR ready: xxx"
+
 ### 修复
 
 - **`corpus` 字段不再互斥**：此前 `boosting_table_id` 和 `context` 使用 `if/else if` 发送，无法同时使用热词和对话上下文。现在所有 `corpus` 子字段合并到同一个 JSON 对象中
