@@ -348,8 +348,8 @@ void LoadConfig() {
     g_config.baiduApiKey = Utf8ToWide(ExtractJsonString(json, "baidu_api_key", ""));
     g_config.baiduSecretKey = llm::DecryptString(Utf8ToWide(ExtractJsonString(json, "baidu_secret_key", "")));
     g_config.baiduDevPid = _wtoi(Utf8ToWide(ExtractJsonString(json, "baidu_dev_pid", "1537")).c_str());
-    g_config.cloudProvider = Utf8ToWide(ExtractJsonString(json, "cloud_provider", "baidu"));
-    if (g_config.cloudProvider.empty()) g_config.cloudProvider = L"baidu";
+    g_config.cloudProvider = Utf8ToWide(ExtractJsonString(json, "cloud_provider", "volcengine"));
+    if (g_config.cloudProvider.empty()) g_config.cloudProvider = L"volcengine";
     g_config.volcApiKey = llm::DecryptString(Utf8ToWide(ExtractJsonString(json, "volc_api_key", "")));
     g_config.volcResourceId = Utf8ToWide(ExtractJsonString(json, "volc_resource_id", "volc.seedasr.sauc.duration"));
     g_config.volcMode = Utf8ToWide(ExtractJsonString(json, "volc_mode", "bigmodel"));

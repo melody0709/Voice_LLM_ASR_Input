@@ -166,7 +166,7 @@ struct Config {
     std::wstring baiduApiKey;
     std::wstring baiduSecretKey;
     int baiduDevPid = 1537;
-    std::wstring cloudProvider = L"baidu";
+    std::wstring cloudProvider = L"volcengine";
     std::wstring volcApiKey;
     std::wstring volcResourceId = L"volc.seedasr.sauc.duration";
     std::wstring volcMode = L"bigmodel";
