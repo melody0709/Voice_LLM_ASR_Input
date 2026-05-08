@@ -31,7 +31,7 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 - **实时 HUD** — 录音时底部显示悬浮胶囊窗，5 根音量条随声音跳动
 - **双 VAD 可选** — Silero VAD（轻量）/ FireRed VAD（高精度 F1 97.57），智能跳过静音
 - **LLM 纠错（可选）** — 支持 DeepSeek / OpenRouter / SiliconFlow 等多供应商，一键配置
-- **Cloud ASR（可选）** — 支持百度智能云和火山引擎（豆包）流式 ASR 作为替代后端
+- **Cloud ASR（可选）** — 支持火山引擎（豆包）和百度智能云流式 ASR 作为替代后端
 
 ## Quick Start
 
@@ -67,7 +67,7 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 <summary><strong>⚙️ Settings 说明</strong></summary>
 
 **Recognition tab**
-- `ASR Backend` — 选择 `Local (sherpa-onnx)` / `Baidu Cloud` / `Volcano Engine`
+- `ASR Backend` — 选择 `Local (sherpa-onnx)` / `Volcano Engine` / `Baidu Cloud`
 - `ASR model` — 语音识别模型（仅 Local 后端）：
   - `FireRedASR2 CTC` — 速度快，适合日常输入
   - `FireRedASR2 AED` — 质量更好，长句更准
@@ -100,9 +100,9 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 - `Basic Fix` / `Deep Fix` — 预设按钮，一键填入不同纠错力度的 System Prompt
 
 **Cloud ASR tab**
-- `Provider` — 选择 `百度智能云` 或 `火山引擎（豆包）`，下方控件动态切换
-- **百度**：`API Key` / `Secret Key`（DPAPI 加密）+ `Language Model`（普通话/英语/粤语/四川话）+ `Test Connection`
-- **豆包**：`API Key`（DPAPI 加密）+ `ASR Mode` + `Model Version` + `Language` + `Test Connection`
+- `Provider` — 选择 `Volcano Engine (Doubao)` 或 `Baidu Cloud`，下方控件动态切换
+- **Baidu Cloud**：`API Key` / `Secret Key`（DPAPI 加密）+ `Language Model`（普通话/英语/粤语/四川话）+ `Test Connection`
+- **Volcano Engine (Doubao)**：`API Key`（DPAPI 加密）+ `ASR Mode` + `Model Version` + `Language` + `Test Connection`
   - ASR Mode：`File Recognition (nostream)`（推荐，准确率最高）/ `Streaming (bigmodel)`（实时部分结果）/ `Streaming Optimized (async)`（最佳延迟）
   - Model Version：`Seed-ASR 2.0 (duration)`（按时长计费）/ `Seed-ASR 2.0 (concurrent)`（按并发计费）
   - Hotwords ID/Name、Correct ID/Name — 引用自学习平台热词词表和替换词词表

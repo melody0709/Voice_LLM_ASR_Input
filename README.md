@@ -31,7 +31,7 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 - **Real-time HUD** — Bottom floating capsule window during recording, 5 volume bars responding to sound
 - **Dual VAD Options** — Silero VAD (lightweight) / FireRed VAD (high precision F1 97.57), intelligently skips silence
 - **LLM Correction (Optional)** — Supports DeepSeek / OpenRouter / SiliconFlow and other providers, one-click configuration
-- **Cloud ASR (Optional)** — Supports Baidu Intelligent Cloud and Volcengine (豆包) streaming ASR as alternative backends
+- **Cloud ASR (Optional)** — Supports Volcano Engine (Doubao) and Baidu Cloud streaming ASR as alternative backends
 
 ## Quick Start
 
@@ -67,7 +67,7 @@ Right-click the tray icon to open Settings, hold the hotkey to start recording, 
 <summary><strong>Settings Guide</strong></summary>
 
 **Recognition tab**
-- `ASR Backend` — Select between `Local (sherpa-onnx)`, `Baidu Cloud`, and `Volcano Engine`
+- `ASR Backend` — Select between `Local (sherpa-onnx)`, `Volcano Engine`, and `Baidu Cloud`
 - `ASR model` — Speech recognition model (only for Local backend):
   - `FireRedASR2 CTC` — Fast, suitable for daily input
   - `FireRedASR2 AED` — Better quality, more accurate for long sentences
@@ -100,9 +100,9 @@ Right-click the tray icon to open Settings, hold the hotkey to start recording, 
 - `Basic Fix` / `Deep Fix` — Preset buttons, one-click fill for different correction intensity System Prompts
 
 **Cloud ASR tab**
-- `Provider` — Select between `百度智能云` (Baidu) and `火山引擎（豆包）` (Volcengine), controls below update dynamically
-- **Baidu**: `API Key` / `Secret Key` (DPAPI encrypted) + `Language Model` (Mandarin/English/Cantonese/Sichuanese) + `Test Connection`
-- **Volcengine**: `API Key` (DPAPI encrypted) + `ASR Mode` + `Model Version` + `Language` + `Test Connection`
+- `Provider` — Select between `Volcano Engine (Doubao)` and `Baidu Cloud`, controls below update dynamically
+- **Baidu Cloud**: `API Key` / `Secret Key` (DPAPI encrypted) + `Language Model` (Mandarin/English/Cantonese/Sichuanese) + `Test Connection`
+- **Volcano Engine (Doubao)**: `API Key` (DPAPI encrypted) + `ASR Mode` + `Model Version` + `Language` + `Test Connection`
   - ASR Mode: `File Recognition (nostream)` (recommended, highest accuracy) / `Streaming (bigmodel)` (real-time partial) / `Streaming Optimized (async)` (best latency)
   - Model Version: `Seed-ASR 2.0 (duration)` (per-hour billing) / `Seed-ASR 2.0 (concurrent)` (per-connection billing)
   - Hotwords ID/Name, Correct ID/Name — Reference hotword and correction tables from the self-learning platform
