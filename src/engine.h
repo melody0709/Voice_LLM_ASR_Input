@@ -34,6 +34,7 @@ std::wstring ModelIdFromIndex(int index);
 
 std::string ExtractJsonString(const std::string& json, const std::string& key, const std::string& fallback);
 bool ExtractJsonBool(const std::string& json, const std::string& key, bool fallback);
+int ExtractJsonInt(const std::string& json, const std::string& key, int fallback);
 
 void SaveCurrentProvider();
 void LoadProviderFromStore(const std::wstring& name);

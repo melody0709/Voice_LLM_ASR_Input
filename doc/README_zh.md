@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  当前版本：<code>v0.6.2</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
+  当前版本：<code>v0.7.0</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -105,6 +105,8 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 - **豆包**：`API Key`（DPAPI 加密）+ `ASR Mode` + `Model Version` + `Language` + `Test Connection`
   - ASR Mode：`File Recognition (nostream)`（推荐，准确率最高）/ `Streaming (bigmodel)`（实时部分结果）/ `Streaming Optimized (async)`（最佳延迟）
   - Model Version：`Seed-ASR 2.0 (duration)`（按时长计费）/ `Seed-ASR 2.0 (concurrent)`（按并发计费）
+  - Hotwords ID/Name、Correct ID/Name — 引用自学习平台热词词表和替换词词表
+  - Use history as context — 将最近识别结果作为对话上下文发送，提升准确率
 - 云端 ASR 自带标点；使用云端后端时 VAD 和本地标点模型不生效
 
 </details>
@@ -183,6 +185,7 @@ CHANGELOG.md        — 版本变更记录
 详见 [CHANGELOG.md](CHANGELOG.md)
 
 **最近更新：**
+- **v0.7.0** — 火山引擎 ASR 全参数支持、热词/替换词表、对话上下文、`corpus` 合并修复、`context` 格式修复
 - **v0.6.2** — Settings UI 样式统一化：`UiStyle` 命名空间、所有 tab 行间距一致
 - **v0.6.1** — ASR 模型启动预加载、onnxruntime/sherpa-onnx DLL 延迟加载、火山引擎 LLM 纠错修复
 - **v0.6.0** — 源码从单文件重构为多模块架构

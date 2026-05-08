@@ -2,6 +2,35 @@
 
 > 🇨🇳 [中文版](doc/CHANGELOG_zh.md)
 
+## v0.7.0 (2026-05-09)
+
+### Added
+
+- **Volcengine ASR full parameter support**: All `request` and `corpus` fields from the official API are now configurable in Settings
+  - `end_window_size` / `force_to_speech_time` — VAD segmentation and forced stop timing
+  - `enable_ddc` — Semantic smoothing (removes filler words and repetitions)
+  - `enable_nonstream` — Two-pass recognition on `bigmodel_async` mode (streaming + offline re-recognition for higher accuracy)
+  - `enable_music_fc` / `enable_poi_fc` — Music and POI function call
+  - `enable_accelerate_text` + `accelerate_score` — First-token acceleration
+  - `language` — Language selection (only effective in `bigmodel_nostream` mode, per API spec)
+- **Hotwords & correction tables**: New `Hotwords ID/Name` and `Correct ID/Name` fields in Cloud ASR tab
+  - `boosting_table_id` / `boosting_table_name` — Reference hotword tables from the self-learning platform
+  - `correct_table_id` / `correct_table_name` — Reference replacement word tables for domain-specific terminology
+- **Dialog context**: `Use history as context` checkbox sends recent recognition results as `corpus.context` to improve contextual accuracy
+  - Configurable history count (1–20, default 3)
+  - Context is serialized as a JSON string per API spec
+- **Extra Params dialog**: Dedicated dialog for editing additional `request`-level JSON parameters, with preset templates for `sensitive_words_filter` and `result_type`/`vad_segment_duration`
+- **Model Version selector**: New dropdown for `Seed-ASR 2.0 (duration)` / `Seed-ASR 2.0 (concurrent)` / `BigModel 1.0 (duration)` / `BigModel 1.0 (concurrent)`
+
+### Fixed
+
+- **`corpus` fields no longer mutually exclusive**: Previously `boosting_table_id` and `context` were sent with `if/else if`, preventing hotwords and dialog context from being used together. Now all `corpus` sub-fields are merged into a single JSON object
+- **`context` field format corrected**: The `context` value must be a JSON string (with escaped inner quotes), not a raw JSON object. Sending a raw object caused the server to reject the request and the client to hang after the first recognition
+- **`language` parameter now only sent in `bigmodel_nostream` mode**: Per API documentation, the `language` field is only supported in nostream mode; sending it in other modes could cause errors
+- **Extra Params `corpus` conflict resolved**: If a user manually included `corpus` in Extra Params, it would conflict with the code-generated `corpus` field, producing invalid JSON. The `corpus` key is now skipped during Extra Params parsing
+- **Removed non-standard HTTP headers**: `X-Api-Request-Id` and `X-Api-Sequence: -1` were not in the official API spec and have been removed from both `OpenSession` and `TestConnection`
+- **Removed insecure SSL flag overrides**: `SECURITY_FLAG_IGNORE_UNKNOWN_CA` and related flags were unnecessarily bypassing certificate validation; removed for proper HTTPS security
+
 ## v0.6.2 (2026-05-06)
 
 ### Changed

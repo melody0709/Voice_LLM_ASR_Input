@@ -70,7 +70,7 @@ constexpr int SmallBtnX = 532;
 constexpr int ActionBtnW = 140;
 constexpr int FooterBtnW = 84;
 constexpr int FooterHeight = 78;
-constexpr int FooterMinTop = 460;
+constexpr int FooterMinTop = 640;
 constexpr COLORREF BgColor = RGB(246, 248, 251);
 constexpr COLORREF ControlBgColor = RGB(255, 255, 255);
 constexpr COLORREF TextColor = RGB(30, 41, 59);
@@ -129,6 +129,21 @@ constexpr int IDC_VOLC_TEST = 2046;
 constexpr int IDC_VOLC_SHOW_KEY = 2047;
 constexpr int IDC_BAIDU_SHOW_API_KEY = 2048;
 constexpr int IDC_VOLC_MODE = 2049;
+constexpr int IDC_VOLC_ENABLE_NONSTREAM = 2050;
+constexpr int IDC_VOLC_END_WINDOW_SIZE = 2051;
+constexpr int IDC_VOLC_ENABLE_DDC = 2052;
+constexpr int IDC_VOLC_EXTRA_PARAMS = 2053;
+constexpr int IDC_VOLC_ENABLE_CONTEXT = 2054;
+constexpr int IDC_VOLC_CONTEXT_HISTORY = 2055;
+constexpr int IDC_VOLC_ENABLE_MUSIC_FC = 2056;
+constexpr int IDC_VOLC_HOTWORDS_ID = 2057;
+constexpr int IDC_VOLC_FORCE_TO_SPEECH_TIME = 2058;
+constexpr int IDC_VOLC_ENABLE_POI_FC = 2059;
+constexpr int IDC_VOLC_ENABLE_ACCELERATE = 2060;
+constexpr int IDC_VOLC_ACCELERATE_SCORE = 2061;
+constexpr int IDC_VOLC_HOTWORDS_NAME = 2062;
+constexpr int IDC_VOLC_CORRECT_TABLE_ID = 2063;
+constexpr int IDC_VOLC_CORRECT_TABLE_NAME = 2064;
 
 struct Config {
     std::wstring modelId = L"firered_ctc";
@@ -156,6 +171,21 @@ struct Config {
     std::wstring volcResourceId = L"volc.seedasr.sauc.duration";
     std::wstring volcMode = L"bigmodel";
     std::wstring volcLanguage;
+    bool volcEnableNonstream = false;
+    int volcEndWindowSize = 800;
+    bool volcEnableDdc = false;
+    std::wstring volcExtraParams;
+    bool volcEnableContext = false;
+    int volcContextHistory = 3;
+    bool volcEnableMusicFc = false;
+    bool volcEnablePoiFc = false;
+    int volcForceToSpeechTime = 0;
+    bool volcEnableAccelerate = false;
+    int volcAccelerateScore = 0;
+    std::wstring volcHotwordsId;
+    std::wstring volcHotwordsName;
+    std::wstring volcCorrectTableId;
+    std::wstring volcCorrectTableName;
 };
 
 struct HotkeyConfig {
@@ -250,7 +280,7 @@ extern CRITICAL_SECTION g_volcAudioCs;
 extern std::vector<BYTE> g_volcPendingAudio;
 extern AsrEngine g_asrEngine;
 extern int g_cloudProviderIdx;
-extern HWND g_cloudSectionLabel;
+extern HWND g_cloudAsrHintControl;
 
 void StartRecordingSession();
 void StopRecordingSession();

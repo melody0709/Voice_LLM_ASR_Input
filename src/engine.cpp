@@ -228,7 +228,36 @@ bool ExtractJsonBool(const std::string& json, const std::string& key, bool fallb
     if (valueStart == std::string::npos) return fallback;
     if (json.compare(valueStart, 4, "true") == 0) return true;
     if (json.compare(valueStart, 5, "false") == 0) return false;
+    if (json.compare(valueStart, 1, "1") == 0) return true;
+    if (json.compare(valueStart, 1, "0") == 0) return false;
     return fallback;
+}
+
+int ExtractJsonInt(const std::string& json, const std::string& key, int fallback) {
+    const std::string marker = "\"" + key + "\"";
+    size_t pos = json.find(marker);
+    if (pos == std::string::npos) return fallback;
+    pos = json.find(':', pos + marker.size());
+    if (pos == std::string::npos) return fallback;
+    const size_t valueStart = json.find_first_not_of(" \t\r\n", pos + 1);
+    if (valueStart == std::string::npos) return fallback;
+    // Support both quoted string and raw number
+    if (json[valueStart] == '"') {
+        size_t end = json.find('"', valueStart + 1);
+        if (end == std::string::npos) return fallback;
+        try {
+            return std::stoi(json.substr(valueStart + 1, end - valueStart - 1));
+        } catch (...) {
+            return fallback;
+        }
+    }
+    size_t valueEnd = json.find_first_of(",}\r\n", valueStart);
+    if (valueEnd == std::string::npos) valueEnd = json.size();
+    try {
+        return std::stoi(json.substr(valueStart, valueEnd - valueStart));
+    } catch (...) {
+        return fallback;
+    }
 }
 
 void SaveCurrentProvider() {
@@ -325,6 +354,25 @@ void LoadConfig() {
     g_config.volcResourceId = Utf8ToWide(ExtractJsonString(json, "volc_resource_id", "volc.seedasr.sauc.duration"));
     g_config.volcMode = Utf8ToWide(ExtractJsonString(json, "volc_mode", "bigmodel"));
     g_config.volcLanguage = Utf8ToWide(ExtractJsonString(json, "volc_language", ""));
+    g_config.volcEnableNonstream = ExtractJsonBool(json, "volc_enable_nonstream", false);
+    g_config.volcEndWindowSize = _wtoi(Utf8ToWide(ExtractJsonString(json, "volc_end_window_size", "800")).c_str());
+    if (g_config.volcEndWindowSize <= 0) g_config.volcEndWindowSize = 800;
+    g_config.volcEnableDdc = ExtractJsonBool(json, "volc_enable_ddc", false);
+    g_config.volcExtraParams = Utf8ToWide(ExtractJsonString(json, "volc_extra_params", ""));
+    g_config.volcEnableContext = ExtractJsonBool(json, "volc_enable_context", false);
+    g_config.volcContextHistory = ExtractJsonInt(json, "volc_context_history", 3);
+    if (g_config.volcContextHistory < 1) g_config.volcContextHistory = 3;
+    if (g_config.volcContextHistory > 20) g_config.volcContextHistory = 20;
+    g_config.volcEnableMusicFc = ExtractJsonBool(json, "volc_enable_music_fc", false);
+    g_config.volcEnablePoiFc = ExtractJsonBool(json, "volc_enable_poi_fc", false);
+    g_config.volcForceToSpeechTime = ExtractJsonInt(json, "volc_force_to_speech_time", 0);
+    g_config.volcEnableAccelerate = ExtractJsonBool(json, "volc_enable_accelerate", false);
+    g_config.volcAccelerateScore = ExtractJsonInt(json, "volc_accelerate_score", 0);
+    if (g_config.volcAccelerateScore < 0 || g_config.volcAccelerateScore > 20) g_config.volcAccelerateScore = 0;
+    g_config.volcHotwordsId = Utf8ToWide(ExtractJsonString(json, "volc_hotwords_id", ""));
+    g_config.volcHotwordsName = Utf8ToWide(ExtractJsonString(json, "volc_hotwords_name", ""));
+    g_config.volcCorrectTableId = Utf8ToWide(ExtractJsonString(json, "volc_correct_table_id", ""));
+    g_config.volcCorrectTableName = Utf8ToWide(ExtractJsonString(json, "volc_correct_table_name", ""));
     if (g_config.modelDir.empty()) {
         g_config.modelDir = DefaultModelDir(g_config.modelId);
     }
@@ -372,7 +420,22 @@ void SaveConfig() {
          << "  \"volc_api_key\": \"" << EscapeJson(llm::EncryptString(g_config.volcApiKey)) << "\",\n"
          << "  \"volc_resource_id\": \"" << EscapeJson(g_config.volcResourceId) << "\",\n"
          << "  \"volc_mode\": \"" << EscapeJson(g_config.volcMode) << "\",\n"
-         << "  \"volc_language\": \"" << EscapeJson(g_config.volcLanguage) << "\"\n"
+         << "  \"volc_language\": \"" << EscapeJson(g_config.volcLanguage) << "\",\n"
+         << "  \"volc_enable_nonstream\": " << (g_config.volcEnableNonstream ? "1" : "0") << ",\n"
+         << "  \"volc_end_window_size\": " << g_config.volcEndWindowSize << ",\n"
+         << "  \"volc_enable_ddc\": " << (g_config.volcEnableDdc ? "1" : "0") << ",\n"
+         << "  \"volc_extra_params\": \"" << EscapeJson(g_config.volcExtraParams) << "\",\n"
+         << "  \"volc_enable_context\": " << (g_config.volcEnableContext ? "1" : "0") << ",\n"
+         << "  \"volc_context_history\": " << g_config.volcContextHistory << ",\n"
+         << "  \"volc_enable_music_fc\": " << (g_config.volcEnableMusicFc ? "1" : "0") << ",\n"
+         << "  \"volc_enable_poi_fc\": " << (g_config.volcEnablePoiFc ? "1" : "0") << ",\n"
+         << "  \"volc_force_to_speech_time\": " << g_config.volcForceToSpeechTime << ",\n"
+         << "  \"volc_enable_accelerate\": " << (g_config.volcEnableAccelerate ? "1" : "0") << ",\n"
+         << "  \"volc_accelerate_score\": " << g_config.volcAccelerateScore << ",\n"
+         << "  \"volc_hotwords_id\": \"" << EscapeJson(g_config.volcHotwordsId) << "\",\n"
+         << "  \"volc_hotwords_name\": \"" << EscapeJson(g_config.volcHotwordsName) << "\",\n"
+         << "  \"volc_correct_table_id\": \"" << EscapeJson(g_config.volcCorrectTableId) << "\",\n"
+         << "  \"volc_correct_table_name\": \"" << EscapeJson(g_config.volcCorrectTableName) << "\"\n"
          << "}\n";
 }
 

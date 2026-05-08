@@ -43,5 +43,18 @@ struct InputDlgData {
 LRESULT CALLBACK InputWndProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam);
 bool ShowInputDialog(HWND parent, const wchar_t* title, std::wstring& out);
 
+constexpr int IDC_VOLC_EXTRA_EDIT = 3002;
+constexpr int IDC_VOLC_EXTRA_HOTWORDS = 3003;
+constexpr int IDC_VOLC_EXTRA_CONTEXT = 3004;
+constexpr int IDC_VOLC_EXTRA_RESET = 3005;
+
+struct VolcExtraDlgData {
+    std::wstring text;
+    bool ok = false;
+};
+
+LRESULT CALLBACK VolcExtraWndProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam);
+bool ShowVolcExtraDialog(HWND parent, std::wstring& out);
+
 LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 void ShowSettingsWindow(HWND owner);

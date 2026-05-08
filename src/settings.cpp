@@ -109,11 +109,6 @@ void ShowCloudSubPage(HWND hwnd, int providerIdx) {
     g_cloudProviderIdx = providerIdx;
     for (HWND c : g_baiduControls) ShowWindow(c, providerIdx == 0 ? SW_SHOW : SW_HIDE);
     for (HWND c : g_volcengineControls) ShowWindow(c, providerIdx == 1 ? SW_SHOW : SW_HIDE);
-    if (g_cloudSectionLabel) {
-        SetWindowTextW(g_cloudSectionLabel, providerIdx == 0
-            ? L"\u2500\u2500 Baidu Cloud \u2500\u2500"
-            : L"\u2500\u2500 Volcengine (Doubao) \u2500\u2500");
-    }
 }
 
 void ShowSettingsPage(HWND hwnd, int page) {
@@ -152,15 +147,23 @@ void LayoutSettingsWindow(HWND hwnd) {
     if (tab) {
         MoveWindow(tab, margin, 12, rc.right - margin * 2, tabBottom - 12, TRUE);
     }
-    const int btnY = footerTop + (footerHeight - UiStyle::ActionBtnH) / 2;
+    const int availableFooterH = rc.bottom - footerTop;
+    const int btnY = footerTop + (availableFooterH - UiStyle::ActionBtnH) / 2;
     HWND status = GetDlgItem(hwnd, IDC_STATUS);
     if (status) {
-        MoveWindow(status, margin, btnY + 4, rc.right - margin * 2 - 300, 32, TRUE);
+        MoveWindow(status, margin, btnY + 4, rc.right - margin * 2 - 300, 28, TRUE);
     }
     HWND save = GetDlgItem(hwnd, IDC_SAVE);
     HWND close = GetDlgItem(hwnd, IDC_CANCEL);
     if (save) MoveWindow(save, rc.right - margin - 192, btnY, UiStyle::FooterBtnW, UiStyle::ActionBtnH, TRUE);
     if (close) MoveWindow(close, rc.right - margin - UiStyle::FooterBtnW, btnY, UiStyle::FooterBtnW, UiStyle::ActionBtnH, TRUE);
+    if (g_cloudAsrHintControl) {
+        RECT tabRc;
+        GetWindowRect(tab, &tabRc);
+        MapWindowPoints(nullptr, hwnd, reinterpret_cast<LPPOINT>(&tabRc), 2);
+        const int hintY = tabRc.bottom - UiStyle::LabelH - 4;
+        SetWindowPos(g_cloudAsrHintControl, nullptr, UiStyle::ContentLeft, hintY, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+    }
 }
 
 void HideSettingsWindow(HWND hwnd) {
@@ -362,19 +365,23 @@ void LoadSettingsControls(HWND hwnd) {
     SetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_API_KEY), g_config.volcApiKey.c_str());
 
     HWND volcModeCombo = GetDlgItem(hwnd, IDC_VOLC_MODE);
-    ComboBox_AddString(volcModeCombo, L"File Recognition (nostream)");
-    ComboBox_AddString(volcModeCombo, L"Streaming (bigmodel)");
-    ComboBox_AddString(volcModeCombo, L"Streaming Optimized (async)");
+    ComboBox_AddString(volcModeCombo, L"bigmodel_nostream");
+    ComboBox_AddString(volcModeCombo, L"bigmodel_async");
+    ComboBox_AddString(volcModeCombo, L"bigmodel");
     int modeIdx = 0;
-    if (g_config.volcMode == L"bigmodel") modeIdx = 1;
-    else if (g_config.volcMode == L"bigmodel_async") modeIdx = 2;
+    if (g_config.volcMode == L"bigmodel_async") modeIdx = 1;
+    else if (g_config.volcMode == L"bigmodel") modeIdx = 2;
     ComboBox_SetCurSel(volcModeCombo, modeIdx);
 
     HWND volcResCombo = GetDlgItem(hwnd, IDC_VOLC_RESOURCE);
     ComboBox_AddString(volcResCombo, L"Seed-ASR 2.0 (duration)");
     ComboBox_AddString(volcResCombo, L"Seed-ASR 2.0 (concurrent)");
+    ComboBox_AddString(volcResCombo, L"BigASR 1.0 (duration)");
+    ComboBox_AddString(volcResCombo, L"BigASR 1.0 (concurrent)");
     int resIdx = 0;
     if (g_config.volcResourceId == L"volc.seedasr.sauc.concurrent") resIdx = 1;
+    else if (g_config.volcResourceId == L"volc.bigasr.sauc.duration") resIdx = 2;
+    else if (g_config.volcResourceId == L"volc.bigasr.sauc.concurrent") resIdx = 3;
     ComboBox_SetCurSel(volcResCombo, resIdx);
 
     HWND volcLangCombo = GetDlgItem(hwnd, IDC_VOLC_LANGUAGE);
@@ -397,6 +404,47 @@ void LoadSettingsControls(HWND hwnd) {
     else if (g_config.volcLanguage == L"pt-BR") langIdx = 7;
     else if (g_config.volcLanguage == L"id-ID") langIdx = 8;
     ComboBox_SetCurSel(volcLangCombo, langIdx);
+    EnableWindow(volcLangCombo, modeIdx == 0);
+
+    Button_SetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_NONSTREAM), g_config.volcEnableNonstream ? BST_CHECKED : BST_UNCHECKED);
+    EnableWindow(GetDlgItem(hwnd, IDC_VOLC_ENABLE_NONSTREAM), g_config.volcMode == L"bigmodel_async");
+    {
+        bool fcEnabled = (g_config.volcMode == L"bigmodel_nostream") ||
+            (g_config.volcMode == L"bigmodel_async" && g_config.volcEnableNonstream);
+        EnableWindow(GetDlgItem(hwnd, IDC_VOLC_ENABLE_MUSIC_FC), fcEnabled);
+        EnableWindow(GetDlgItem(hwnd, IDC_VOLC_ENABLE_POI_FC), fcEnabled);
+    }
+    Button_SetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_DDC), g_config.volcEnableDdc ? BST_CHECKED : BST_UNCHECKED);
+    Button_SetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_MUSIC_FC), g_config.volcEnableMusicFc ? BST_CHECKED : BST_UNCHECKED);
+    Button_SetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_POI_FC), g_config.volcEnablePoiFc ? BST_CHECKED : BST_UNCHECKED);
+    Button_SetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_ACCELERATE), g_config.volcEnableAccelerate ? BST_CHECKED : BST_UNCHECKED);
+    {
+        wchar_t ew[32] = {};
+        _itow_s(g_config.volcEndWindowSize, ew, 10);
+        SetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_END_WINDOW_SIZE), ew);
+    }
+    {
+        wchar_t ft[32] = {};
+        _itow_s(g_config.volcForceToSpeechTime, ft, 10);
+        SetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_FORCE_TO_SPEECH_TIME), ft);
+    }
+    {
+        wchar_t as[32] = {};
+        _itow_s(g_config.volcAccelerateScore, as, 10);
+        SetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_ACCELERATE_SCORE), as);
+    }
+
+    SetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_HOTWORDS_ID), g_config.volcHotwordsId.c_str());
+    SetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_HOTWORDS_NAME), g_config.volcHotwordsName.c_str());
+    SetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_CORRECT_TABLE_ID), g_config.volcCorrectTableId.c_str());
+    SetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_CORRECT_TABLE_NAME), g_config.volcCorrectTableName.c_str());
+
+    Button_SetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_CONTEXT), g_config.volcEnableContext ? BST_CHECKED : BST_UNCHECKED);
+    {
+        wchar_t ch[32] = {};
+        _itow_s(g_config.volcContextHistory, ch, 10);
+        SetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_CONTEXT_HISTORY), ch);
+    }
 
     SetStatus(hwnd, L"Ready.");
 }
@@ -492,18 +540,68 @@ void SaveSettingsControls(HWND hwnd) {
     g_config.volcApiKey = volcApiKey;
     {
         int modeIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_VOLC_MODE));
-        if (modeIdx == 1) g_config.volcMode = L"bigmodel";
-        else if (modeIdx == 2) g_config.volcMode = L"bigmodel_async";
+        if (modeIdx == 1) g_config.volcMode = L"bigmodel_async";
+        else if (modeIdx == 2) g_config.volcMode = L"bigmodel";
         else g_config.volcMode = L"bigmodel_nostream";
     }
     {
         int resIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_VOLC_RESOURCE));
-        if (resIdx == 1) g_config.volcResourceId = L"volc.seedasr.sauc.concurrent";
-        else g_config.volcResourceId = L"volc.seedasr.sauc.duration";
+        if (resIdx >= 0 && resIdx < 4) g_config.volcResourceId = kVolcResources[resIdx].resourceId;
     }
     {
         int langIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_VOLC_LANGUAGE));
         if (langIdx >= 0 && langIdx < 9) g_config.volcLanguage = kVolcLanguages[langIdx];
+    }
+
+    g_config.volcEnableNonstream = Button_GetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_NONSTREAM)) == BST_CHECKED;
+    g_config.volcEnableDdc = Button_GetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_DDC)) == BST_CHECKED;
+    g_config.volcEnableMusicFc = Button_GetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_MUSIC_FC)) == BST_CHECKED;
+    g_config.volcEnablePoiFc = Button_GetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_POI_FC)) == BST_CHECKED;
+    g_config.volcEnableAccelerate = Button_GetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_ACCELERATE)) == BST_CHECKED;
+    {
+        wchar_t ew[32] = {};
+        GetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_END_WINDOW_SIZE), ew, 32);
+        int val = _wtoi(ew);
+        g_config.volcEndWindowSize = val > 0 ? val : 800;
+    }
+    {
+        wchar_t ft[32] = {};
+        GetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_FORCE_TO_SPEECH_TIME), ft, 32);
+        int val = _wtoi(ft);
+        g_config.volcForceToSpeechTime = (val >= 1) ? val : 0;
+    }
+    {
+        wchar_t as[32] = {};
+        GetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_ACCELERATE_SCORE), as, 32);
+        int val = _wtoi(as);
+        g_config.volcAccelerateScore = (val >= 0 && val <= 20) ? val : 0;
+    }
+    {
+        wchar_t hw[512] = {};
+        GetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_HOTWORDS_ID), hw, 512);
+        g_config.volcHotwordsId = hw;
+    }
+    {
+        wchar_t hw[512] = {};
+        GetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_HOTWORDS_NAME), hw, 512);
+        g_config.volcHotwordsName = hw;
+    }
+    {
+        wchar_t ct[512] = {};
+        GetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_CORRECT_TABLE_ID), ct, 512);
+        g_config.volcCorrectTableId = ct;
+    }
+    {
+        wchar_t ct[512] = {};
+        GetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_CORRECT_TABLE_NAME), ct, 512);
+        g_config.volcCorrectTableName = ct;
+    }
+    g_config.volcEnableContext = Button_GetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_CONTEXT)) == BST_CHECKED;
+    {
+        wchar_t ch[32] = {};
+        GetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_CONTEXT_HISTORY), ch, 32);
+        int val = _wtoi(ch);
+        g_config.volcContextHistory = (val >= 1 && val <= 20) ? val : 3;
     }
 
     SaveConfig();
@@ -691,6 +789,134 @@ bool ShowInputDialog(HWND parent, const wchar_t* title, std::wstring& out) {
         DispatchMessageW(&msg);
     }
     if (data.ok) { out = data.result; return true; }
+    return false;
+}
+
+LRESULT CALLBACK VolcExtraWndProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_CREATE: {
+        auto* cs = reinterpret_cast<CREATESTRUCT*>(lParam);
+        auto* data = reinterpret_cast<VolcExtraDlgData*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hDlg, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(data));
+        SetWindowTextW(hDlg, L"Volcengine ASR Extra Params");
+
+        HWND edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr,
+                                    WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | WS_TABSTOP,
+                                    12, 12, 500, 280, hDlg,
+                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_EXTRA_EDIT)),
+                                    g_instance, nullptr);
+        ApplyUiFont(edit);
+        if (data && !data->text.empty()) SetWindowTextW(edit, data->text.c_str());
+
+        CreateWindowW(L"BUTTON", L"Filter", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                      12, 302, 90, 28, hDlg,
+                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_EXTRA_HOTWORDS)),
+                      g_instance, nullptr);
+        CreateWindowW(L"BUTTON", L"Result", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                      110, 302, 90, 28, hDlg,
+                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_EXTRA_CONTEXT)),
+                      g_instance, nullptr);
+        CreateWindowW(L"BUTTON", L"Reset", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                      208, 302, 80, 28, hDlg, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_EXTRA_RESET)),
+                      g_instance, nullptr);
+
+        HWND okBtn = CreateWindowW(L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP,
+                                   340, 302, 80, 28, hDlg, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), g_instance, nullptr);
+        CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                      430, 302, 80, 28, hDlg, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)), g_instance, nullptr);
+        ApplyUiFont(okBtn);
+        ApplyUiFont(GetDlgItem(hDlg, IDCANCEL));
+        ApplyUiFont(GetDlgItem(hDlg, IDC_VOLC_EXTRA_HOTWORDS));
+        ApplyUiFont(GetDlgItem(hDlg, IDC_VOLC_EXTRA_CONTEXT));
+        ApplyUiFont(GetDlgItem(hDlg, IDC_VOLC_EXTRA_RESET));
+        SetFocus(edit);
+        return 0;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDOK) {
+            auto* data = reinterpret_cast<VolcExtraDlgData*>(GetWindowLongPtrW(hDlg, GWLP_USERDATA));
+            if (data) {
+                HWND edit = GetDlgItem(hDlg, IDC_VOLC_EXTRA_EDIT);
+                int len = GetWindowTextLengthW(edit);
+                if (len > 0) {
+                    std::vector<wchar_t> buf(len + 1);
+                    GetWindowTextW(edit, buf.data(), len + 1);
+                    data->text = buf.data();
+                } else {
+                    data->text.clear();
+                }
+                data->ok = true;
+            }
+            DestroyWindow(hDlg);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDCANCEL) {
+            DestroyWindow(hDlg);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_VOLC_EXTRA_HOTWORDS) {
+            HWND edit = GetDlgItem(hDlg, IDC_VOLC_EXTRA_EDIT);
+            SetWindowTextW(edit, L"\"sensitive_words_filter\":\"system_reserved_filter\"");
+            SendMessageW(edit, EM_SETSEL, 0, -1);
+            SetFocus(edit);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_VOLC_EXTRA_CONTEXT) {
+            HWND edit = GetDlgItem(hDlg, IDC_VOLC_EXTRA_EDIT);
+            SetWindowTextW(edit, L"\"result_type\":\"single\",\"vad_segment_duration\":3000");
+            SendMessageW(edit, EM_SETSEL, 0, -1);
+            SetFocus(edit);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_VOLC_EXTRA_RESET) {
+            SetWindowTextW(GetDlgItem(hDlg, IDC_VOLC_EXTRA_EDIT), L"");
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        DestroyWindow(hDlg);
+        return 0;
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProcW(hDlg, msg, wParam, lParam);
+}
+
+bool ShowVolcExtraDialog(HWND parent, std::wstring& out) {
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc = {};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = VolcExtraWndProc;
+        wc.hInstance = g_instance;
+        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+        wc.lpszClassName = L"VoxTypeVolcExtraDlg";
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        RegisterClassExW(&wc);
+        registered = true;
+    }
+    VolcExtraDlgData data;
+    data.text = out;
+    RECT work;
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    int w = 540, h = 420;
+    int x = work.left + (work.right - work.left - w) / 2;
+    int y = work.top + (work.bottom - work.top - h) / 2;
+    HWND dlg = CreateWindowExW(WS_EX_APPWINDOW | WS_EX_DLGMODALFRAME,
+                               L"VoxTypeVolcExtraDlg", L"Volcengine ASR Extra Params",
+                               WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                               x, y, w, h, parent, nullptr, g_instance, &data);
+    if (!dlg) return false;
+    ShowWindow(dlg, SW_SHOW);
+    SetForegroundWindow(dlg);
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0)) {
+        if (IsDialogMessageW(dlg, &msg)) continue;
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    if (data.ok) { out = data.text; return true; }
     return false;
 }
 
@@ -893,7 +1119,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 
         const int promptEditY = groupBoxY + 28;
         const int editWidth = 788 - (UiStyle::ContentLeft - 30) - 8;
-        const int editHeight = 400 - 28 - 8 - 32 - 4;
+        const int editHeight = 400 - 28 - 8 - 48 - 4;
         HWND llmPrompt = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr,
                                           WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_WANTRETURN,
                                           UiStyle::ContentLeft, promptEditY,
@@ -906,7 +1132,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                                 L"Note: System Prompt only takes effect when Punctuation is set to \"Auto punctuate + LLM\" in the Recognition tab.",
                                 WS_CHILD | WS_VISIBLE,
                                 UiStyle::ContentLeft, promptEditY + editHeight + 4,
-                                editWidth, 32,
+                                editWidth, 48,
                                 hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_PROMPT_HINT)), g_instance, nullptr);
         ApplyUiFont(control);
         AddPromptControl(control);
@@ -915,63 +1141,154 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         AddCloudAsrControl(control);
         AddCloudAsrControl(CreateCombo(hwnd, IDC_CLOUD_PROVIDER, UiStyle::InputLeft, UiStyle::RowInputY(0), 300, UiStyle::ComboH));
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(1), 200, UiStyle::LabelH, L"\u2500\u2500 Baidu Cloud \u2500\u2500");
-        AddCloudAsrControl(control);
-        g_cloudSectionLabel = control;
-
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(2), UiStyle::LabelWidth, UiStyle::LabelH, L"API Key");
+        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(1), UiStyle::LabelWidth, UiStyle::LabelH, L"API Key");
         AddBaiduControl(control);
         HWND baiduApiKey = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD,
-                                           UiStyle::InputLeft, UiStyle::RowInputY(2), 330, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_BAIDU_API_KEY)), g_instance, nullptr);
+                                           UiStyle::InputLeft, UiStyle::RowInputY(1), 330, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_BAIDU_API_KEY)), g_instance, nullptr);
         ApplyUiFont(baiduApiKey);
         AddBaiduControl(baiduApiKey);
-        AddBaiduControl(CreateButton(hwnd, IDC_BAIDU_SHOW_API_KEY, UiStyle::SmallBtnX, UiStyle::RowInputY(2) - 1, UiStyle::SmallBtnW, UiStyle::BtnH, L"Show"));
+        AddBaiduControl(CreateButton(hwnd, IDC_BAIDU_SHOW_API_KEY, UiStyle::SmallBtnX, UiStyle::RowInputY(1) - 1, UiStyle::SmallBtnW, UiStyle::BtnH, L"Show"));
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(3), UiStyle::LabelWidth, UiStyle::LabelH, L"Secret Key");
+        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(2), UiStyle::LabelWidth, UiStyle::LabelH, L"Secret Key");
         AddBaiduControl(control);
         HWND baiduSecretKey = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD,
-                                              UiStyle::InputLeft, UiStyle::RowInputY(3), 330, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_BAIDU_SECRET_KEY)), g_instance, nullptr);
+                                              UiStyle::InputLeft, UiStyle::RowInputY(2), 330, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_BAIDU_SECRET_KEY)), g_instance, nullptr);
         ApplyUiFont(baiduSecretKey);
         AddBaiduControl(baiduSecretKey);
-        AddBaiduControl(CreateButton(hwnd, IDC_BAIDU_SHOW_KEY, UiStyle::SmallBtnX, UiStyle::RowInputY(3) - 1, UiStyle::SmallBtnW, UiStyle::BtnH, L"Show"));
+        AddBaiduControl(CreateButton(hwnd, IDC_BAIDU_SHOW_KEY, UiStyle::SmallBtnX, UiStyle::RowInputY(2) - 1, UiStyle::SmallBtnW, UiStyle::BtnH, L"Show"));
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(4), UiStyle::LabelWidth, UiStyle::LabelH, L"Language Model");
+        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(3), UiStyle::LabelWidth, UiStyle::LabelH, L"Language Model");
         AddBaiduControl(control);
-        AddBaiduControl(CreateCombo(hwnd, IDC_BAIDU_DEV_PID, UiStyle::InputLeft, UiStyle::RowInputY(4), UiStyle::ComboW, UiStyle::ComboH));
+        AddBaiduControl(CreateCombo(hwnd, IDC_BAIDU_DEV_PID, UiStyle::InputLeft, UiStyle::RowInputY(3), UiStyle::ComboW, UiStyle::ComboH));
 
-        AddBaiduControl(CreateButton(hwnd, IDC_BAIDU_TEST, UiStyle::InputLeft, UiStyle::RowInputY(5), UiStyle::ActionBtnW, UiStyle::ActionBtnH, L"Test Connection"));
+        AddBaiduControl(CreateButton(hwnd, IDC_BAIDU_TEST, 500, UiStyle::RowInputY(0), UiStyle::ActionBtnW, UiStyle::ActionBtnH, L"Test Connection"));
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(2), UiStyle::LabelWidth, UiStyle::LabelH, L"API Key (X-Api-Key)");
+        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(1), UiStyle::LabelWidth, UiStyle::LabelH, L"API Key (X-Api-Key)");
         AddVolcengineControl(control);
         HWND volcApiKey = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD,
-                                          UiStyle::InputLeft, UiStyle::RowInputY(2), 330, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_API_KEY)), g_instance, nullptr);
+                                          UiStyle::InputLeft, UiStyle::RowInputY(1), 330, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_API_KEY)), g_instance, nullptr);
         ApplyUiFont(volcApiKey);
         AddVolcengineControl(volcApiKey);
-        AddVolcengineControl(CreateButton(hwnd, IDC_VOLC_SHOW_KEY, UiStyle::SmallBtnX, UiStyle::RowInputY(2) - 1, UiStyle::SmallBtnW, UiStyle::BtnH, L"Show"));
+        AddVolcengineControl(CreateButton(hwnd, IDC_VOLC_SHOW_KEY, UiStyle::SmallBtnX, UiStyle::RowInputY(1) - 1, UiStyle::SmallBtnW, UiStyle::BtnH, L"Show"));
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(3), UiStyle::LabelWidth, UiStyle::LabelH, L"ASR Mode");
+        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(2), 130, UiStyle::LabelH, L"Model");
         AddVolcengineControl(control);
-        AddVolcengineControl(CreateCombo(hwnd, IDC_VOLC_MODE, UiStyle::InputLeft, UiStyle::RowInputY(3), 300, UiStyle::ComboH));
+        AddVolcengineControl(CreateCombo(hwnd, IDC_VOLC_RESOURCE, UiStyle::InputLeft, UiStyle::RowInputY(2), 480, UiStyle::ComboH));
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(4), UiStyle::LabelWidth, UiStyle::LabelH, L"Model Version");
+        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(3), 130, UiStyle::LabelH, L"ASR Mode");
         AddVolcengineControl(control);
-        AddVolcengineControl(CreateCombo(hwnd, IDC_VOLC_RESOURCE, UiStyle::InputLeft, UiStyle::RowInputY(4), 300, UiStyle::ComboH));
+        AddVolcengineControl(CreateCombo(hwnd, IDC_VOLC_MODE, UiStyle::InputLeft, UiStyle::RowInputY(3), 220, UiStyle::ComboH));
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(5), UiStyle::LabelWidth, UiStyle::LabelH, L"Language (optional)");
+        control = CreateLabel(hwnd, 420, UiStyle::RowLabelY(3), 80, UiStyle::LabelH, L"Language");
         AddVolcengineControl(control);
-        AddVolcengineControl(CreateCombo(hwnd, IDC_VOLC_LANGUAGE, UiStyle::InputLeft, UiStyle::RowInputY(5), UiStyle::ComboW, UiStyle::ComboH));
+        AddVolcengineControl(CreateCombo(hwnd, IDC_VOLC_LANGUAGE, 505, UiStyle::RowInputY(3), 240, UiStyle::ComboH));
 
-        AddVolcengineControl(CreateButton(hwnd, IDC_VOLC_TEST, UiStyle::InputLeft, UiStyle::RowInputY(6), UiStyle::ActionBtnW, UiStyle::ActionBtnH, L"Test Connection"));
+        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowInputY(4) + 2, UiStyle::LabelWidth + 10, UiStyle::LabelH, L"end_window_size");
+        AddVolcengineControl(control);
+        HWND volcEndWindow = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
+                                             UiStyle::InputLeft + 10, UiStyle::RowInputY(4), 80, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_END_WINDOW_SIZE)), g_instance, nullptr);
+        ApplyUiFont(volcEndWindow);
+        AddVolcengineControl(volcEndWindow);
+        control = CreateLabel(hwnd, UiStyle::InputLeft + 92, UiStyle::RowInputY(4) + 2, 30, UiStyle::LabelH, L"ms");
+        AddVolcengineControl(control);
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowInputY(6) + 42, 640, 50,
-            L"Cloud ASR sends audio to remote servers.\nAll keys are encrypted with DPAPI locally.");
+        control = CreateLabel(hwnd, 360, UiStyle::RowInputY(4) + 2, 180, UiStyle::LabelH, L"force_to_speech_time");
+        AddVolcengineControl(control);
+        HWND volcForceSpeech = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
+                                               546, UiStyle::RowInputY(4), 60, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_FORCE_TO_SPEECH_TIME)), g_instance, nullptr);
+        ApplyUiFont(volcForceSpeech);
+        AddVolcengineControl(volcForceSpeech);
+        control = CreateLabel(hwnd, 614, UiStyle::RowInputY(4) + 2, 30, UiStyle::LabelH, L"ms");
+        AddVolcengineControl(control);
+
+        HWND volcDdc = CreateWindowW(L"BUTTON", L"enable_ddc", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                     UiStyle::ContentLeft, UiStyle::RowInputY(5) + 6, 120, UiStyle::CheckH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_ENABLE_DDC)), g_instance, nullptr);
+        ApplyUiFont(volcDdc);
+        AddVolcengineControl(volcDdc);
+
+        HWND volcNonstream = CreateWindowW(L"BUTTON", L"enable_nonstream", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                           180, UiStyle::RowInputY(5) + 6, 170, UiStyle::CheckH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_ENABLE_NONSTREAM)), g_instance, nullptr);
+        ApplyUiFont(volcNonstream);
+        AddVolcengineControl(volcNonstream);
+
+        HWND volcMusicFc = CreateWindowW(L"BUTTON", L"enable_music_fc", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                         370, UiStyle::RowInputY(5) + 6, 150, UiStyle::CheckH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_ENABLE_MUSIC_FC)), g_instance, nullptr);
+        ApplyUiFont(volcMusicFc);
+        AddVolcengineControl(volcMusicFc);
+
+        HWND volcPoiFc = CreateWindowW(L"BUTTON", L"enable_poi_fc", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                       540, UiStyle::RowInputY(5) + 6, 130, UiStyle::CheckH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_ENABLE_POI_FC)), g_instance, nullptr);
+        ApplyUiFont(volcPoiFc);
+        AddVolcengineControl(volcPoiFc);
+
+        HWND volcAccelerate = CreateWindowW(L"BUTTON", L"enable_accelerate", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                            UiStyle::ContentLeft, UiStyle::RowInputY(6) + 6, 160, UiStyle::CheckH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_ENABLE_ACCELERATE)), g_instance, nullptr);
+        ApplyUiFont(volcAccelerate);
+        AddVolcengineControl(volcAccelerate);
+
+        control = CreateLabel(hwnd, 260, UiStyle::RowInputY(6) + 2, 50, UiStyle::LabelH, L"score");
+        AddVolcengineControl(control);
+        HWND volcAccScore = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
+                                            316, UiStyle::RowInputY(6), 44, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_ACCELERATE_SCORE)), g_instance, nullptr);
+        ApplyUiFont(volcAccScore);
+        AddVolcengineControl(volcAccScore);
+        control = CreateLabel(hwnd, 368, UiStyle::RowInputY(6) + 2, 80, UiStyle::LabelH, L"(0-20)");
+        AddVolcengineControl(control);
+
+        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowInputY(7) + 2, UiStyle::LabelWidth, UiStyle::LabelH, L"Hotwords ID");
+        AddVolcengineControl(control);
+        HWND volcHotwordsId = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                                              UiStyle::InputLeft, UiStyle::RowInputY(7), 260, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_HOTWORDS_ID)), g_instance, nullptr);
+        ApplyUiFont(volcHotwordsId);
+        AddVolcengineControl(volcHotwordsId);
+        control = CreateLabel(hwnd, 462, UiStyle::RowInputY(7) + 2, 48, UiStyle::LabelH, L"Name");
+        AddVolcengineControl(control);
+        HWND volcHotwordsName = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                                                516, UiStyle::RowInputY(7), 210, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_HOTWORDS_NAME)), g_instance, nullptr);
+        ApplyUiFont(volcHotwordsName);
+        AddVolcengineControl(volcHotwordsName);
+
+        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowInputY(8) + 2, UiStyle::LabelWidth, UiStyle::LabelH, L"Correct ID");
+        AddVolcengineControl(control);
+        HWND volcCorrectTableId = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                                                   UiStyle::InputLeft, UiStyle::RowInputY(8), 260, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_CORRECT_TABLE_ID)), g_instance, nullptr);
+        ApplyUiFont(volcCorrectTableId);
+        AddVolcengineControl(volcCorrectTableId);
+        control = CreateLabel(hwnd, 462, UiStyle::RowInputY(8) + 2, 48, UiStyle::LabelH, L"Name");
+        AddVolcengineControl(control);
+        HWND volcCorrectTableName = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                                                     516, UiStyle::RowInputY(8), 210, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_CORRECT_TABLE_NAME)), g_instance, nullptr);
+        ApplyUiFont(volcCorrectTableName);
+        AddVolcengineControl(volcCorrectTableName);
+
+        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowInputY(9) + 2, UiStyle::LabelWidth, UiStyle::LabelH, L"Extra / Context");
+        AddVolcengineControl(control);
+        AddVolcengineControl(CreateButton(hwnd, IDC_VOLC_EXTRA_PARAMS, UiStyle::InputLeft, UiStyle::RowInputY(9), UiStyle::ActionBtnW, UiStyle::ActionBtnH, L"Edit Params"));
+
+        HWND volcEnableContext = CreateWindowW(L"BUTTON", L"Use history as context", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                               UiStyle::InputLeft + UiStyle::ActionBtnW + 12, UiStyle::RowInputY(9) + 6, 210, UiStyle::CheckH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_ENABLE_CONTEXT)), g_instance, nullptr);
+        ApplyUiFont(volcEnableContext);
+        AddVolcengineControl(volcEnableContext);
+
+        HWND volcContextHistory = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
+                                                  UiStyle::InputLeft + UiStyle::ActionBtnW + 228, UiStyle::RowInputY(9), 44, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_CONTEXT_HISTORY)), g_instance, nullptr);
+        ApplyUiFont(volcContextHistory);
+        AddVolcengineControl(volcContextHistory);
+        control = CreateLabel(hwnd, UiStyle::InputLeft + UiStyle::ActionBtnW + 278, UiStyle::RowInputY(9) + 2, 80, UiStyle::LabelH, L"history");
+        AddVolcengineControl(control);
+
+        AddVolcengineControl(CreateButton(hwnd, IDC_VOLC_TEST, 500, UiStyle::RowInputY(0), UiStyle::ActionBtnW, UiStyle::ActionBtnH, L"Test Connection"));
+
+        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowInputY(9) + 30, 640, UiStyle::LabelH,
+            L"Cloud ASR sends audio to remote servers. Keys are encrypted with DPAPI locally.");
         AddCloudAsrControl(control);
+        g_cloudAsrHintControl = control;
 
         HWND status = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE,
-                                    UiStyle::Margin * 2, 530, 520, UiStyle::LabelH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), g_instance, nullptr);
+                                    UiStyle::Margin * 2, UiStyle::FooterMinTop + 21, 520, UiStyle::LabelH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), g_instance, nullptr);
         ApplyUiFont(status);
-        CreateButton(hwnd, IDC_SAVE, 626, 522, UiStyle::FooterBtnW, UiStyle::ActionBtnH, L"Save");
-        CreateButton(hwnd, IDC_CANCEL, 726, 522, UiStyle::FooterBtnW, UiStyle::ActionBtnH, L"Close");
+        CreateButton(hwnd, IDC_SAVE, 626, UiStyle::FooterMinTop + 21, UiStyle::FooterBtnW, UiStyle::ActionBtnH, L"Save");
+        CreateButton(hwnd, IDC_CANCEL, 726, UiStyle::FooterMinTop + 21, UiStyle::FooterBtnW, UiStyle::ActionBtnH, L"Close");
         LoadSettingsControls(hwnd);
         ShowSettingsPage(hwnd, 0);
         LayoutSettingsWindow(hwnd);
@@ -1162,6 +1479,36 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 return 0;
             }
             break;
+        case IDC_VOLC_MODE:
+            if (HIWORD(wParam) == CBN_SELCHANGE) {
+                int modeIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_VOLC_MODE));
+                HWND langCombo = GetDlgItem(hwnd, IDC_VOLC_LANGUAGE);
+                if (langCombo) EnableWindow(langCombo, modeIdx == 0);
+                EnableWindow(GetDlgItem(hwnd, IDC_VOLC_ENABLE_NONSTREAM), modeIdx == 1);
+                {
+                    bool fcEnabled = (modeIdx == 0) ||
+                        (modeIdx == 1 && Button_GetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_NONSTREAM)) == BST_CHECKED);
+                    EnableWindow(GetDlgItem(hwnd, IDC_VOLC_ENABLE_MUSIC_FC), fcEnabled);
+                    EnableWindow(GetDlgItem(hwnd, IDC_VOLC_ENABLE_POI_FC), fcEnabled);
+                }
+                return 0;
+            }
+            break;
+        case IDC_VOLC_ENABLE_NONSTREAM: {
+            int modeIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_VOLC_MODE));
+            bool fcEnabled = (modeIdx == 0) ||
+                (modeIdx == 1 && Button_GetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_NONSTREAM)) == BST_CHECKED);
+            EnableWindow(GetDlgItem(hwnd, IDC_VOLC_ENABLE_MUSIC_FC), fcEnabled);
+            EnableWindow(GetDlgItem(hwnd, IDC_VOLC_ENABLE_POI_FC), fcEnabled);
+            return 0;
+        }
+        case IDC_VOLC_EXTRA_PARAMS: {
+            std::wstring params = g_config.volcExtraParams;
+            if (ShowVolcExtraDialog(hwnd, params)) {
+                g_config.volcExtraParams = params;
+            }
+            return 0;
+        }
         case IDC_BAIDU_SHOW_KEY: {
             g_baiduKeyVisible = !g_baiduKeyVisible;
             HWND keyEdit = GetDlgItem(hwnd, IDC_BAIDU_SECRET_KEY);
@@ -1219,14 +1566,35 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             GetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_API_KEY), tmp, 256);
             vcfg.apiKey = tmp;
             int modeIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_VOLC_MODE));
-            if (modeIdx == 1) vcfg.mode = L"bigmodel";
-            else if (modeIdx == 2) vcfg.mode = L"bigmodel_async";
+            if (modeIdx == 1) vcfg.mode = L"bigmodel_async";
+            else if (modeIdx == 2) vcfg.mode = L"bigmodel";
             else vcfg.mode = L"bigmodel_nostream";
             int resIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_VOLC_RESOURCE));
-            if (resIdx == 1) vcfg.resourceId = L"volc.seedasr.sauc.concurrent";
-            else vcfg.resourceId = L"volc.seedasr.sauc.duration";
+            if (resIdx >= 0 && resIdx < 4) vcfg.resourceId = kVolcResources[resIdx].resourceId;
             int langIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_VOLC_LANGUAGE));
             if (langIdx >= 0 && langIdx < 9) vcfg.language = kVolcLanguages[langIdx];
+            vcfg.enableMusicFc = Button_GetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_MUSIC_FC)) == BST_CHECKED;
+            vcfg.enablePoiFc = Button_GetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_POI_FC)) == BST_CHECKED;
+            {
+                wchar_t hw[512] = {};
+                GetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_HOTWORDS_ID), hw, 512);
+                vcfg.hotwordsId = hw;
+            }
+            {
+                wchar_t hw[512] = {};
+                GetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_HOTWORDS_NAME), hw, 512);
+                vcfg.hotwordsName = hw;
+            }
+            {
+                wchar_t ct[512] = {};
+                GetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_CORRECT_TABLE_ID), ct, 512);
+                vcfg.correctTableId = ct;
+            }
+            {
+                wchar_t ct[512] = {};
+                GetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_CORRECT_TABLE_NAME), ct, 512);
+                vcfg.correctTableName = ct;
+            }
             SetStatus(hwnd, L"Testing Volcano Engine ASR connection...");
             std::thread([hwnd, vcfg]() {
                 volc_asr::TestResult result = volc_asr::TestConnection(vcfg);
@@ -1282,7 +1650,7 @@ void ShowSettingsWindow(HWND owner) {
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             850,
-            680,
+            720,
             owner,
             nullptr,
             g_instance,

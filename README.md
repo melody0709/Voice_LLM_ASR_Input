@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  Current version: <code>v0.6.2</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
+  Current version: <code>v0.7.0</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -105,6 +105,8 @@ Right-click the tray icon to open Settings, hold the hotkey to start recording, 
 - **Volcengine**: `API Key` (DPAPI encrypted) + `ASR Mode` + `Model Version` + `Language` + `Test Connection`
   - ASR Mode: `File Recognition (nostream)` (recommended, highest accuracy) / `Streaming (bigmodel)` (real-time partial) / `Streaming Optimized (async)` (best latency)
   - Model Version: `Seed-ASR 2.0 (duration)` (per-hour billing) / `Seed-ASR 2.0 (concurrent)` (per-connection billing)
+  - Hotwords ID/Name, Correct ID/Name — Reference hotword and correction tables from the self-learning platform
+  - Use history as context — Sends recent recognition results as dialog context for improved accuracy
 - Cloud ASR includes built-in punctuation; VAD and local punct models are bypassed when using cloud backends
 
 </details>
@@ -183,6 +185,7 @@ CHANGELOG.md        — Version change log
 See [CHANGELOG.md](CHANGELOG.md)
 
 **Recent Updates:**
+- **v0.7.0** — Volcengine ASR full API parameter support, hotwords/correction tables, dialog context, `corpus` merge fix, `context` format fix
 - **v0.6.2** — Settings UI style unification: `UiStyle` namespace, consistent row spacing across all tabs
 - **v0.6.1** — ASR model preload on startup, DELAYLOAD for DLLs, idle memory reduced to ~12 MB
 - **v0.6.0** — Source code refactored from single-file to multi-module architecture

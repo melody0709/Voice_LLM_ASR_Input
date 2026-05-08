@@ -11,6 +11,7 @@
 #include <fstream>
 #include <sstream>
 #include <thread>
+#include <deque>
 #include <commctrl.h>
 
 #pragma comment(lib, "user32.lib")
@@ -80,7 +81,43 @@ CRITICAL_SECTION g_volcAudioCs;
 std::vector<BYTE> g_volcPendingAudio;
 AsrEngine g_asrEngine;
 int g_cloudProviderIdx = 0;
-HWND g_cloudSectionLabel = nullptr;
+HWND g_cloudAsrHintControl = nullptr;
+
+static std::deque<std::wstring> g_volcRecognitionHistory;
+
+static std::wstring BuildVolcContextJson() {
+    if (g_volcRecognitionHistory.empty()) return L"";
+    std::wstring json = L"{\"context_type\":\"dialog_ctx\",\"context_data\":[";
+    for (size_t i = 0; i < g_volcRecognitionHistory.size(); ++i) {
+        if (i > 0) json += L",";
+        std::wstring text = g_volcRecognitionHistory[i];
+        std::wstring escaped;
+        for (wchar_t c : text) {
+            if (c == L'\\') escaped += L"\\\\";
+            else if (c == L'"') escaped += L"\\\"";
+            else if (c == L'\n') escaped += L"\\n";
+            else if (c == L'\r') escaped += L"\\r";
+            else if (c == L'\t') escaped += L"\\t";
+            else escaped += c;
+        }
+        json += L"{\"text\":\"" + escaped + L"\"}";
+    }
+    json += L"]}";
+    return json;
+}
+
+static void AddVolcRecognitionHistory(const std::wstring& text) {
+    if (text.empty() || text == L"(empty result)" || text == L"Too short") return;
+    if (text.rfind(L"VolcEngine error", 0) == 0) return;
+    if (text.rfind(L"ASR failed:", 0) == 0) return;
+    g_volcRecognitionHistory.push_back(text);
+    int maxHistory = g_config.volcContextHistory;
+    if (maxHistory < 1) maxHistory = 5;
+    if (maxHistory > 20) maxHistory = 20;
+    while (static_cast<int>(g_volcRecognitionHistory.size()) > maxHistory) {
+        g_volcRecognitionHistory.pop_front();
+    }
+}
 
 void WriteLlmLog(const std::wstring& asrText, const std::wstring& llmText) {
     std::wstring logDir = AppRootDir() + L"\\log";
@@ -194,6 +231,22 @@ void StartRecordingSession() {
         vcfg.resourceId = config.volcResourceId;
         vcfg.mode = config.volcMode;
         if (!config.volcLanguage.empty()) vcfg.language = config.volcLanguage;
+        vcfg.enableNonstream = config.volcEnableNonstream;
+        vcfg.endWindowSize = config.volcEndWindowSize;
+        vcfg.enableDdc = config.volcEnableDdc;
+        vcfg.enableMusicFc = config.volcEnableMusicFc;
+        vcfg.enablePoiFc = config.volcEnablePoiFc;
+        vcfg.forceToSpeechTime = config.volcForceToSpeechTime;
+        vcfg.enableAccelerateText = config.volcEnableAccelerate;
+        vcfg.accelerateScore = config.volcAccelerateScore;
+        vcfg.extraParams = config.volcExtraParams;
+        vcfg.hotwordsId = config.volcHotwordsId;
+        vcfg.hotwordsName = config.volcHotwordsName;
+        vcfg.correctTableId = config.volcCorrectTableId;
+        vcfg.correctTableName = config.volcCorrectTableName;
+        if (config.volcEnableContext) {
+            vcfg.contextJson = BuildVolcContextJson();
+        }
 
         g_volcStreaming = true;
         ShowHud(L"Listening... Volcano Engine");
@@ -304,6 +357,7 @@ void StartRecordingSession() {
                 PostMessageW(g_mainWindow, kAsrResultMessage, 0,
                              reinterpret_cast<LPARAM>(new std::wstring(finalText)));
             }
+            AddVolcRecognitionHistory(finalText);
         });
         return;
     }

@@ -2,6 +2,35 @@
 
 > 🇬🇧 [English](../CHANGELOG.md)
 
+## v0.7.0 (2026-05-09)
+
+### 新增
+
+- **火山引擎 ASR 全参数支持**：官方 API 的所有 `request` 和 `corpus` 字段均可在 Settings 中配置
+  - `end_window_size` / `force_to_speech_time` — VAD 分句和强制判停时间
+  - `enable_ddc` — 语义顺滑（去除语气词和重复词）
+  - `enable_nonstream` — `bigmodel_async` 模式下开启二遍识别（流式 + 非流式重识别，准确率更高）
+  - `enable_music_fc` / `enable_poi_fc` — 音乐和 POI function call
+  - `enable_accelerate_text` + `accelerate_score` — 首字返回加速
+  - `language` — 语言选择（仅 `bigmodel_nostream` 模式生效，符合 API 规范）
+- **热词与替换词表**：Cloud ASR tab 新增 `Hotwords ID/Name` 和 `Correct ID/Name` 字段
+  - `boosting_table_id` / `boosting_table_name` — 引用自学习平台热词词表
+  - `correct_table_id` / `correct_table_name` — 引用替换词词表，用于专业术语纠正
+- **对话上下文**：`Use history as context` 复选框将最近识别结果作为 `corpus.context` 发送，提升上下文理解准确率
+  - 可配置历史条数（1–20，默认 3）
+  - context 按 API 规范序列化为 JSON 字符串
+- **Extra Params 对话框**：专用对话框编辑额外的 `request` 级 JSON 参数，提供 `sensitive_words_filter` 和 `result_type`/`vad_segment_duration` 预设模板
+- **模型版本选择器**：新增下拉框，支持 `Seed-ASR 2.0 (duration)` / `Seed-ASR 2.0 (concurrent)` / `BigModel 1.0 (duration)` / `BigModel 1.0 (concurrent)`
+
+### 修复
+
+- **`corpus` 字段不再互斥**：此前 `boosting_table_id` 和 `context` 使用 `if/else if` 发送，无法同时使用热词和对话上下文。现在所有 `corpus` 子字段合并到同一个 JSON 对象中
+- **`context` 字段格式修正**：`context` 的值必须是 JSON 字符串（内层引号转义），而非原始 JSON 对象。发送原始对象会导致服务端拒绝请求，客户端在第一次识别后卡死
+- **`language` 参数仅在 `bigmodel_nostream` 模式下发送**：按 API 文档，`language` 字段仅 nostream 模式支持，其他模式发送可能导致错误
+- **Extra Params 中 `corpus` 冲突已解决**：用户在 Extra Params 中手动填入 `corpus` 时，会与代码生成的 `corpus` 冲突产生无效 JSON。现在 Extra Params 解析时跳过 `corpus` 键
+- **移除非标准 HTTP 头**：`X-Api-Request-Id` 和 `X-Api-Sequence: -1` 不在官方 API 规范中，已从 `OpenSession` 和 `TestConnection` 中移除
+- **移除不安全的 SSL 标志覆盖**：`SECURITY_FLAG_IGNORE_UNKNOWN_CA` 等标志不必要地绕过了证书验证，已移除以恢复正确的 HTTPS 安全性
+
 ## v0.6.2 (2026-05-06)
 
 ### 变更

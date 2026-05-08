@@ -89,6 +89,20 @@ struct VolcConfig {
     std::wstring language;
     bool enableItn = true;
     bool enablePunc = true;
+    bool enableNonstream = false;
+    int endWindowSize = 800;
+    bool enableDdc = false;
+    bool enableMusicFc = false;
+    bool enablePoiFc = false;
+    int forceToSpeechTime = 0;
+    bool enableAccelerateText = false;
+    int accelerateScore = 0;
+    std::wstring extraParams;
+    std::wstring contextJson;
+    std::wstring hotwordsId;
+    std::wstring hotwordsName;
+    std::wstring correctTableId;
+    std::wstring correctTableName;
 };
 
 struct VolcSession {
@@ -99,6 +113,11 @@ struct VolcSession {
     std::wstring partialText;
     std::wstring lastError;
     volatile bool connected = false;
+};
+
+struct VolcResult {
+    std::wstring text;
+    bool definite = false;
 };
 
 inline std::string WideToUtf8(const std::wstring& value) {
@@ -208,7 +227,21 @@ inline std::wstring TrimWhitespace(const std::wstring& s) {
     return s.substr(start, end - start);
 }
 
-inline std::wstring ReceiveResult(HINTERNET hWebSocket, DWORD timeoutMs) {
+inline bool ExtractJsonBool(const std::string& json, const std::string& key) {
+    std::string search = "\"" + key + "\"";
+    size_t pos = json.find(search);
+    if (pos == std::string::npos) return false;
+    pos += search.size();
+    pos = json.find(':', pos);
+    if (pos == std::string::npos) return false;
+    pos++;
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) pos++;
+    if (pos >= json.size()) return false;
+    return (json[pos] == 't' || json[pos] == '1');
+}
+
+inline VolcResult ReceiveResult(HINTERNET hWebSocket, DWORD timeoutMs) {
+    VolcResult result;
     std::vector<BYTE> recvBuf(65536);
     std::string responseBody;
 
@@ -226,9 +259,9 @@ inline std::wstring ReceiveResult(HINTERNET hWebSocket, DWORD timeoutMs) {
 
     VolcDebugLog("ReceiveResult: err=%u, bytesRead=%u, bufType=%d", err, bytesRead, (int)bufType);
 
-    if (err == ERROR_WINHTTP_TIMEOUT || err == ERROR_WINHTTP_OPERATION_CANCELLED) return L"";
-    if (err != ERROR_SUCCESS) return L"";
-    if (bytesRead == 0) return L"";
+    if (err == ERROR_WINHTTP_TIMEOUT || err == ERROR_WINHTTP_OPERATION_CANCELLED) return result;
+    if (err != ERROR_SUCCESS) return result;
+    if (bytesRead == 0) return result;
 
     VolcDebugHex("Recv raw", recvBuf.data(), bytesRead);
 
@@ -247,9 +280,8 @@ inline std::wstring ReceiveResult(HINTERNET hWebSocket, DWORD timeoutMs) {
         }
     }
 
-    if (responseBody.size() < 4) return L"";
+    if (responseBody.size() < 4) return result;
 
-    std::wstring resultText;
     size_t pos = 0;
     while (pos + 4 <= responseBody.size()) {
         uint8_t b0 = static_cast<uint8_t>(responseBody[pos + 0]);
@@ -285,7 +317,8 @@ inline std::wstring ReceiveResult(HINTERNET hWebSocket, DWORD timeoutMs) {
             uint32_t errorCode = payloadSize;
             VolcDebugLog("Error frame: code=%u", errorCode);
             if (pos + 4 > responseBody.size()) {
-                return L"[VolcEngine error: code=" + std::to_wstring(errorCode) + L"]";
+                result.text = L"[VolcEngine error: code=" + std::to_wstring(errorCode) + L"]";
+                return result;
             }
             uint32_t errMsgSize = (static_cast<uint32_t>(static_cast<uint8_t>(responseBody[pos])) << 24) |
                                   (static_cast<uint32_t>(static_cast<uint8_t>(responseBody[pos + 1])) << 16) |
@@ -297,9 +330,11 @@ inline std::wstring ReceiveResult(HINTERNET hWebSocket, DWORD timeoutMs) {
                 std::string errMsg(responseBody.begin() + static_cast<ptrdiff_t>(pos),
                                    responseBody.begin() + static_cast<ptrdiff_t>(pos + errMsgSize));
                 VolcDebugLog("Error msg: %s", errMsg.c_str());
-                return L"[VolcEngine error: " + Utf8ToWide(errMsg) + L"]";
+                result.text = L"[VolcEngine error: " + Utf8ToWide(errMsg) + L"]";
+                return result;
             }
-            return L"[VolcEngine error: code=" + std::to_wstring(errorCode) + L"]";
+            result.text = L"[VolcEngine error: code=" + std::to_wstring(errorCode) + L"]";
+            return result;
         }
 
         if (payloadSize == 0) {
@@ -319,15 +354,21 @@ inline std::wstring ReceiveResult(HINTERNET hWebSocket, DWORD timeoutMs) {
                     text = ExtractJsonStr(payloadJson.substr(rp), "text");
                 }
             }
-            VolcDebugLog("Extracted text: wlen=%zu", text.size());
-            if (!text.empty() && text.size() > resultText.size()) {
-                resultText = text;
+            bool isDefinite = ExtractJsonBool(payloadJson, "definite");
+            VolcDebugLog("Extracted text: wlen=%zu, definite=%d", text.size(), isDefinite);
+            if (!text.empty()) {
+                if (isDefinite) {
+                    result.text = text;
+                    result.definite = true;
+                } else if (text.size() > result.text.size() && !result.definite) {
+                    result.text = text;
+                }
             }
         }
         pos += static_cast<size_t>(payloadSize);
     }
 
-    return resultText;
+    return result;
 }
 
 inline void WebSocketCloseGracefully(HINTERNET hWebSocket) {
@@ -374,19 +415,12 @@ inline bool OpenSession(VolcSession& sess, const VolcConfig& cfg) {
     WinHttpSetOption(hReq, WINHTTP_OPTION_WEB_SOCKET_KEEPALIVE_INTERVAL,
         &keepAlive, sizeof(keepAlive));
 
-    DWORD secFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
-                     SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
-                     SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
-                     SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
-    WinHttpSetOption(hReq, WINHTTP_OPTION_SECURITY_FLAGS, &secFlags, sizeof(secFlags));
-
     std::wstring uuid = GenerateUuidStr();
     std::wstring headers =
         L"X-Api-Key: " + cleanKey +
         L"\r\nX-Api-Resource-Id: " + cfg.resourceId +
-        L"\r\nX-Api-Request-Id: " + uuid +
         L"\r\nX-Api-Connect-Id: " + uuid +
-        L"\r\nX-Api-Sequence: -1\r\n";
+        L"\r\n";
 
     if (!WinHttpAddRequestHeaders(hReq, headers.c_str(),
         static_cast<DWORD>(wcslen(headers.c_str())),
@@ -441,7 +475,7 @@ inline bool OpenSession(VolcSession& sess, const VolcConfig& cfg) {
             "\"channel\":1,"
             "\"codec\":\"raw\"";
 
-    if (!cfg.language.empty()) {
+    if (!cfg.language.empty() && cfg.mode == L"bigmodel_nostream") {
         requestJson += ",\"language\":\"" + WideToUtf8(cfg.language) + "\"";
     }
 
@@ -450,10 +484,104 @@ inline bool OpenSession(VolcSession& sess, const VolcConfig& cfg) {
             "\"model_name\":\"bigmodel\","
             "\"enable_itn\":" + std::string(cfg.enableItn ? "true" : "false") + ","
             "\"enable_punc\":" + std::string(cfg.enablePunc ? "true" : "false") + ","
-            "\"enable_ddc\":false,"
+            "\"enable_ddc\":" + std::string(cfg.enableDdc ? "true" : "false") + ","
             "\"show_utterances\":false,"
-            "\"result_type\":\"full\""
-        "}"
+            "\"result_type\":\"full\"";
+    if (cfg.enableMusicFc && (cfg.mode == L"bigmodel_nostream" ||
+        (cfg.mode == L"bigmodel_async" && cfg.enableNonstream))) {
+        requestJson += ",\"enable_music_fc\":true";
+    }
+    if (cfg.enablePoiFc && (cfg.mode == L"bigmodel_nostream" ||
+        (cfg.mode == L"bigmodel_async" && cfg.enableNonstream))) {
+        requestJson += ",\"enable_poi_fc\":true";
+    }
+    if (cfg.enableNonstream && cfg.mode == L"bigmodel_async") {
+        requestJson += ",\"enable_nonstream\":true";
+    }
+    if (cfg.endWindowSize > 0 && cfg.endWindowSize != 800) {
+        requestJson += ",\"end_window_size\":" + std::to_string(cfg.endWindowSize);
+    }
+    if (cfg.forceToSpeechTime > 0) {
+        requestJson += ",\"force_to_speech_time\":" + std::to_string(cfg.forceToSpeechTime);
+    }
+    if (cfg.enableAccelerateText) {
+        requestJson += ",\"enable_accelerate_text\":true";
+        if (cfg.accelerateScore > 0) {
+            requestJson += ",\"accelerate_score\":" + std::to_string(cfg.accelerateScore);
+        }
+    }
+    if (!cfg.extraParams.empty()) {
+        std::string extra = WideToUtf8(cfg.extraParams);
+        size_t i = 0;
+        while (i < extra.size()) {
+            while (i < extra.size() && (extra[i] == ' ' || extra[i] == '\t' || extra[i] == '\n' || extra[i] == '\r')) i++;
+            if (i >= extra.size() || extra[i] != '"') break;
+            size_t kStart = i;
+            while (i < extra.size() && extra[i] != ':') i++;
+            if (i >= extra.size()) break;
+            std::string key = extra.substr(kStart, i - kStart);
+            if (key == "\"corpus\"") {
+                i++;
+                while (i < extra.size() && (extra[i] == ' ' || extra[i] == '\t')) i++;
+                size_t vStart = i;
+                int depth = 0;
+                while (i < extra.size()) {
+                    if (extra[i] == '{' || extra[i] == '[') depth++;
+                    else if (extra[i] == '}' || extra[i] == ']') depth--;
+                    else if (extra[i] == ',' && depth == 0) break;
+                    i++;
+                }
+                if (i < extra.size() && extra[i] == ',') i++;
+                continue;
+            }
+            i++;
+            while (i < extra.size() && (extra[i] == ' ' || extra[i] == '\t')) i++;
+            size_t vStart = i;
+            int depth = 0;
+            while (i < extra.size()) {
+                if (extra[i] == '{' || extra[i] == '[') depth++;
+                else if (extra[i] == '}' || extra[i] == ']') depth--;
+                else if (extra[i] == ',' && depth == 0) break;
+                i++;
+            }
+            std::string val = extra.substr(vStart, i - vStart);
+            while (!val.empty() && (val.back() == ' ' || val.back() == '\t')) val.pop_back();
+            requestJson += "," + key + ":" + val;
+            if (i < extra.size() && extra[i] == ',') i++;
+        }
+    }
+    {
+        std::string corpusParts;
+        if (!cfg.hotwordsId.empty()) {
+            corpusParts += ",\"boosting_table_id\":\"" + WideToUtf8(cfg.hotwordsId) + "\"";
+        }
+        if (!cfg.hotwordsName.empty()) {
+            corpusParts += ",\"boosting_table_name\":\"" + WideToUtf8(cfg.hotwordsName) + "\"";
+        }
+        if (!cfg.correctTableId.empty()) {
+            corpusParts += ",\"correct_table_id\":\"" + WideToUtf8(cfg.correctTableId) + "\"";
+        }
+        if (!cfg.correctTableName.empty()) {
+            corpusParts += ",\"correct_table_name\":\"" + WideToUtf8(cfg.correctTableName) + "\"";
+        }
+        if (!cfg.contextJson.empty()) {
+            std::string ctxRaw = WideToUtf8(cfg.contextJson);
+            std::string ctxEscaped;
+            for (char c : ctxRaw) {
+                if (c == '\\') ctxEscaped += "\\\\";
+                else if (c == '"') ctxEscaped += "\\\"";
+                else if (c == '\n') ctxEscaped += "\\n";
+                else if (c == '\r') ctxEscaped += "\\r";
+                else if (c == '\t') ctxEscaped += "\\t";
+                else ctxEscaped += c;
+            }
+            corpusParts += ",\"context\":\"" + ctxEscaped + "\"";
+        }
+        if (!corpusParts.empty()) {
+            requestJson += ",\"corpus\":{" + corpusParts.substr(1) + "}";
+        }
+    }
+    requestJson += "}"
     "}";
 
     std::vector<BYTE> jsonPayload(requestJson.begin(), requestJson.end());
@@ -468,11 +596,11 @@ inline bool OpenSession(VolcSession& sess, const VolcConfig& cfg) {
                          static_cast<WINHTTP_WEB_SOCKET_BUFFER_TYPE>(VOLC_WEB_SOCKET_BINARY_MSG),
                          frame.data(), static_cast<DWORD>(frame.size()));
 
-    std::wstring initResp = ReceiveResult(sess.hWebSocket, 5000);
-    VolcDebugLog("Init response: '%ls'", initResp.c_str());
-    if (initResp.find(L"[VolcEngine error:") != std::wstring::npos) {
-        VolcDebugLog("OpenSession FAILED - server error: %ls", initResp.c_str());
-        sess.lastError = initResp;
+    VolcResult initResp = ReceiveResult(sess.hWebSocket, 5000);
+    VolcDebugLog("Init response: '%ls'", initResp.text.c_str());
+    if (initResp.text.find(L"[VolcEngine error:") != std::wstring::npos) {
+        VolcDebugLog("OpenSession FAILED - server error: %ls", initResp.text.c_str());
+        sess.lastError = initResp.text;
         WebSocketCloseGracefully(sess.hWebSocket);
         sess.hWebSocket = nullptr;
         return false;
@@ -514,13 +642,13 @@ inline std::wstring SendAudio(VolcSession& sess, const std::vector<BYTE>& pcmChu
         return L"";
     }
 
-    std::wstring result = ReceiveResult(sess.hWebSocket, isLast ? 4000 : 150);
-    VolcDebugLog("SendAudio result: '%ls'", result.c_str());
-    return result;
+    VolcResult vr = ReceiveResult(sess.hWebSocket, isLast ? 4000 : 150);
+    VolcDebugLog("SendAudio result: '%ls' definite=%d", vr.text.c_str(), vr.definite);
+    return vr.text;
 }
 
 inline std::wstring DrainReceiveBuffer(HINTERNET hWebSocket) {
-    return ReceiveResult(hWebSocket, 1);
+    return ReceiveResult(hWebSocket, 1).text;
 }
 
 inline std::wstring CloseSession(VolcSession& sess) {
@@ -530,9 +658,9 @@ inline std::wstring CloseSession(VolcSession& sess) {
     std::wstring finalText;
 
     for (int retry = 0; retry < 6; retry++) {
-        std::wstring chunk = ReceiveResult(sess.hWebSocket, 500);
-        if (!chunk.empty()) {
-            finalText = chunk;
+        VolcResult chunk = ReceiveResult(sess.hWebSocket, 500);
+        if (!chunk.text.empty()) {
+            finalText = chunk.text;
         } else {
             break;
         }
@@ -635,11 +763,6 @@ inline TestResult TestConnection(const VolcConfig& cfg) {
         return res;
     }
 
-    DWORD secFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
-                     SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
-                     SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
-                     SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
-    WinHttpSetOption(hReq, WINHTTP_OPTION_SECURITY_FLAGS, &secFlags, sizeof(secFlags));
     WinHttpSetTimeouts(hReq, 8000, 8000, 8000, 8000);
 
     DWORD closeTimeout = 5000;
@@ -653,9 +776,8 @@ inline TestResult TestConnection(const VolcConfig& cfg) {
     std::wstring headers =
         L"X-Api-Key: " + cleanKey +
         L"\r\nX-Api-Resource-Id: " + cfg.resourceId +
-        L"\r\nX-Api-Request-Id: " + uuid +
         L"\r\nX-Api-Connect-Id: " + uuid +
-        L"\r\nX-Api-Sequence: -1\r\n";
+        L"\r\n";
 
     DWORD headerLen = static_cast<DWORD>(wcslen(headers.c_str()));
     if (!WinHttpAddRequestHeaders(hReq, headers.c_str(), headerLen, WINHTTP_ADDREQ_FLAG_ADD)) {
