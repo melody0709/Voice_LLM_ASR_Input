@@ -8,8 +8,11 @@
 #include <winhttp.h>
 
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <vector>
+
+#include "utils.h"
 
 #pragma comment(lib, "winhttp.lib")
 
@@ -20,22 +23,6 @@ struct BaiduConfig {
     std::wstring secretKey;
     int devPid = 1537;
 };
-
-inline std::string WideToUtf8(const std::wstring& value) {
-    if (value.empty()) return {};
-    const int required = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    std::string result(static_cast<size_t>(required - 1), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, result.data(), required, nullptr, nullptr);
-    return result;
-}
-
-inline std::wstring Utf8ToWide(const std::string& value) {
-    if (value.empty()) return {};
-    const int required = MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, nullptr, 0);
-    std::wstring result(static_cast<size_t>(required - 1), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, result.data(), required);
-    return result;
-}
 
 inline std::wstring ExtractJsonStr(const std::string& json, const std::string& key) {
     std::string search = "\"" + key + "\"";
@@ -102,14 +89,6 @@ inline std::wstring HttpGet(const std::wstring& url, const std::wstring& host, I
         return L"";
     }
 
-    if (useSsl) {
-        DWORD secFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
-                         SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
-                         SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
-                         SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
-        WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &secFlags, sizeof(secFlags));
-    }
-
     WinHttpSetTimeouts(hRequest, 5000, 5000, 5000, 5000);
 
     if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
@@ -146,8 +125,11 @@ inline std::wstring HttpGet(const std::wstring& url, const std::wstring& host, I
 }
 
 inline std::wstring GetAccessToken(const BaiduConfig& cfg) {
+    static std::mutex s_tokenMutex;
     static std::wstring s_cachedToken;
     static ULONGLONG s_tokenExpiresAt = 0;
+
+    std::lock_guard<std::mutex> lk(s_tokenMutex);
 
     ULONGLONG now = GetTickCount64();
     if (!s_cachedToken.empty() && now < s_tokenExpiresAt) {
@@ -223,11 +205,6 @@ inline std::wstring Recognize(const std::vector<BYTE>& pcm, const BaiduConfig& c
         return L"Baidu ASR error: WinHttpOpenRequest failed";
     }
 
-    DWORD secFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
-                     SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
-                     SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
-                     SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
-    WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &secFlags, sizeof(secFlags));
     WinHttpSetTimeouts(hRequest, 8000, 8000, 8000, 8000);
 
     std::wstring headers = L"Content-Type: audio/pcm;rate=16000\r\n";
@@ -342,11 +319,6 @@ inline TestResult TestConnection(const BaiduConfig& cfg) {
         return res;
     }
 
-    DWORD secFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
-                     SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
-                     SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
-                     SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
-    WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &secFlags, sizeof(secFlags));
     WinHttpSetTimeouts(hRequest, 5000, 5000, 5000, 5000);
 
     std::wstring headers = L"Content-Type: audio/pcm;rate=16000\r\n";

@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  Current version: <code>v0.7.1</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
+  Current version: <code>v0.7.2</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -156,6 +156,7 @@ src/
   firered_vad.h     — FireRed VAD module (header-only)
   llm_refine.h      — LLM correction module (header-only)
   globals.h         — Shared constants, control IDs, extern global variables
+  utils.h           — Shared utility functions (WideToUtf8, Utf8ToWide, EscapeJson, Trim)
   resources.rc / resource.h / app.ico / app.manifest
 dll/                — Runtime DLLs (sherpa-onnx, onnxruntime, etc.)
 third_party/        — Headers and import libraries
@@ -185,6 +186,7 @@ CHANGELOG.md        — Version change log
 See [CHANGELOG.md](CHANGELOG.md)
 
 **Recent Updates:**
+- **v0.7.2** — Thread safety fixes (volcengine thread join, Baidu token mutex, VolcDebugLog mutex), SSL cert verification restored, `g_volcAudioCs` leak fix, utility functions deduplicated to `utils.h`, model downloader async, `AsrEngine::lock` encapsulation
 - **v0.7.1** — `bigmodel_nostream` speed optimization (skip intermediate receives), WinHTTP connection reuse, `ExtractJsonStr` escape fix, thread safety fix
 - **v0.7.0** — Volcengine ASR full API parameter support, hotwords/correction tables, dialog context, `corpus` merge fix, `context` format fix
 - **v0.6.2** — Settings UI style unification: `UiStyle` namespace, consistent row spacing across all tabs

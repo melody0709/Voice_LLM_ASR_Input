@@ -2,6 +2,24 @@
 
 > 🇨🇳 [中文版](doc/CHANGELOG_zh.md)
 
+## v0.7.2 (2026-05-09)
+
+### Fixed
+
+- **Volcengine thread not stopped on exit**: `WM_DESTROY` now sets `g_volcStreaming = false` and joins the volcengine thread, preventing a zombie thread spinning in `Sleep(20)` after the main window closes
+- **Baidu ASR token cache data race**: `GetAccessToken` now uses `std::mutex` + `lock_guard` to protect `s_cachedToken` / `s_tokenExpiresAt`, fixing concurrent read/write UB from `Recognize` and `TestConnection` threads
+- **`VolcDebugLog` thread safety**: Added `static std::mutex` to serialize log file writes and `logPath` initialization, preventing interleaved lines and init races
+- **`g_volcAudioCs` resource leak**: Added `DeleteCriticalSection(&g_volcAudioCs)` to all `wWinMain` exit paths (normal exit, single-instance early return, `RegisterWindowClasses` failure, `CreateWindowExW` failure)
+- **SSL certificate verification re-enabled**: Removed `SECURITY_FLAG_IGNORE_*` overrides from `baidu_asr.h` (`Recognize` and `TestConnection`) and `llm_refine.h` (`SendRequestRaw`), restoring proper HTTPS certificate validation for all cloud API connections
+- **`AsrEngine::lock` encapsulation**: Changed `std::mutex lock` from public to private (`lock_`), added `Lock()`/`Unlock()` methods; `PreloadAsrEngine` uses the new API instead of direct member access
+
+### Changed
+
+- **Utility functions deduplicated**: `WideToUtf8`, `Utf8ToWide`, `EscapeJson`, `Trim` consolidated into new `src/utils.h`; removed 4 copies from `engine.cpp`, `llm_refine.h`, `baidu_asr.h`, `volcengine_asr.h`
+- **Model downloader no longer blocks UI**: `RunModelDownloader` now launches PowerShell asynchronously and posts `WM_APP + 20` back to Settings when done; download button disables during download with status text, re-enables on completion
+- **Tray menu flag cleanup**: Removed redundant `MF_DISABLED` alongside `MF_GRAYED` (the latter already implies disabled state)
+- **HotkeyEdit paint optimization**: Non-capturing state uses `GetSysColorBrush(COLOR_WINDOW)` instead of creating/destroying a `CreateSolidBrush(RGB(255,255,255))` on every `WM_PAINT`
+
 ## v0.7.1 (2026-05-09)
 
 ### Performance

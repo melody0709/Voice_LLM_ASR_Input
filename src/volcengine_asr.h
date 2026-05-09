@@ -10,8 +10,11 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <mutex>
 #include <string>
 #include <vector>
+
+#include "utils.h"
 
 #pragma comment(lib, "winhttp.lib")
 
@@ -19,7 +22,9 @@
 
 #if VOLC_DEBUG_LOG
 inline void VolcDebugLog(const char* fmt, ...) {
+    static std::mutex s_logMutex;
     static char logPath[MAX_PATH] = {};
+    std::lock_guard<std::mutex> lk(s_logMutex);
     if (logPath[0] == '\0') {
         GetTempPathA(MAX_PATH, logPath);
         strcat_s(logPath, "volc_asr_debug.log");
@@ -122,24 +127,6 @@ struct VolcResult {
     std::wstring text;
     bool definite = false;
 };
-
-inline std::string WideToUtf8(const std::wstring& value) {
-    if (value.empty()) return {};
-    int required = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    if (required <= 0) return {};
-    std::string result(static_cast<size_t>(required - 1), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, result.data(), required, nullptr, nullptr);
-    return result;
-}
-
-inline std::wstring Utf8ToWide(const std::string& value) {
-    if (value.empty()) return {};
-    int required = MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, nullptr, 0);
-    if (required <= 0) return {};
-    std::wstring result(static_cast<size_t>(required - 1), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, result.data(), required);
-    return result;
-}
 
 inline std::wstring ExtractJsonStr(const std::string& json, const std::string& key) {
     std::string search = "\"" + key + "\"";

@@ -3,6 +3,7 @@
 #endif
 
 #include "engine.h"
+#include "utils.h"
 
 #include <algorithm>
 #include <cmath>
@@ -19,50 +20,10 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "winmm.lib")
 
-std::string WideToUtf8(const std::wstring& value) {
-    if (value.empty()) return {};
-    const int required = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    std::string result(static_cast<size_t>(required - 1), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, result.data(), required, nullptr, nullptr);
-    return result;
-}
-
-std::wstring Utf8ToWide(const std::string& value) {
-    if (value.empty()) return {};
-    const int required = MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, nullptr, 0);
-    std::wstring result(static_cast<size_t>(required - 1), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, result.data(), required);
-    return result;
-}
-
-std::string EscapeJson(const std::wstring& value) {
-    std::string utf8 = WideToUtf8(value);
-    std::string out;
-    out.reserve(utf8.size() + 8);
-    for (char c : utf8) {
-        switch (c) {
-        case '\\': out += "\\\\"; break;
-        case '"': out += "\\\""; break;
-        case '\n': out += "\\n"; break;
-        case '\r': out += "\\r"; break;
-        case '\t': out += "\\t"; break;
-        default: out += c; break;
-        }
-    }
-    return out;
-}
-
 bool EqualsIgnoreCase(std::wstring a, std::wstring b) {
     std::transform(a.begin(), a.end(), a.begin(), [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
     std::transform(b.begin(), b.end(), b.begin(), [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
     return a == b;
-}
-
-std::wstring Trim(std::wstring value) {
-    const size_t first = value.find_first_not_of(L" \t\r\n");
-    if (first == std::wstring::npos) return L"";
-    const size_t last = value.find_last_not_of(L" \t\r\n");
-    return value.substr(first, last - first + 1);
 }
 
 std::wstring AppDataDir() {
@@ -146,7 +107,7 @@ bool RunModelDownloader(HWND hwnd) {
 
     SHELLEXECUTEINFOW sei = { sizeof(sei) };
     sei.fMask = SEE_MASK_NOCLOSEPROCESS;
-    sei.hwnd = hwnd;
+    sei.hwnd = nullptr;
     sei.lpVerb = L"open";
     sei.lpFile = L"powershell.exe";
     sei.lpParameters = cmd.c_str();
@@ -159,12 +120,20 @@ bool RunModelDownloader(HWND hwnd) {
     }
 
     if (sei.hProcess) {
-        WaitForSingleObject(sei.hProcess, INFINITE);
-        CloseHandle(sei.hProcess);
+        std::thread([hProcess = sei.hProcess, hwnd, modelId = g_config.modelId]() {
+            WaitForSingleObject(hProcess, INFINITE);
+            CloseHandle(hProcess);
+            std::wstring modelDir = DefaultModelDir(modelId);
+            LPARAM lParam = ModelDirExists(modelDir)
+                ? reinterpret_cast<LPARAM>(new std::wstring(std::move(modelDir)))
+                : 0;
+            PostMessageW(hwnd, WM_APP + 20, 0, lParam);
+        }).detach();
+    } else {
+        PostMessageW(hwnd, WM_APP + 20, 0, 0);
     }
 
-    std::wstring modelDir = DefaultModelDir(g_config.modelId);
-    return ModelDirExists(modelDir);
+    return true;
 }
 
 std::wstring ModelDisplayName(const std::wstring& modelId) {
@@ -679,7 +648,7 @@ std::wstring AsrEngine::Recognize(const std::vector<float>& samples, int sampleR
     const int threads = ResolveThreads(config.threads);
 
     {
-        std::lock_guard<std::mutex> g(lock);
+        std::lock_guard<std::mutex> g(lock_);
         if (!EnsureRecognizer(config)) return L"ASR failed: model load error";
     }
 
@@ -687,14 +656,14 @@ std::wstring AsrEngine::Recognize(const std::vector<float>& samples, int sampleR
 
     if (config.enableVad && workSamples.size() > 0) {
         if (config.vadModel == L"firered") {
-            std::lock_guard<std::mutex> g(lock);
+            std::lock_guard<std::mutex> g(lock_);
             if (EnsureFireRedVad()) {
                 fireRedVad->Reset();
                 bool hasSpeech = fireRedVad->Process(workSamples.data(), static_cast<int>(workSamples.size()));
                 if (!hasSpeech) return L"";
             }
         } else {
-            std::lock_guard<std::mutex> g(lock);
+            std::lock_guard<std::mutex> g(lock_);
             if (EnsureVad(threads)) {
                 vad->Reset();
                 const size_t windowSize = 512;
@@ -716,7 +685,7 @@ std::wstring AsrEngine::Recognize(const std::vector<float>& samples, int sampleR
 
     std::wstring text;
     {
-        std::lock_guard<std::mutex> g(lock);
+        std::lock_guard<std::mutex> g(lock_);
         auto stream = recognizer->CreateStream();
         stream.AcceptWaveform(sampleRate, workSamples.data(), static_cast<int32_t>(workSamples.size()));
         recognizer->Decode(&stream);
@@ -727,7 +696,7 @@ std::wstring AsrEngine::Recognize(const std::vector<float>& samples, int sampleR
     if (text == L"<sil>" || text == L"<blk>") return L"";
 
     if (config.postprocess == L"itn" || config.postprocess == L"punct" || config.postprocess == L"llm") {
-        std::lock_guard<std::mutex> g(lock);
+        std::lock_guard<std::mutex> g(lock_);
         if (EnsurePunctuation(threads)) {
             std::string utf8 = WideToUtf8(text);
             std::string punctuated = punctuation->AddPunctuation(utf8);
@@ -739,7 +708,7 @@ std::wstring AsrEngine::Recognize(const std::vector<float>& samples, int sampleR
 }
 
 void AsrEngine::Reload() {
-    std::lock_guard<std::mutex> g(lock);
+    std::lock_guard<std::mutex> g(lock_);
     recognizer.reset();
     vad.reset();
     punctuation.reset();
@@ -762,7 +731,7 @@ std::vector<float> PcmToFloat(const std::vector<BYTE>& pcm) {
 
 void PreloadAsrEngine(const Config& config) {
     const int threads = ResolveThreads(config.threads);
-    std::lock_guard<std::mutex> g(g_asrEngine.lock);
+    g_asrEngine.Lock();
     g_asrEngine.EnsureRecognizer(config);
     if (config.enableVad) {
         if (config.vadModel == L"firered") {
@@ -774,4 +743,5 @@ void PreloadAsrEngine(const Config& config) {
     if (config.postprocess == L"itn" || config.postprocess == L"punct" || config.postprocess == L"llm") {
         g_asrEngine.EnsurePunctuation(threads);
     }
+    g_asrEngine.Unlock();
 }

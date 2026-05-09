@@ -2,6 +2,24 @@
 
 > 🇬🇧 [English](../CHANGELOG.md)
 
+## v0.7.2 (2026-05-09)
+
+### 修复
+
+- **退出时火山引擎线程未被停止**：`WM_DESTROY` 现在设置 `g_volcStreaming = false` 并 `join` 火山引擎线程，避免主窗口关闭后线程在 `Sleep(20)` 中空转
+- **百度 ASR Token 缓存数据竞争**：`GetAccessToken` 添加 `std::mutex` + `lock_guard` 保护 `s_cachedToken` / `s_tokenExpiresAt`，修复 `Recognize` 和 `TestConnection` 线程并发读写的未定义行为
+- **`VolcDebugLog` 线程安全**：添加 `static std::mutex` 序列化日志文件写入和 `logPath` 初始化，防止行交错和初始化竞争
+- **`g_volcAudioCs` 资源泄漏**：在 `wWinMain` 所有退出路径（正常退出、单实例早退、`RegisterWindowClasses` 失败、`CreateWindowExW` 失败）添加 `DeleteCriticalSection(&g_volcAudioCs)`
+- **SSL 证书验证恢复**：移除 `baidu_asr.h`（`Recognize` 和 `TestConnection`）和 `llm_refine.h`（`SendRequestRaw`）中的 `SECURITY_FLAG_IGNORE_*` 覆盖，恢复所有云端 API 连接的正常 HTTPS 证书验证
+- **`AsrEngine::lock` 封装**：`std::mutex lock` 从 public 改为 private（`lock_`），添加 `Lock()`/`Unlock()` 方法；`PreloadAsrEngine` 使用新 API 而非直接访问成员
+
+### 变更
+
+- **工具函数去重**：`WideToUtf8`、`Utf8ToWide`、`EscapeJson`、`Trim` 统一到新建的 `src/utils.h`；移除 `engine.cpp`、`llm_refine.h`、`baidu_asr.h`、`volcengine_asr.h` 中的 4 份副本
+- **模型下载器不再阻塞 UI**：`RunModelDownloader` 改为异步启动 PowerShell，完成后通过 `WM_APP + 20` 回传 Settings；下载期间按钮禁用并显示状态文本，完成后恢复
+- **托盘菜单标志清理**：移除 `MF_GRAYED` 旁冗余的 `MF_DISABLED`（前者已隐含禁用状态）
+- **HotkeyEdit 绘制优化**：非捕捉状态使用 `GetSysColorBrush(COLOR_WINDOW)` 替代每次 `WM_PAINT` 创建/销毁 `CreateSolidBrush(RGB(255,255,255))`
+
 ## v0.7.1 (2026-05-09)
 
 ### 性能优化

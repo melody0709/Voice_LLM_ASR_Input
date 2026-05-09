@@ -748,7 +748,7 @@ LRESULT CALLBACK InputWndProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_CLOSE:
         DestroyWindow(hDlg);
         return 0;
-    case WM_DESTROY:
+    case WM_DESTROY:  // InputWndProc WM_DESTROY:
         PostQuitMessage(0);
         return 0;
     }
@@ -1381,10 +1381,8 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 
             if (ret == IDYES) {
                 if (RunModelDownloader(hwnd)) {
-                    std::wstring newDir = DefaultModelDir(g_config.modelId);
-                    SetWindowTextW(GetDlgItem(hwnd, IDC_MODEL_DIR), newDir.c_str());
-                    g_config.modelDir = newDir;
-                    MessageBoxW(hwnd, L"Download complete!", L"Success", MB_OK | MB_ICONINFORMATION);
+                    EnableWindow(GetDlgItem(hwnd, IDC_DOWNLOAD_MODELS), FALSE);
+                    SetStatus(hwnd, L"Downloading... close PowerShell window when done.");
                 }
             }
             return 0;
@@ -1628,6 +1626,20 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                             MB_ICONERROR | MB_OK);
             }
             SetStatus(hwnd, shortMsg.c_str());
+        }
+        return 0;
+    }
+    case WM_APP + 20: {
+        EnableWindow(GetDlgItem(hwnd, IDC_DOWNLOAD_MODELS), TRUE);
+        if (lParam) {
+            std::unique_ptr<std::wstring> dir(reinterpret_cast<std::wstring*>(lParam));
+            std::wstring newDir = std::move(*dir);
+            SetWindowTextW(GetDlgItem(hwnd, IDC_MODEL_DIR), newDir.c_str());
+            g_config.modelDir = newDir;
+            SetStatus(hwnd, L"Download complete");
+            MessageBoxW(hwnd, L"Download complete!", L"Success", MB_OK | MB_ICONINFORMATION);
+        } else {
+            SetStatus(hwnd, L"Download failed or model directory not found");
         }
         return 0;
     }

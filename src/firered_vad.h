@@ -12,6 +12,7 @@
 
 #include "onnxruntime_cxx_api.h"
 #include "kaldi-native-fbank/csrc/online-feature.h"
+#include "utils.h"
 
 namespace firered_vad {
 
@@ -112,7 +113,7 @@ public:
         so.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
         // Convert path to wstring for Session constructor
-        std::wstring wpath(cfg.modelPath.begin(), cfg.modelPath.end());
+        std::wstring wpath = Utf8ToWide(cfg.modelPath);
         vad->session_ = std::make_unique<Ort::Session>(*vad->env_, wpath.c_str(), so);
 
         // Get input/output names (store as std::string, keep c_str() pointers)

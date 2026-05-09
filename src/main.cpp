@@ -405,7 +405,7 @@ void ShowTrayMenu(HWND hwnd) {
     POINT pt;
     GetCursorPos(&pt);
     HMENU menu = CreatePopupMenu();
-    AppendMenuW(menu, MF_STRING | MF_GRAYED | MF_DISABLED, ID_TRAY_VERSION, APP_VERSION_WSTR);
+    AppendMenuW(menu, MF_STRING | MF_GRAYED, ID_TRAY_VERSION, APP_VERSION_WSTR);
     AppendMenuW(menu, MF_STRING, ID_TRAY_SETTINGS, L"Settings...");
     AppendMenuW(menu, MF_STRING, ID_TRAY_RELOAD, L"Reload ASR Engine");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -513,6 +513,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     case WM_DESTROY:
         g_captureActive = false;
         StopAudioCapture();
+        g_volcStreaming = false;
+        if (g_volcThread.joinable()) g_volcThread.join();
         UninstallKeyboardHook();
         RemoveTrayIcon(hwnd);
         PostQuitMessage(0);
@@ -589,6 +591,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         CloseHandle(mutex);
         DeleteUiResources();
         DeleteCriticalSection(&g_audioLock);
+        DeleteCriticalSection(&g_volcAudioCs);
         return 0;
     }
 
@@ -596,6 +599,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         MessageBoxW(nullptr, L"Failed to register window classes.", kAppName, MB_OK | MB_ICONERROR);
         DeleteUiResources();
         DeleteCriticalSection(&g_audioLock);
+        DeleteCriticalSection(&g_volcAudioCs);
         return 1;
     }
 
@@ -617,6 +621,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         MessageBoxW(nullptr, L"Failed to create main window.", kAppName, MB_OK | MB_ICONERROR);
         DeleteUiResources();
         DeleteCriticalSection(&g_audioLock);
+        DeleteCriticalSection(&g_volcAudioCs);
         return 1;
     }
 
@@ -634,5 +639,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
     DeleteUiResources();
     DeleteCriticalSection(&g_audioLock);
+    DeleteCriticalSection(&g_volcAudioCs);
     return static_cast<int>(msg.wParam);
 }

@@ -15,11 +15,7 @@ void SafeRelease(T*& value) {
     }
 }
 
-std::string WideToUtf8(const std::wstring& value);
-std::wstring Utf8ToWide(const std::string& value);
-std::string EscapeJson(const std::wstring& value);
 bool EqualsIgnoreCase(std::wstring a, std::wstring b);
-std::wstring Trim(std::wstring value);
 
 std::wstring AppDataDir();
 std::wstring AppRootDir();
@@ -54,7 +50,9 @@ int ResolveThreads(const std::wstring& threads);
 
 class AsrEngine {
 public:
-    std::mutex lock;
+    void Lock() { lock_.lock(); }
+    void Unlock() { lock_.unlock(); }
+
     std::unique_ptr<sherpa_onnx::cxx::OfflineRecognizer> recognizer;
     std::unique_ptr<sherpa_onnx::cxx::VoiceActivityDetector> vad;
     std::unique_ptr<sherpa_onnx::cxx::OfflinePunctuation> punctuation;
@@ -71,6 +69,9 @@ public:
     bool EnsurePunctuation(int threads);
     std::wstring Recognize(const std::vector<float>& samples, int sampleRate, const Config& config);
     void Reload();
+
+private:
+    std::mutex lock_;
 };
 
 std::vector<float> PcmToFloat(const std::vector<BYTE>& pcm);

@@ -11,10 +11,17 @@
 #include <string>
 #include <vector>
 
+#include "utils.h"
+
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "crypt32.lib")
 
 namespace llm {
+
+using ::WideToUtf8;
+using ::Utf8ToWide;
+using ::EscapeJson;
+using ::Trim;
 
 constexpr wchar_t kSystemPrompt[] =
     L"语音识别纠错助手。修正ASR明显错误，不改写润色。\n"
@@ -66,46 +73,6 @@ constexpr ProviderPreset kProviderPresets[] = {
     {L"SiliconFlow", L"https://api.siliconflow.cn/v1", L"Qwen/Qwen3.6-35B-A3B",       L"\"chat_template_kwargs\":{\"enable_thinking\":false}"},
 };
 constexpr int kProviderPresetCount = sizeof(kProviderPresets) / sizeof(kProviderPresets[0]);
-
-inline std::string WideToUtf8(const std::wstring& value) {
-    if (value.empty()) return {};
-    const int required = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    std::string result(static_cast<size_t>(required - 1), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, result.data(), required, nullptr, nullptr);
-    return result;
-}
-
-inline std::wstring Utf8ToWide(const std::string& value) {
-    if (value.empty()) return {};
-    const int required = MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, nullptr, 0);
-    std::wstring result(static_cast<size_t>(required - 1), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, result.data(), required);
-    return result;
-}
-
-inline std::string EscapeJson(const std::wstring& value) {
-    std::string utf8 = WideToUtf8(value);
-    std::string out;
-    out.reserve(utf8.size() + 8);
-    for (char c : utf8) {
-        switch (c) {
-        case '\\': out += "\\\\"; break;
-        case '"': out += "\\\""; break;
-        case '\n': out += "\\n"; break;
-        case '\r': out += "\\r"; break;
-        case '\t': out += "\\t"; break;
-        default: out += c; break;
-        }
-    }
-    return out;
-}
-
-inline std::wstring Trim(std::wstring value) {
-    const size_t first = value.find_first_not_of(L" \t\r\n");
-    if (first == std::wstring::npos) return L"";
-    const size_t last = value.find_last_not_of(L" \t\r\n");
-    return value.substr(first, last - first + 1);
-}
 
 inline std::wstring EncryptString(const std::wstring& plain) {
     if (plain.empty()) return L"";
@@ -293,14 +260,6 @@ inline RequestResult SendRequestRaw(const RequestConfig& cfg, const std::string&
     if (!hRequest) {
         res.error = L"WinHttpOpenRequest failed";
         WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return res;
-    }
-
-    if (useSsl) {
-        DWORD secFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
-                         SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
-                         SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
-                         SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
-        WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &secFlags, sizeof(secFlags));
     }
 
     WinHttpSetTimeouts(hRequest, timeoutMs, timeoutMs, timeoutMs, timeoutMs);

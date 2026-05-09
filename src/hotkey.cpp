@@ -286,9 +286,11 @@ LRESULT CALLBACK HotkeyEditWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         RECT rc;
         GetClientRect(hwnd, &rc);
 
-        HBRUSH bg = CreateSolidBrush(state && state->capturing ? RGB(255, 252, 223) : RGB(255, 255, 255));
+        HBRUSH bg = state && state->capturing
+            ? CreateSolidBrush(RGB(255, 252, 223))
+            : GetSysColorBrush(COLOR_WINDOW);
         FillRect(hdc, &rc, bg);
-        DeleteObject(bg);
+        if (state && state->capturing) DeleteObject(bg);
 
         std::wstring text = L"CapsLock";
         COLORREF color = RGB(25, 31, 40);
