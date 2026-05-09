@@ -1,7 +1,7 @@
 # 代码审查报告
 
 > 日期: 2026-05-09 | 审查范围: src/ 全 17 个源文件 + build.bat
-> 修复日期: 2026-05-09 | 已修复: 12 项 | 跳过: 2 项 (D4, O3)
+> 修复日期: 2026-05-09 | 已修复: 13 项 | 跳过: 1 项 (D4)
 
 ### 状态图例
 
@@ -206,11 +206,13 @@ DeleteObject(bg);
 
 ---
 
-### ➖ O3. PositionHud 每次创建新 region
+### ✅ O3. PositionHud 每次创建新 region
 
 **文件**: [src/hud.cpp:105](file:///d:/%23GITHUB_melody0709/Voice_LLM_ASR_Input/src/hud.cpp#L105)
 
 `CreateRoundRectRgn` 失败时未释放 region；且每次 `PositionHud` 都创建新 region，旧 region 被 `SetWindowRgn` 接管（由系统管理，不会泄漏）。但若频繁调用可能有性能损耗。当前 `PositionHud` 调用频率低（窗口创建、DPI/文字变化），实际影响可忽略。
+
+**修复**: 使用静态变量缓存窗口尺寸，仅在尺寸变化时重新创建 region 并调用 `SetWindowRgn`（系统接管所有权），避免重复创建和 GDI 句柄泄漏。注意不缓存 region 句柄本身——`SetWindowRgn` 成功后系统会接管该句柄，后续不得复用。
 
 ---
 
@@ -242,19 +244,18 @@ WaitForSingleObject(pi.hProcess, INFINITE);
 | D5 | ✅ | AsrEngine::lock public | 低 | engine.h |
 | O1 | ✅ | 托盘菜单冗余 flag | - | main.cpp:408 |
 | O2 | ✅ | HotkeyEdit PAINT 频繁创建 brush | - | hotkey.cpp:289 |
-| O3 | ➖ | PositionHud region | - | hud.cpp:105 |
+| O3 | ✅ | PositionHud region | - | hud.cpp:105 |
 | O4 | ✅ | RunModelDownloader 阻塞 UI | - | engine.cpp:162 |
 | N1 | ✅ | WM_APP+20 handler modelId 不一致 | 低 | settings.cpp / engine.cpp |
 | N2 | ✅ | firered_vad.h 路径转换非 UTF-8 | 低 | firered_vad.h |
 
-### 已修复 (12项)
+### 已修复 (13项)
 
-B1, B2, B3, D1, D2, D3, D5, O1, O2, O4, N1, N2
+B1, B2, B3, D1, D2, D3, D5, O1, O2, O3, O4, N1, N2
 
-### 跳过 (2项)
+### 跳过 (1项)
 
 - **➖ D4** — g_volcKeepAlive 永不重置：当前行为正确，无需改动
-- **➖ O3** — PositionHud region：调用频率低，影响可忽略
 
 ---
 

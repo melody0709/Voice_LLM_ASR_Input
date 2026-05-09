@@ -1,6 +1,7 @@
 CompileFlags:
   Add:
     - --target=x86_64-pc-windows-msvc
+    - -std=c++17
     - -DUNICODE
     - -D_UNICODE
     - -Isrc

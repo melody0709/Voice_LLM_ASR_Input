@@ -90,6 +90,9 @@ void RemoveTrayIcon(HWND hwnd) {
 }
 
 void PositionHud(HWND hwnd) {
+    static int s_lastWidth = 0;
+    static int s_lastHeight = 0;
+
     POINT pt;
     GetCursorPos(&pt);
     HMONITOR monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
@@ -101,9 +104,16 @@ void PositionHud(HWND hwnd) {
     const int height = DipToPx(hud.heightDip, scale);
     const int x = mi.rcWork.left + ((mi.rcWork.right - mi.rcWork.left) - width) / 2;
     const int y = mi.rcWork.bottom - height - 48;
-    HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, height, height);
-    if (region && !SetWindowRgn(hwnd, region, TRUE)) {
-        DeleteObject(region);
+
+    if (width != s_lastWidth || height != s_lastHeight) {
+        HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, height, height);
+        if (region) {
+            if (!SetWindowRgn(hwnd, region, TRUE)) {
+                DeleteObject(region);
+            }
+        }
+        s_lastWidth = width;
+        s_lastHeight = height;
     }
     SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, SWP_SHOWWINDOW | SWP_NOACTIVATE);
 }

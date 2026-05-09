@@ -19,6 +19,7 @@
 - **Model downloader no longer blocks UI**: `RunModelDownloader` now launches PowerShell asynchronously and posts `WM_APP + 20` back to Settings when done; download button disables during download with status text, re-enables on completion
 - **Tray menu flag cleanup**: Removed redundant `MF_DISABLED` alongside `MF_GRAYED` (the latter already implies disabled state)
 - **HotkeyEdit paint optimization**: Non-capturing state uses `GetSysColorBrush(COLOR_WINDOW)` instead of creating/destroying a `CreateSolidBrush(RGB(255,255,255))` on every `WM_PAINT`
+- **PositionHud region reuse**: Fixed GDI region leak in `PositionHud` by skipping region recreation (`CreateRoundRectRgn` + `SetWindowRgn`) when window dimensions are unchanged
 
 ## v0.7.1 (2026-05-09)
 
