@@ -10,7 +10,3 @@ CompileFlags:
     - -Ithird_party/kaldi_native_fbank/include
     - -finput-charset=UTF-8
     - -fexec-charset=UTF-8
-  Compiler: cl
-Diagnostics:
-  Suppress:
-    - clang-diagnostic-msvc-include
