@@ -2,6 +2,19 @@
 
 > 🇨🇳 [中文版](doc/CHANGELOG_zh.md)
 
+## v0.7.1 (2026-05-09)
+
+### Performance
+
+- **`bigmodel_nostream` speed optimization**: Skip `ReceiveResult` for intermediate audio chunks (server returns empty text for each chunk in non-streaming mode). Only the final `isLast` chunk drains responses. Session time reduced from ~7-8s to ~1.5-2s
+- **WinHTTP connection reuse**: `hSession` + `hConnect` (TCP/TLS) are kept alive between recording sessions. Second session onward saves ~1.4s TLS handshake. Connection failure triggers automatic retry with fresh connection
+
+### Fixed
+
+- **`ExtractJsonStr` escape handling**: Correctly handles `\\"` (escaped backslash before end-quote) by counting consecutive backslashes instead of checking only the previous character
+- **`ExtractJsonBool` whitespace handling**: Now skips `\n`/`\r` in addition to spaces and tabs, consistent with `ExtractJsonStr`
+- **Thread safety**: `VolcSession::connected` changed from `volatile bool` to `std::atomic<bool>`
+
 ## v0.7.0 (2026-05-09)
 
 ### Added

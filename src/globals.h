@@ -278,6 +278,7 @@ extern bool g_volcStreaming;
 extern std::thread g_volcThread;
 extern CRITICAL_SECTION g_volcAudioCs;
 extern std::vector<BYTE> g_volcPendingAudio;
+namespace volc_asr { extern std::atomic<bool> g_volcKeepAlive; }
 extern AsrEngine g_asrEngine;
 extern int g_cloudProviderIdx;
 extern HWND g_cloudAsrHintControl;

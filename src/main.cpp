@@ -79,6 +79,7 @@ bool g_volcStreaming = false;
 std::thread g_volcThread;
 CRITICAL_SECTION g_volcAudioCs;
 std::vector<BYTE> g_volcPendingAudio;
+namespace volc_asr { std::atomic<bool> g_volcKeepAlive{false}; }
 AsrEngine g_asrEngine;
 int g_cloudProviderIdx = 0;
 HWND g_cloudAsrHintControl = nullptr;
@@ -253,6 +254,7 @@ void StartRecordingSession() {
 
         if (g_volcThread.joinable()) g_volcThread.join();
         g_volcThread = std::thread([vcfg, config]() {
+            ULONGLONG tTotal0 = GetTickCount64();
             if (!volc_asr::OpenSession(g_volcSession, vcfg)) {
                 g_volcSession.connected = false;
                 std::wstring errMsg = L"VolcEngine connect failed";
@@ -264,15 +266,17 @@ void StartRecordingSession() {
                 return;
             }
             g_volcSession.connected = true;
+            volc_asr::g_volcKeepAlive = true;
 
             constexpr size_t kChunkBytes = 6400;
             bool asyncMode = (vcfg.mode == L"bigmodel_async");
+            bool nostreamMode = (vcfg.mode == L"bigmodel_nostream");
             std::vector<BYTE> chunk;
             chunk.reserve(kChunkBytes);
 
             std::wstring lastPartial;
             std::wstring asyncPartial;
-            bool asyncDrainDone = false;
+            std::atomic<bool> asyncDrainDone{false};
             std::thread drainThread;
 
             if (asyncMode) {
@@ -308,7 +312,7 @@ void StartRecordingSession() {
                 LeaveCriticalSection(&g_volcAudioCs);
 
                 if (hasData && chunk.size() >= kChunkBytes) {
-                    std::wstring partial = volc_asr::SendAudio(g_volcSession, chunk, false, asyncMode);
+                    std::wstring partial = volc_asr::SendAudio(g_volcSession, chunk, false, asyncMode, nostreamMode);
                     chunk.clear();
                     if (!asyncMode && !partial.empty() && partial != lastPartial) {
                         lastPartial = partial;
@@ -322,13 +326,13 @@ void StartRecordingSession() {
             }
 
             if (!chunk.empty()) {
-                std::wstring partial = volc_asr::SendAudio(g_volcSession, chunk, false, asyncMode);
+                std::wstring partial = volc_asr::SendAudio(g_volcSession, chunk, false, asyncMode, nostreamMode);
                 if (!asyncMode && !partial.empty()) lastPartial = partial;
             }
 
             {
                 std::vector<BYTE> empty;
-                std::wstring lastResult = volc_asr::SendAudio(g_volcSession, empty, true);
+                std::wstring lastResult = volc_asr::SendAudio(g_volcSession, empty, true, asyncMode, nostreamMode);
                 if (!lastResult.empty()) lastPartial = lastResult;
             }
 
@@ -358,6 +362,7 @@ void StartRecordingSession() {
                              reinterpret_cast<LPARAM>(new std::wstring(finalText)));
             }
             AddVolcRecognitionHistory(finalText);
+            VolcDebugLog("=== TOTAL session: %llums ===", GetTickCount64() - tTotal0);
         });
         return;
     }
@@ -620,6 +625,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+
+    volc_asr::ClosePersistentConnection(g_volcSession);
 
     if (mutex) {
         ReleaseMutex(mutex);

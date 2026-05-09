@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  当前版本：<code>v0.7.0</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
+  当前版本：<code>v0.7.1</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -185,6 +185,7 @@ CHANGELOG.md        — 版本变更记录
 详见 [CHANGELOG.md](CHANGELOG.md)
 
 **最近更新：**
+- **v0.7.1** — `bigmodel_nostream` 加速（跳过中间接收）、WinHTTP 连接复用、`ExtractJsonStr` 转义修复、线程安全修复
 - **v0.7.0** — 火山引擎 ASR 全参数支持、热词/替换词表、对话上下文、`corpus` 合并修复、`context` 格式修复
 - **v0.6.2** — Settings UI 样式统一化：`UiStyle` 命名空间、所有 tab 行间距一致
 - **v0.6.1** — ASR 模型启动预加载、onnxruntime/sherpa-onnx DLL 延迟加载、火山引擎 LLM 纠错修复

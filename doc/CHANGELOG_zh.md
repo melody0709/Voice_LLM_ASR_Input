@@ -2,6 +2,19 @@
 
 > 🇬🇧 [English](../CHANGELOG.md)
 
+## v0.7.1 (2026-05-09)
+
+### 性能优化
+
+- **`bigmodel_nostream` 加速**：跳过中间音频 chunk 的 `ReceiveResult`（非流式模式下服务端对每个 chunk 返回空文本），只在最终 `isLast` chunk 后 drain 响应。会话耗时从 ~7-8s 降至 ~1.5-2s
+- **WinHTTP 连接复用**：跨录音会话保持 `hSession` + `hConnect`（TCP/TLS），第二次录音起省掉 ~1.4s TLS 握手。连接失效时自动重试
+
+### 修复
+
+- **`ExtractJsonStr` 转义处理**：正确处理 `\\"`（转义反斜杠+引号），通过计算连续反斜杠数量判断引号是否为真实结束符
+- **`ExtractJsonBool` 空白处理**：补全 `\n`/`\r` 跳过，与 `ExtractJsonStr` 行为一致
+- **线程安全**：`VolcSession::connected` 从 `volatile bool` 改为 `std::atomic<bool>`
+
 ## v0.7.0 (2026-05-09)
 
 ### 新增
