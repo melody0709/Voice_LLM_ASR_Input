@@ -487,6 +487,7 @@ bool StartAudioCapture(std::wstring& error) {
             g_wasapiCapture.Release();
             error.clear();
         } else {
+            g_wasapiCapture.Release();
             printf("[Audio] WASAPI Init failed, falling back to waveIn\n");
         }
     }

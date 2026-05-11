@@ -30,6 +30,7 @@
 - [x] v0.7.0：火山引擎全参数支持、热词/纠错表、对话上下文、模型下载器
 - [x] v0.7.1：volcengine nostream 性能优化、WinHTTP 连接复用
 - [x] v0.7.2：CODE_REVIEW 修复 13 项（线程安全、资源泄漏、SSL、工具函数去重等）
+- [x] v0.7.3：火山引擎流式 ASR 修复（round1: atomic/初始音频丢失/脏音频残留；round2: async 双线程竞争/SendAudio 失败处理/WASAPI Init 脏状态）
 
 ### Audio
 - [x] WASAPI Shared Mode 核心捕获（`wasapi_capture.h/cpp`）+ 线性插值重采样
@@ -38,6 +39,7 @@
 - [x] Config 字段 `audioBackend` / `audioDeviceId`（Load/Save 持久化）
 - [x] Debug Console 显示音频后端信息（WASAPI 采样率+设备名 / waveIn）
 - [x] WASAPI 生命周期：`Init → Start → Stop → Release`
+- [x] WASAPI Init 失败后脏状态修复（Release 清理）
 
 ### 可观测性
 - [x] Debug Mode：托盘右键 checkbox，CMD 控制台实时打印各阶段耗时
@@ -50,7 +52,7 @@
 - [x] `utils.h` 统一工具函数（WideToUtf8 / Utf8ToWide / EscapeJson / Trim）
 - [x] `AsrEngine::lock_` 改为 private + Lock/Unlock
 - [x] SSL 证书验证恢复
-- [x] 线程安全：volc `connected` atomic、Baidu token mutex、`VolcDebugLog` mutex
+- [x] 线程安全：volc `connected`/`streaming` atomic、Baidu token mutex、`VolcDebugLog` mutex
 - [x] 资源泄漏：`g_volcAudioCs` 全部退出路径 Delete、PositionHud region 去重
 - [x] 模型下载器异步化（不再阻塞 UI）
 - [x] 火山引擎连接复用（hSession+hConnect KeepAlive）
@@ -99,11 +101,32 @@
 完成后推荐：
 - 托盘图标状态灯：绿（就绪）/ 黄（录音中）/ 红（错误）/ 灰（空闲）。
 
+### 4. 全局变量线程安全（与刚修的 g_volcStreaming 同类）
+
+> 以下变量被多线程读写但无同步保护，和已修复的 `g_volcStreaming` 是同一类问题。
+
+| 变量 | 写线程 | 读线程 | 当前类型 | 风险 |
+|------|--------|--------|---------|------|
+| `g_recording` | UI 线程 | hotkey hook | `bool` | 中：hotkey 判断可能过时 |
+| `g_captureActive` | UI 线程 | WaveInProc/WASAPI callback | `bool` | 中：回调可能多收一个 buffer |
+| `g_hudIsRefining` | UI 线程 | HUD paint | `bool` | 低：颜色闪烁 |
+| `g_hudText` | UI 线程 (ShowHud) | HUD paint (DrawHudDirect2D) | `std::wstring` | **高：并发读写可能崩溃** |
+
+**修复**：
+- `g_recording` / `g_captureActive` / `g_hudIsRefining` → `std::atomic<bool>`
+- `g_hudText` → 加 `CRITICAL_SECTION` 保护，或用 atomic flag + 双缓冲（一份写、一份读）
+
+**涉及文件**：`globals.h`（声明）、`main.cpp`（定义和所有读写点）、`engine.cpp`（WaveInProc）、`wasapi_capture.cpp`（CaptureThread）、`hud.cpp`（DrawHudDirect2D）
+
+验收标准：
+- 全部改为 atomic 或加锁
+- 编译通过，无功能回归
+
 ---
 
 ## P1：识别体验提升
 
-### 4. WASAPI Phase 2：设备选择 UI
+### 5. WASAPI Phase 2：设备选择 UI
 
 > Config 字段已就绪、持久化已完成。仅差 Settings 控件。
 
@@ -116,7 +139,7 @@
 - 切换设备后下一次录音立即生效
 - 默认设备变更时能自动检测
 
-### 5. 术语替换 / 用户词库
+### 6. 术语替换 / 用户词库
 
 - [ ] 增加 `%APPDATA%\VoxType\terms.json`，简单替换表
 - [ ] 支持大小写敏感选项
@@ -130,7 +153,7 @@
 完成后推荐：
 - 再考虑保守 LLM 纠错开关，默认必须关闭。
 
-### 6. 模型质量评估
+### 7. 模型质量评估
 
 - [ ] 准备固定测试语料：短句、长句、中英混说、技术词、噪声
 - [ ] 对 FireRed CTC / FireRed AED / SenseVoice 分别记录 WER/RTF
@@ -141,13 +164,23 @@
 - 至少 20 条真实语音样本
 - 每个模型有平均耗时、最慢耗时、明显错误案例
 
+### 8. 音频管线性能优化
+
+- [ ] `g_volcPendingAudio` 改 `std::deque<BYTE>`（当前 `erase(begin)` 做队列是 O(n) 每次）
+- [ ] `RecognizeAsync` PCM 传递用 `std::move`（当前按值捕贝两份）
+- [ ] `StopAudioCapture` 返回值用 `std::move(data)`（当前 `data = g_audioData` 全量拷贝）
+- [ ] `g_audioData` 预分配（16kHz×2bytes = 32KB/s，可用 `reserve` 预估录音时长）
+- [ ] HUD dirty flag：文本未变时跳过 `InvalidateRect`（当前 33ms 定时器全量重绘）
+
+涉及文件：`engine.cpp`（StopAudioCapture、WaveInProc）、`main.cpp`（RecognizeAsync、volc 线程循环）、`hud.cpp`（ShowHud、DrawHudDirect2D）
+
 ---
 
-## P2：流式体验
+## P2：流式体验 + 工程质量
 
-### 7. 模拟 partial（可选）
+### 9. 模拟 partial（可选）
 
-> 在 offline 模型上分段快照识别，模拟流式反馈。如果效果差则直接跳到 §8。
+> 在 offline 模型上分段快照识别，模拟流式反馈。如果效果差则直接跳到 §10。
 
 - [ ] 录音时每隔 ~1s 截取当前 PCM 快照
 - [ ] 后台临时识别快照，不阻塞主录音
@@ -159,7 +192,7 @@
 - 不明显增加 CPU 卡顿
 - HUD 能优雅处理 partial 回退
 
-### 8. Streaming ASR 实验
+### 10. Streaming ASR 实验
 
 > WASAPI 已完成，这是 streaming 的前置条件。
 
@@ -174,11 +207,20 @@
 - 300-800ms 内看到可用 partial
 - Final 稳定，不比当前 offline 明显差
 
+### 11. 代码质量清理
+
+- [ ] `RecognizeAsync` / `RefineWithLlmAsync` 的 `detach()` 改为可控生命周期（保存 thread handle，退出时 join 或设 flag 让 PostMessage 跳过）
+- [ ] `ExtractJsonString` 去重：`engine.cpp`（支持转义）和 `volcengine_asr.h`（不支持转义）各有一份，统一到 `utils.h`
+- [ ] `LoadConfig` 中 `_wtoi` 替换为 `_wtoi_s` 或 `std::stoi`（已废弃）
+- [ ] 单例 mutex 检查移到 `PreloadAsrEngine` 之前（当前第二实例会白加载模型）
+- [ ] LLM `Refine` 超时从 5s 调大到 10-15s（慢网络下容易误报失败）
+- [ ] `PreloadAsrEngine` 裸 Lock/Unlock 改 `lock_guard`（需暴露 mutex 或提供 guard 方法）
+
 ---
 
 ## P3：产品化
 
-### 9. Settings 完整化
+### 12. Settings 完整化
 
 - [ ] Settings 增加打开日志目录按钮
 - [ ] Settings 增加打开配置文件按钮
@@ -186,7 +228,7 @@
 - [ ] 增加导入/导出配置（zip 或单文件 JSON）
 - [ ] LLM Provider 列表支持拖拽排序
 
-### 10. 安装和发布
+### 13. 安装和发布
 
 - [ ] 写 `INSTALL.md`（含常见问题）
 - [ ] 评估 zip 绿色包发布
@@ -206,11 +248,14 @@
 
 ## 下一步推荐顺序
 
-1. **P0 §1 剪贴板恢复** — 最影响日常使用，每次注入都会覆盖剪贴板
-2. **P0 §2 HUD 视觉** — 实机 DPI 验收 + 停留时间调整，投入小收益大
-3. **P1 §4 设备选择 UI** — Config 已就绪，仅差 Settings 控件，工时小
-4. **P0 §3 错误处理** — 让失败可解释，减少用户困惑
-5. **P1 §5 术语替换** — 低风险、可逐步积累
-6. **P2 §8 Streaming ASR** — 体验提升最大，但需要实验验证
-7. **P1 §6 模型评估** — 决定默认模型策略
-8. **P3 §9-10** — 最后做，稳定后再发布
+1. **P0 §4 线程安全** — 与刚修的 g_volcStreaming 同类，g_hudText 并发读写可能崩溃，投入小风险高
+2. **P0 §1 剪贴板恢复** — 最影响日常使用，每次注入都会覆盖剪贴板
+3. **P0 §2 HUD 视觉** — 实机 DPI 验收 + 停留时间调整，投入小收益大
+4. **P1 §5 设备选择 UI** — Config 已就绪，仅差 Settings 控件，工时小
+5. **P1 §8 音频管线性能** — g_volcPendingAudio erase O(n)、PCM 双拷贝等，长录音时有感
+6. **P0 §3 错误处理** — 让失败可解释，减少用户困惑
+7. **P1 §6 术语替换** — 低风险、可逐步积累
+8. **P2 §11 代码质量** — detach threads、ExtractJson 去重等，降低维护风险
+9. **P2 §10 Streaming ASR** — 体验提升最大，但需要实验验证
+10. **P1 §7 模型评估** — 决定默认模型策略
+11. **P3 §12-13** — 最后做，稳定后再发布
