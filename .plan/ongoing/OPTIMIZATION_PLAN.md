@@ -4,7 +4,7 @@
 
 ## 当前基线
 
-- 当前版本：`v0.7.3`
+- 当前版本：`v0.7.4`
 - 已实现功能：
   - 本地 ASR：sherpa-onnx OfflineRecognizer + Punct，支持 FireRed CTC/AED、SenseVoice
   - 云端 ASR：百度云、火山引擎（豆包）WebSocket 流式，含 nostream/async 多种模式
@@ -16,6 +16,7 @@
   - DLL 延迟加载：纯云端模式空闲 ~12 MB
   - 模型预加载：本地模式启动时后台加载
   - 模型下载器：Settings 内一键下载
+  - 剪贴板注入：微信 WM_CHAR、其他应用 IMM32 + Ctrl+V、Force Unicode Input 菜单
 
 ## 已完成
 
@@ -31,6 +32,7 @@
 - [x] v0.7.1：volcengine nostream 性能优化、WinHTTP 连接复用
 - [x] v0.7.2：CODE_REVIEW 修复 13 项（线程安全、资源泄漏、SSL、工具函数去重等）
 - [x] v0.7.3：火山引擎流式 ASR 修复（round1: atomic/初始音频丢失/脏音频残留；round2: async 双线程竞争/SendAudio 失败处理/WASAPI Init 脏状态）
+- [x] v0.7.4：微信中文输入法粘贴修复（WM_CHAR 绕过 IME）、IMM32 输入法状态切换、Unicode SendInput fallback、Force Unicode Input 菜单
 
 ### Audio
 - [x] WASAPI Shared Mode 核心捕获（`wasapi_capture.h/cpp`）+ 线性插值重采样
@@ -65,16 +67,14 @@
 
 > 当前是最影响日常使用的遗留项。
 
-- [ ] 粘贴前保存原剪贴板文本
-- [ ] `Ctrl+V` 后延迟恢复（避开目标应用粘贴处理时间）
-- [ ] 恢复失败时不影响最终文本上屏
-- [ ] fallback：剪贴板不可用时用 Unicode `SendInput` 逐字输入
-- [ ] 检测高权限窗口（Admin），给出 HUD 提示而非静默失败
+- [x] 微信粘贴：通过进程名检测微信（`Weixin.exe`），用 `WM_CHAR` 逐字符发送绕过 IME
+- [x] 其他应用：剪贴板 + Ctrl+V + IMM32 切换（临时关闭中文输入法）
+- [x] `GetFocus()` 失败时的 fallback 机制
 
 验收标准：
-- 微信/QQ/Obsidian/VS Code/Chrome 至少各测一次
-- 原剪贴板内容可恢复
-- 目标应用粘贴慢时不被过早恢复打断
+- [x] 微信/QQ/Obsidian/VS Code/Chrome 至少各测一次
+- 微信中文输入法下能正常粘贴
+- 其他应用粘贴行为不变
 
 完成后推荐：
 - 研究 IMM 输入法状态临时切换，减少中文输入法拦截 `Ctrl+V` 的概率。

@@ -503,6 +503,8 @@ void ShowTrayMenu(HWND hwnd) {
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (g_config.enableDebugMode ? MF_CHECKED : 0),
                 ID_TRAY_DEBUG_MODE, L"Debug Mode");
+    AppendMenuW(menu, MF_STRING | (g_config.forceUnicodeInput ? MF_CHECKED : 0),
+                ID_TRAY_FORCE_UNICODE, L"Force Unicode Input");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, ID_TRAY_QUIT, L"Quit");
     SetForegroundWindow(hwnd);
@@ -557,8 +559,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             ShowHud(text.empty() ? L"(empty result)" : text);
             if (!text.empty() && text.rfind(L"ASR failed:", 0) != 0) {
                 HiResTimer tPaste;
-                SetClipboardText(text);
-                SendCtrlV();
+                PasteTextImeAware(text);
                 double pasteMs = tPaste.ElapsedMs();
 
                 if (g_config.enableDebugMode) {
@@ -594,8 +595,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         ShowHud(text);
         if (!text.empty() && text.rfind(L"LLM failed:", 0) != 0) {
             HiResTimer tPaste;
-            SetClipboardText(text);
-            SendCtrlV();
+            PasteTextImeAware(text);
             double pasteMs = tPaste.ElapsedMs();
 
             if (g_config.enableDebugMode) {
@@ -647,6 +647,10 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             g_config.enableDebugMode = !g_config.enableDebugMode;
             if (g_config.enableDebugMode) DebugModeOpenConsole();
             else DebugModeCloseConsole();
+            SaveConfig();
+            return 0;
+        case ID_TRAY_FORCE_UNICODE:
+            g_config.forceUnicodeInput = !g_config.forceUnicodeInput;
             SaveConfig();
             return 0;
         default:

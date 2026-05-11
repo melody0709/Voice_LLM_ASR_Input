@@ -53,6 +53,7 @@ Windows 11 本地 CPU 语音输入工具：托盘常驻，按住快捷键录音�
 - 火山引擎 `context` 字段值必须是 JSON 字符串（内部引号转义），不能是原始 JSON 对象。
 - WASAPI 生命周期必须是 `Init → Start → Stop → Release`，`Stop()` 只停线程不清资源，没有 `Release()` 第二次录音会卡死。`Init()` 成功但 `Start()` 失败时也必须 `Release()`。
 - WASAPI 重采样相位更新必须用 `m_resamplePhase -= written / m_resampleRatio`（实际消耗的源样本数），不能用 `m_resamplePhase -= numFrames`（输入帧数），否则非整数采样率比会越界。
+- **微信粘贴**：微信（`Weixin.exe`）用自定义 Qt 控件，`GetFocus()` 返回 NULL 且 IME 拦截 Ctrl+V。必须用 `WM_CHAR` 逐字符发送，不能用剪贴板+Ctrl+V。其他应用用剪贴板+Ctrl+V+IMM32 切换。
 
 ## 后续优先级
 

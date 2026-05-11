@@ -54,5 +54,6 @@ target_link_libraries(VoxType
     winhttp
     crypt32
     mmdevapi
+    imm32
     delayimp
 )

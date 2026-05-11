@@ -315,6 +315,7 @@ void LoadConfig() {
     g_config.llmPrompt = Utf8ToWide(ExtractJsonString(json, "llm_prompt", ""));
     g_config.enableLlmDebug = ExtractJsonBool(json, "enable_llm_debug", false);
     g_config.enableDebugMode = ExtractJsonBool(json, "enable_debug_mode", false);
+    g_config.forceUnicodeInput = ExtractJsonBool(json, "force_unicode_input", false);
     g_config.asrBackend = Utf8ToWide(ExtractJsonString(json, "asr_backend", WideToUtf8(g_config.asrBackend)));
     g_config.baiduApiKey = Utf8ToWide(ExtractJsonString(json, "baidu_api_key", ""));
     g_config.baiduSecretKey = llm::DecryptString(Utf8ToWide(ExtractJsonString(json, "baidu_secret_key", "")));
@@ -386,6 +387,7 @@ void SaveConfig() {
          << "  \"llm_prompt\": \"" << EscapeJson(g_config.llmPrompt) << "\",\n"
          << "  \"enable_llm_debug\": " << (g_config.enableLlmDebug ? "true" : "false") << ",\n"
          << "  \"enable_debug_mode\": " << (g_config.enableDebugMode ? "true" : "false") << ",\n"
+         << "  \"force_unicode_input\": " << (g_config.forceUnicodeInput ? "true" : "false") << ",\n"
          << "  \"asr_backend\": \"" << EscapeJson(g_config.asrBackend) << "\",\n"
          << "  \"baidu_api_key\": \"" << EscapeJson(g_config.baiduApiKey) << "\",\n"
          << "  \"baidu_secret_key\": \"" << EscapeJson(llm::EncryptString(g_config.baiduSecretKey)) << "\",\n"

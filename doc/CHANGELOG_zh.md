@@ -2,6 +2,19 @@
 
 > 🇬🇧 [English](../CHANGELOG.md)
 
+## v0.7.4 (2026-05-11)
+
+### 修复
+
+- **微信中文输入法粘贴问题**：微信（`Weixin.exe`）使用自定义 Qt 控件，`GetFocus()` 返回 NULL 且 IME 拦截 Ctrl+V。通过进程名检测微信，使用 `WM_CHAR` 逐字符发送绕过 IME；其他应用使用剪贴板 + Ctrl+V + IMM32 临时切换英文模式
+- **IMM32 输入法状态切换**：添加 `ImeStateGuard` RAII 结构体，在发送 Ctrl+V 前临时切换输入法到英文模式，发送后自动恢复
+
+### 新增
+
+- **Unicode SendInput fallback**：添加 `SendUnicodeText()` 函数，使用 `KEYEVENTF_UNICODE` 标志逐字符发送，完全绕过 IME
+- **Force Unicode Input 菜单**：托盘右键菜单新增 "Force Unicode Input" 选项，勾选后所有应用使用 Unicode SendInput 方式粘贴，用于测试兼容性
+- **剪贴板注入双层策略**：`PasteTextImeAware()` 函数实现智能粘贴：优先使用 `WM_PASTE`（`GetFocus()` 有效时），微信用 `WM_CHAR`，其他应用用剪贴板 + Ctrl+V + IMM32 切换
+
 ## v0.7.3 (2026-05-11)
 
 ### 新增

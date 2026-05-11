@@ -87,6 +87,7 @@ constexpr UINT ID_TRAY_SETTINGS = 1002;
 constexpr UINT ID_TRAY_RELOAD = 1003;
 constexpr UINT ID_TRAY_QUIT = 1004;
 constexpr UINT ID_TRAY_DEBUG_MODE = 1005;
+constexpr UINT ID_TRAY_FORCE_UNICODE = 1006;
 
 constexpr int IDC_MODEL = 2001;
 constexpr int IDC_MODEL_DIR = 2002;
@@ -189,6 +190,7 @@ struct Config {
     std::wstring volcCorrectTableId;
     std::wstring volcCorrectTableName;
     bool enableDebugMode = false;
+    bool forceUnicodeInput = false;
     std::wstring audioBackend = L"wasapi";
     std::wstring audioDeviceId;
 };

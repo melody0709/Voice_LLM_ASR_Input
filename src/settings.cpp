@@ -9,16 +9,19 @@
 
 #include <algorithm>
 #include <commctrl.h>
+#include <imm.h>
 #include <windowsx.h>
 #include <shlobj.h>
 #include <string>
 #include <thread>
+#include <vector>
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "imm32.lib")
 
 void SetStatus(HWND hwnd, const std::wstring& text) {
     SetWindowTextW(GetDlgItem(hwnd, IDC_STATUS), text.c_str());
@@ -55,6 +58,116 @@ void SendCtrlV() {
     inputs[3].ki.wVk = VK_CONTROL;
     inputs[3].ki.dwFlags = KEYEVENTF_KEYUP;
     SendInput(4, inputs, sizeof(INPUT));
+}
+
+void SendUnicodeText(const std::wstring& text) {
+    if (text.empty()) return;
+    for (wchar_t ch : text) {
+        INPUT inputs[2] = {};
+        inputs[0].type = INPUT_KEYBOARD;
+        inputs[0].ki.wScan = ch;
+        inputs[0].ki.dwFlags = KEYEVENTF_UNICODE;
+        inputs[1].type = INPUT_KEYBOARD;
+        inputs[1].ki.wScan = ch;
+        inputs[1].ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+        SendInput(2, inputs, sizeof(INPUT));
+        Sleep(1);
+    }
+}
+
+struct ImeStateGuard {
+    HWND  targetWnd = nullptr;
+    HIMC  hIMC      = nullptr;
+    DWORD savedConv = 0;
+    DWORD savedSent = 0;
+    BOOL  savedOpen = FALSE;
+    bool  active    = false;
+
+    bool Disable() {
+        targetWnd = GetForegroundWindow();
+        if (!targetWnd) return false;
+
+        HWND focused = GetFocus();
+        if (focused && IsChild(targetWnd, focused)) {
+            targetWnd = focused;
+        }
+
+        hIMC = ImmGetContext(targetWnd);
+        if (!hIMC) return false;
+
+        ImmGetConversionStatus(hIMC, &savedConv, &savedSent);
+        savedOpen = ImmGetOpenStatus(hIMC);
+
+        if (savedConv == IME_CMODE_ALPHANUMERIC && !savedOpen) {
+            ImmReleaseContext(targetWnd, hIMC);
+            hIMC = nullptr;
+            return false;
+        }
+
+        ImmSetOpenStatus(hIMC, FALSE);
+        ImmSetConversionStatus(hIMC, IME_CMODE_ALPHANUMERIC, 0);
+        Sleep(15);
+        active = true;
+        return true;
+    }
+
+    void Restore() {
+        if (!active || !hIMC) return;
+        ImmSetConversionStatus(hIMC, savedConv, savedSent);
+        ImmSetOpenStatus(hIMC, savedOpen);
+        if (targetWnd) ImmReleaseContext(targetWnd, hIMC);
+        hIMC = nullptr;
+        active = false;
+    }
+
+    ~ImeStateGuard() { Restore(); }
+};
+
+void PasteTextImeAware(const std::wstring& text) {
+    if (text.empty()) return;
+
+    // 强制 Unicode 输入模式（测试用）
+    if (g_config.forceUnicodeInput) {
+        SendUnicodeText(text);
+        return;
+    }
+
+    HWND focus = GetFocus();
+    if (focus) {
+        SetClipboardText(text);
+        SendMessage(focus, WM_PASTE, 0, 0);
+        return;
+    }
+
+    HWND fg = GetForegroundWindow();
+    if (!fg) return;
+
+    // 通过进程名判断是否是微信
+    DWORD pid = 0;
+    GetWindowThreadProcessId(fg, &pid);
+    wchar_t processName[MAX_PATH] = {};
+    HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (hProc) {
+        DWORD size = MAX_PATH;
+        QueryFullProcessImageNameW(hProc, 0, processName, &size);
+        CloseHandle(hProc);
+    }
+
+    bool isWeChat = wcsstr(processName, L"WeChat") || wcsstr(processName, L"wechat") ||
+                    wcsstr(processName, L"Weixin") || wcsstr(processName, L"weixin");
+    if (!isWeChat) {
+        SetClipboardText(text);
+        ImeStateGuard guard;
+        guard.Disable();
+        SendCtrlV();
+        return;
+    }
+
+    // 微信：用 WM_CHAR 绕过 IME
+    for (wchar_t ch : text) {
+        PostMessageW(fg, WM_CHAR, ch, 0);
+        Sleep(1);
+    }
 }
 
 bool IsCapsLockOn() {

@@ -2,6 +2,19 @@
 
 > 🇨🇳 [中文版](doc/CHANGELOG_zh.md)
 
+## v0.7.4 (2026-05-11)
+
+### Fixed
+
+- **WeChat Chinese IME paste issue**: WeChat (`Weixin.exe`) uses a custom Qt control where `GetFocus()` returns NULL and IME intercepts Ctrl+V. Detect WeChat by process name and use `WM_CHAR` character-by-character input to bypass IME; other apps use clipboard + Ctrl+V + IMM32 temporary English mode switch
+- **IMM32 input method state switching**: Added `ImeStateGuard` RAII struct to temporarily switch IME to English mode before sending Ctrl+V, then auto-restore afterward
+
+### Added
+
+- **Unicode SendInput fallback**: Added `SendUnicodeText()` function using `KEYEVENTF_UNICODE` flag for character-by-character input, completely bypassing IME
+- **Force Unicode Input menu**: Tray right-click menu now has "Force Unicode Input" option; when checked, all apps use Unicode SendInput for paste, useful for compatibility testing
+- **Two-layer paste injection strategy**: `PasteTextImeAware()` implements smart paste: prefers `WM_PASTE` (when `GetFocus()` succeeds), WeChat uses `WM_CHAR`, other apps use clipboard + Ctrl+V + IMM32 switch
+
 ## v0.7.3 (2026-05-11)
 
 ### Added

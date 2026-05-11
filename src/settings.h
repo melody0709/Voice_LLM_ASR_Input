@@ -5,6 +5,8 @@
 void SetStatus(HWND hwnd, const std::wstring& text);
 void SetClipboardText(const std::wstring& text);
 void SendCtrlV();
+void SendUnicodeText(const std::wstring& text);
+void PasteTextImeAware(const std::wstring& text);
 bool IsCapsLockOn();
 void SendCapsLockTap();
 void RestoreCapsLockState();
