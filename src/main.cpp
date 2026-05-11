@@ -77,7 +77,7 @@ bool g_baiduKeyVisible = false;
 bool g_baiduApiKeyVisible = false;
 bool g_volcKeyVisible = false;
 volc_asr::VolcSession g_volcSession;
-bool g_volcStreaming = false;
+std::atomic<bool> g_volcStreaming{false};
 std::thread g_volcThread;
 CRITICAL_SECTION g_volcAudioCs;
 std::vector<BYTE> g_volcPendingAudio;
@@ -305,6 +305,10 @@ void StartRecordingSession() {
     }
 
     if (g_config.asrBackend == L"volcengine") {
+        EnterCriticalSection(&g_volcAudioCs);
+        g_volcPendingAudio.clear();
+        LeaveCriticalSection(&g_volcAudioCs);
+
         const Config config = g_config;
         volc_asr::VolcConfig vcfg;
         vcfg.apiKey = config.volcApiKey;
@@ -328,7 +332,7 @@ void StartRecordingSession() {
             vcfg.contextJson = BuildVolcContextJson();
         }
 
-        g_volcStreaming = true;
+        g_volcStreaming.store(true);
         ShowHud(L"Listening... Volcano Engine");
 
         if (g_volcThread.joinable()) g_volcThread.join();
@@ -388,12 +392,13 @@ void StartRecordingSession() {
                     g_volcPendingAudio.erase(g_volcPendingAudio.begin(), g_volcPendingAudio.begin() + take);
                     hasData = true;
                 }
-                bool streaming = g_volcStreaming;
+                bool streaming = g_volcStreaming.load();
                 LeaveCriticalSection(&g_volcAudioCs);
 
                 if (hasData && chunk.size() >= kChunkBytes) {
                     std::wstring partial = volc_asr::SendAudio(g_volcSession, chunk, false, asyncMode, nostreamMode);
                     chunk.clear();
+                    if (!g_volcSession.hWebSocket) break;
                     if (!asyncMode && !partial.empty() && partial != lastPartial) {
                         lastPartial = partial;
                         ShowHud(L"Listening... Volcano Engine\n" + partial);
@@ -405,6 +410,11 @@ void StartRecordingSession() {
                 }
             }
 
+            if (asyncMode) {
+                asyncDrainDone = true;
+                if (drainThread.joinable()) drainThread.join();
+            }
+
             if (!chunk.empty()) {
                 std::wstring partial = volc_asr::SendAudio(g_volcSession, chunk, false, asyncMode, nostreamMode);
                 if (!asyncMode && !partial.empty()) lastPartial = partial;
@@ -414,12 +424,6 @@ void StartRecordingSession() {
                 std::vector<BYTE> empty;
                 std::wstring lastResult = volc_asr::SendAudio(g_volcSession, empty, true, asyncMode, nostreamMode);
                 if (!lastResult.empty()) lastPartial = lastResult;
-            }
-
-            if (asyncMode) {
-                asyncDrainDone = true;
-                if (drainThread.joinable()) drainThread.join();
-                if (!asyncPartial.empty()) lastPartial = asyncPartial;
             }
 
             std::wstring finalText = volc_asr::CloseSession(g_volcSession);
@@ -465,14 +469,12 @@ void StopRecordingSession() {
     g_vadModelName.clear();
     g_lastRawAsrText.clear();
 
-    if (g_config.asrBackend == L"volcengine" && g_volcStreaming) {
-        g_volcStreaming = false;
+    if (g_config.asrBackend == L"volcengine" && g_volcStreaming.load()) {
+        g_volcStreaming.store(false);
         const std::vector<BYTE> pcm = StopAudioCapture();
         if (pcm.size() < 8000) {
             ShowHud(L"Too short");
             SetTimer(g_hudWindow, kHudHideTimer, 1200, nullptr);
-            if (g_volcThread.joinable()) g_volcThread.join();
-            volc_asr::CloseSession(g_volcSession);
             return;
         }
         ShowHud(L"Recognizing... Volcano Engine");
@@ -655,9 +657,9 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         DestroyWindow(hwnd);
         return 0;
     case WM_DESTROY:
+        g_volcStreaming.store(false);
         g_captureActive = false;
         StopAudioCapture();
-        g_volcStreaming = false;
         if (g_volcThread.joinable()) g_volcThread.join();
         UninstallKeyboardHook();
         RemoveTrayIcon(hwnd);

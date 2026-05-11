@@ -238,7 +238,7 @@ void WasapiCapture::CaptureThread() {
                     g_audioData.insert(g_audioData.end(), begin, begin + written * sizeof(int16_t));
                     LeaveCriticalSection(&g_audioLock);
 
-                    if (g_volcStreaming && g_volcSession.connected) {
+                    if (g_volcStreaming.load()) {
                         EnterCriticalSection(&g_volcAudioCs);
                         g_volcPendingAudio.insert(g_volcPendingAudio.end(), begin, begin + written * sizeof(int16_t));
                         LeaveCriticalSection(&g_volcAudioCs);

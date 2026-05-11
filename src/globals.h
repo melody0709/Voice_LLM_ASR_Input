@@ -280,7 +280,7 @@ extern bool g_baiduKeyVisible;
 extern bool g_baiduApiKeyVisible;
 extern bool g_volcKeyVisible;
 extern volc_asr::VolcSession g_volcSession;
-extern bool g_volcStreaming;
+extern std::atomic<bool> g_volcStreaming;
 extern std::thread g_volcThread;
 extern CRITICAL_SECTION g_volcAudioCs;
 extern std::vector<BYTE> g_volcPendingAudio;

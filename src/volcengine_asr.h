@@ -660,6 +660,9 @@ inline std::wstring SendAudio(VolcSession& sess, const std::vector<BYTE>& pcmChu
 
     if (err != ERROR_SUCCESS) {
         VolcDebugLog("SendAudio FAILED: err=%u", err);
+        WebSocketCloseGracefully(sess.hWebSocket);
+        sess.hWebSocket = nullptr;
+        sess.connected = false;
         return L"";
     }
 

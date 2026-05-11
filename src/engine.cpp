@@ -455,7 +455,7 @@ void CALLBACK WaveInProc(HWAVEIN waveIn, UINT msg, DWORD_PTR, DWORD_PTR param1, 
         g_audioData.insert(g_audioData.end(), begin, begin + header->dwBytesRecorded);
         LeaveCriticalSection(&g_audioLock);
 
-        if (g_volcStreaming && g_volcSession.connected) {
+        if (g_volcStreaming.load()) {
             EnterCriticalSection(&g_volcAudioCs);
             g_volcPendingAudio.insert(g_volcPendingAudio.end(), begin, begin + header->dwBytesRecorded);
             LeaveCriticalSection(&g_volcAudioCs);
