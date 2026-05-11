@@ -8,6 +8,7 @@
 #include <winhttp.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -36,6 +37,23 @@ inline std::wstring ExtractJsonStr(const std::string& json, const std::string& k
     size_t end = json.find('"', start);
     if (end == std::string::npos) return L"";
     return Utf8ToWide(json.substr(start, end - start));
+}
+
+inline int ExtractJsonInt(const std::string& json, const std::string& key, int fallback = 0) {
+    std::string search = "\"" + key + "\"";
+    size_t pos = json.find(search);
+    if (pos == std::string::npos) return fallback;
+    pos = json.find(':', pos + search.size());
+    if (pos == std::string::npos) return fallback;
+    pos++;
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) pos++;
+    if (pos >= json.size()) return fallback;
+    std::string numStr;
+    while (pos < json.size() && (json[pos] == '-' || (json[pos] >= '0' && json[pos] <= '9'))) {
+        numStr += json[pos++];
+    }
+    if (numStr.empty()) return fallback;
+    return std::stoi(numStr);
 }
 
 inline std::wstring GetMachineCuid() {
@@ -114,7 +132,7 @@ inline std::wstring HttpGet(const std::wstring& url, const std::wstring& host, I
         std::string chunk(bytesAvailable, '\0');
         DWORD bytesRead = 0;
         WinHttpReadData(hRequest, chunk.data(), bytesAvailable, &bytesRead);
-        responseBody += chunk;
+        responseBody.append(chunk.data(), bytesRead);
     }
 
     WinHttpCloseHandle(hRequest);
@@ -235,20 +253,24 @@ inline std::wstring Recognize(const std::vector<BYTE>& pcm, const BaiduConfig& c
         std::string chunk(bytesAvailable, '\0');
         DWORD bytesRead = 0;
         WinHttpReadData(hRequest, chunk.data(), bytesAvailable, &bytesRead);
-        responseBody += chunk;
+        responseBody.append(chunk.data(), bytesRead);
     }
 
     WinHttpCloseHandle(hRequest);
     WinHttpCloseHandle(hConnect);
     WinHttpCloseHandle(hSession);
 
-    std::wstring errNoStr = ExtractJsonStr(responseBody, "err_no");
-    if (errNoStr.empty()) return L"Baidu ASR error: Empty response";
+    int errNo = ExtractJsonInt(responseBody, "err_no", -1);
+    if (errNo < 0) {
+        printf("[Baidu diag] Empty/parse error response body (%zu bytes): %s\n", responseBody.size(), responseBody.c_str());
+        return L"Baidu ASR error: Empty response";
+    }
 
-    int errNo = _wtoi(errNoStr.c_str());
     if (errNo != 0) {
         std::wstring errMsg = ExtractJsonStr(responseBody, "err_msg");
-        return L"Baidu ASR error " + errNoStr + L": " + (errMsg.empty() ? L"unknown" : errMsg);
+        printf("[Baidu diag] err_no=%d err_msg='%ls' dev_pid=%d body: %s\n",
+               errNo, errMsg.c_str(), cfg.devPid, responseBody.c_str());
+        return L"Baidu ASR error " + std::to_wstring(errNo) + L": " + (errMsg.empty() ? L"unknown" : errMsg);
     }
 
     std::wstring resultText = ExtractJsonStr(responseBody, "result");
@@ -266,6 +288,10 @@ inline std::wstring Recognize(const std::vector<BYTE>& pcm, const BaiduConfig& c
                 }
             }
         }
+    }
+
+    if (resultText.empty()) {
+        printf("[Baidu diag] err_no=0 but result empty, body (%zu bytes): %s\n", responseBody.size(), responseBody.c_str());
     }
 
     return resultText;

@@ -14,6 +14,7 @@ add_executable(VoxType WIN32
     src/hud.cpp
     src/hotkey.cpp
     src/settings.cpp
+    src/wasapi_capture.cpp
     src/resources.rc
 )
 
@@ -52,5 +53,6 @@ target_link_libraries(VoxType
     winmm
     winhttp
     crypt32
+    mmdevapi
     delayimp
 )

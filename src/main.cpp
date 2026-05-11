@@ -12,6 +12,7 @@
 #include <sstream>
 #include <thread>
 #include <deque>
+#include <cstdio>
 #include <commctrl.h>
 
 #pragma comment(lib, "user32.lib")
@@ -62,6 +63,7 @@ CRITICAL_SECTION g_audioLock;
 bool g_captureActive = false;
 std::atomic<float> g_audioLevel{ 0.0f };
 float g_hudSmoothedLevel = 0.0f;
+WasapiCapture g_wasapiCapture;
 std::vector<HWND> g_recognitionControls;
 std::vector<HWND> g_shortcutControls;
 std::vector<HWND> g_llmControls;
@@ -85,6 +87,63 @@ int g_cloudProviderIdx = 0;
 HWND g_cloudAsrHintControl = nullptr;
 
 static std::deque<std::wstring> g_volcRecognitionHistory;
+
+static ULONGLONG g_sessionStartTick = 0;
+static double g_recordingMs = 0.0;
+double g_vadMs = 0.0;
+double g_asrDecodeMs = 0.0;
+double g_punctMs = 0.0;
+double g_cloudApiMs = 0.0;
+double g_llmMs = 0.0;
+std::wstring g_vadModelName;
+static std::wstring g_lastRawAsrText;
+static size_t g_lastPcmBytes = 0;
+static bool s_wasapiUsed = false;
+static std::wstring s_wasapiDeviceName;
+static UINT32 s_wasapiNativeRate = 0;
+
+static bool s_debugConsoleOpen = false;
+
+static void DebugModeOpenConsole() {
+    if (s_debugConsoleOpen) return;
+    if (!AllocConsole()) return;
+    s_debugConsoleOpen = true;
+    FILE* dummy = nullptr;
+    freopen_s(&dummy, "CONOUT$", "w", stdout);
+    freopen_s(&dummy, "CONOUT$", "w", stderr);
+    SetConsoleTitleW(L"VoxType Debug Console");
+    printf("\n--- Debug mode enabled ---\n\n");
+}
+
+static void DebugModeCloseConsole() {
+    if (!s_debugConsoleOpen) return;
+    s_debugConsoleOpen = false;
+    FreeConsole();
+}
+
+static void DebugPrintHeader(double recMs, size_t pcmBytes) {
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    printf("\n-- %02d:%02d:%02d  Rec %.1fs(%zuKB) --",
+           st.wHour, st.wMinute, st.wSecond,
+           recMs / 1000.0, (pcmBytes > 0 ? pcmBytes : static_cast<size_t>(recMs * 32)) / 1024);
+    if (s_wasapiUsed) {
+        printf(" WASAPI %ukHz->16kHz (%ls)", s_wasapiNativeRate / 1000, s_wasapiDeviceName.c_str());
+    } else {
+        printf(" waveIn 16kHz (default)");
+    }
+    printf("\n");
+}
+
+static void DebugPrintTextLine(const wchar_t* prefix, const std::wstring& text) {
+    if (text.empty()) return;
+    std::wstring oneLine = text;
+    for (auto& c : oneLine) if (c == L'\n' || c == L'\r') c = L' ';
+    std::wstring line = std::wstring(L"  ") + prefix + L": \"" + oneLine + L"\"\n";
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD written;
+    WriteConsoleW(hOut, line.c_str(), static_cast<DWORD>(line.size()), &written, nullptr);
+}
 
 static std::wstring BuildVolcContextJson() {
     if (g_volcRecognitionHistory.empty()) return L"";
@@ -154,7 +213,9 @@ void RefineWithLlmAsync(const std::wstring& asrText, const Config& config) {
     cfg.extraParams = config.llmExtraParams;
     bool debug = config.enableLlmDebug;
     std::thread([asrText, cfg, debug]() {
+        HiResTimer tLlm;
         std::wstring result = llm::Refine(asrText, cfg);
+        g_llmMs = tLlm.ElapsedMs();
         if (debug) {
             WriteLlmLog(asrText, result);
         }
@@ -167,12 +228,17 @@ void RecognizeAsync(const std::vector<BYTE>& pcm) {
 
     if (config.asrBackend == L"baidu") {
         std::thread([config, pcm]() {
+            g_lastPcmBytes = pcm.size();
+
+            HiResTimer tBaidu;
             baidu_asr::BaiduConfig bcfg;
             bcfg.apiKey = config.baiduApiKey;
             bcfg.secretKey = config.baiduSecretKey;
             bcfg.devPid = config.baiduDevPid;
 
             std::wstring text = baidu_asr::Recognize(pcm, bcfg);
+            g_cloudApiMs = tBaidu.ElapsedMs();
+
             if (text.empty()) {
                 text = L"(empty result)";
             }
@@ -184,6 +250,7 @@ void RecognizeAsync(const std::vector<BYTE>& pcm) {
                          && text.rfind(L"Baidu ASR error:", 0) != 0;
 
             if (needLlm) {
+                g_lastRawAsrText = text;
                 PostMessageW(g_mainWindow, kAsrResultMessage, 1, reinterpret_cast<LPARAM>(new std::wstring(text)));
                 RefineWithLlmAsync(text, config);
             } else {
@@ -194,8 +261,13 @@ void RecognizeAsync(const std::vector<BYTE>& pcm) {
     }
 
     std::thread([config, pcm]() {
+        g_lastPcmBytes = pcm.size();
+
+        HiResTimer tPcm;
         auto samples = PcmToFloat(pcm);
+
         std::wstring text = g_asrEngine.Recognize(samples, 16000, config);
+        // Recognize 内部已设 g_vadMs / g_asrDecodeMs / g_punctMs / g_vadModelName
         if (text.empty()) {
             text = L"(empty result)";
         }
@@ -207,6 +279,7 @@ void RecognizeAsync(const std::vector<BYTE>& pcm) {
                      && text.rfind(L"ASR failed:", 0) != 0;
 
         if (needLlm) {
+            g_lastRawAsrText = text;
             PostMessageW(g_mainWindow, kAsrResultMessage, 1, reinterpret_cast<LPARAM>(new std::wstring(text)));
             RefineWithLlmAsync(text, config);
         } else {
@@ -223,7 +296,13 @@ void StartRecordingSession() {
         if (g_hudWindow) SetTimer(g_hudWindow, kHudHideTimer, 1800, nullptr);
         return;
     }
+    g_sessionStartTick = GetTickCount64();
     g_recording = true;
+    s_wasapiUsed = g_wasapiCapture.IsInitialized();
+    if (s_wasapiUsed) {
+        s_wasapiDeviceName = g_wasapiCapture.GetDeviceName();
+        s_wasapiNativeRate = g_wasapiCapture.GetNativeSampleRate();
+    }
 
     if (g_config.asrBackend == L"volcengine") {
         const Config config = g_config;
@@ -255,6 +334,7 @@ void StartRecordingSession() {
         if (g_volcThread.joinable()) g_volcThread.join();
         g_volcThread = std::thread([vcfg, config]() {
             ULONGLONG tTotal0 = GetTickCount64();
+
             if (!volc_asr::OpenSession(g_volcSession, vcfg)) {
                 g_volcSession.connected = false;
                 std::wstring errMsg = L"VolcEngine connect failed";
@@ -354,6 +434,7 @@ void StartRecordingSession() {
                          && finalText.rfind(L"VolcEngine error", 0) != 0;
 
             if (needLlm) {
+                g_lastRawAsrText = finalText;
                 PostMessageW(g_mainWindow, kAsrResultMessage, 1,
                              reinterpret_cast<LPARAM>(new std::wstring(finalText)));
                 RefineWithLlmAsync(finalText, config);
@@ -363,6 +444,7 @@ void StartRecordingSession() {
             }
             AddVolcRecognitionHistory(finalText);
             VolcDebugLog("=== TOTAL session: %llums ===", GetTickCount64() - tTotal0);
+            g_cloudApiMs = static_cast<double>(GetTickCount64() - tTotal0) - g_recordingMs;
         });
         return;
     }
@@ -374,6 +456,14 @@ void StartRecordingSession() {
 void StopRecordingSession() {
     if (!g_recording) return;
     g_recording = false;
+    g_recordingMs = static_cast<double>(GetTickCount64() - g_sessionStartTick);
+    g_vadMs = 0.0;
+    g_asrDecodeMs = 0.0;
+    g_punctMs = 0.0;
+    g_cloudApiMs = 0.0;
+    g_llmMs = 0.0;
+    g_vadModelName.clear();
+    g_lastRawAsrText.clear();
 
     if (g_config.asrBackend == L"volcengine" && g_volcStreaming) {
         g_volcStreaming = false;
@@ -408,6 +498,9 @@ void ShowTrayMenu(HWND hwnd) {
     AppendMenuW(menu, MF_STRING | MF_GRAYED, ID_TRAY_VERSION, APP_VERSION_WSTR);
     AppendMenuW(menu, MF_STRING, ID_TRAY_SETTINGS, L"Settings...");
     AppendMenuW(menu, MF_STRING, ID_TRAY_RELOAD, L"Reload ASR Engine");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING | (g_config.enableDebugMode ? MF_CHECKED : 0),
+                ID_TRAY_DEBUG_MODE, L"Debug Mode");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, ID_TRAY_QUIT, L"Quit");
     SetForegroundWindow(hwnd);
@@ -461,8 +554,29 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             g_hudIsRefining = false;
             ShowHud(text.empty() ? L"(empty result)" : text);
             if (!text.empty() && text.rfind(L"ASR failed:", 0) != 0) {
+                HiResTimer tPaste;
                 SetClipboardText(text);
                 SendCtrlV();
+                double pasteMs = tPaste.ElapsedMs();
+
+                if (g_config.enableDebugMode) {
+                    DebugPrintHeader(g_recordingMs, g_lastPcmBytes);
+
+                    if (g_config.asrBackend == L"local") {
+                        printf("  Pipeline: ");
+                        if (g_vadMs > 0) printf("VAD(%ls) %.0f | ", g_vadModelName.c_str(), g_vadMs);
+                        printf("ASR %.0f", g_asrDecodeMs);
+                        if (g_punctMs > 0) printf(" | Punct %.0f", g_punctMs);
+                        printf(" | Paste %.0f = Total %.0fms\n", pasteMs,
+                               g_vadMs + g_asrDecodeMs + g_punctMs + pasteMs);
+                    } else {
+                        const char* backend = (g_config.asrBackend == L"baidu") ? "Baidu" : "Volcengine";
+                        printf("  Pipeline: %s %.0f | Paste %.0f = Total %.0fms\n",
+                               backend, g_cloudApiMs, pasteMs, g_cloudApiMs + pasteMs);
+                    }
+
+                    DebugPrintTextLine(L"OK", text);
+                }
             }
             if (g_hudWindow) {
                 const bool isError = text.rfind(L"ASR failed:", 0) == 0;
@@ -477,8 +591,32 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         g_hudIsRefining = false;
         ShowHud(text);
         if (!text.empty() && text.rfind(L"LLM failed:", 0) != 0) {
+            HiResTimer tPaste;
             SetClipboardText(text);
             SendCtrlV();
+            double pasteMs = tPaste.ElapsedMs();
+
+            if (g_config.enableDebugMode) {
+                DebugPrintHeader(g_recordingMs, g_lastPcmBytes);
+
+                if (g_config.asrBackend == L"local") {
+                    printf("  Pipeline: ");
+                    if (g_vadMs > 0) printf("VAD(%ls) %.0f | ", g_vadModelName.c_str(), g_vadMs);
+                    printf("ASR %.0f", g_asrDecodeMs);
+                    if (g_punctMs > 0) printf(" | Punct %.0f", g_punctMs);
+                    printf(" | LLM %.0f | Paste %.0f = Total %.0fms\n",
+                           g_llmMs, pasteMs,
+                           g_vadMs + g_asrDecodeMs + g_punctMs + g_llmMs + pasteMs);
+                } else {
+                    const char* backend = (g_config.asrBackend == L"baidu") ? "Baidu" : "Volcengine";
+                    printf("  Pipeline: %s %.0f | LLM %.0f | Paste %.0f = Total %.0fms\n",
+                           backend, g_cloudApiMs, g_llmMs, pasteMs,
+                           g_cloudApiMs + g_llmMs + pasteMs);
+                }
+
+                DebugPrintTextLine(L"ASR", g_lastRawAsrText);
+                DebugPrintTextLine(L"LLM", text);
+            }
         }
         if (g_hudWindow) {
             SetTimer(g_hudWindow, kHudHideTimer, 200, nullptr);
@@ -502,6 +640,12 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             return 0;
         case ID_TRAY_QUIT:
             DestroyWindow(hwnd);
+            return 0;
+        case ID_TRAY_DEBUG_MODE:
+            g_config.enableDebugMode = !g_config.enableDebugMode;
+            if (g_config.enableDebugMode) DebugModeOpenConsole();
+            else DebugModeCloseConsole();
+            SaveConfig();
             return 0;
         default:
             break;
@@ -573,6 +717,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     CreateUiResources();
 
     LoadConfig();
+
+    if (g_config.enableDebugMode) {
+        DebugModeOpenConsole();
+    }
 
     if (g_config.asrBackend == L"local") {
         const std::wstring modelDir = g_config.modelDir.empty() ? DefaultModelDir(g_config.modelId) : g_config.modelDir;

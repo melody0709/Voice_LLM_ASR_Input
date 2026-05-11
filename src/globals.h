@@ -18,6 +18,7 @@
 #include "llm_refine.h"
 #include "baidu_asr.h"
 #include "volcengine_asr.h"
+#include "wasapi_capture.h"
 #include "resource.h"
 
 constexpr wchar_t kAppName[] = L"VoxType";
@@ -85,6 +86,7 @@ constexpr UINT ID_TRAY_VERSION = 1001;
 constexpr UINT ID_TRAY_SETTINGS = 1002;
 constexpr UINT ID_TRAY_RELOAD = 1003;
 constexpr UINT ID_TRAY_QUIT = 1004;
+constexpr UINT ID_TRAY_DEBUG_MODE = 1005;
 
 constexpr int IDC_MODEL = 2001;
 constexpr int IDC_MODEL_DIR = 2002;
@@ -186,6 +188,9 @@ struct Config {
     std::wstring volcHotwordsName;
     std::wstring volcCorrectTableId;
     std::wstring volcCorrectTableName;
+    bool enableDebugMode = false;
+    std::wstring audioBackend = L"wasapi";
+    std::wstring audioDeviceId;
 };
 
 struct HotkeyConfig {
@@ -261,6 +266,7 @@ extern CRITICAL_SECTION g_audioLock;
 extern bool g_captureActive;
 extern std::atomic<float> g_audioLevel;
 extern float g_hudSmoothedLevel;
+extern WasapiCapture g_wasapiCapture;
 extern std::vector<HWND> g_recognitionControls;
 extern std::vector<HWND> g_shortcutControls;
 extern std::vector<HWND> g_llmControls;
@@ -285,3 +291,10 @@ extern HWND g_cloudAsrHintControl;
 
 void StartRecordingSession();
 void StopRecordingSession();
+
+extern double g_vadMs;
+extern double g_asrDecodeMs;
+extern double g_punctMs;
+extern double g_cloudApiMs;
+extern double g_llmMs;
+extern std::wstring g_vadModelName;

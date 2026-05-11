@@ -48,6 +48,20 @@ bool StartAudioCapture(std::wstring& error);
 std::vector<BYTE> StopAudioCapture();
 int ResolveThreads(const std::wstring& threads);
 
+struct HiResTimer {
+    LARGE_INTEGER freq_;
+    LARGE_INTEGER start_;
+    HiResTimer() {
+        QueryPerformanceFrequency(&freq_);
+        QueryPerformanceCounter(&start_);
+    }
+    double ElapsedMs() const {
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        return static_cast<double>(now.QuadPart - start_.QuadPart) * 1000.0 / static_cast<double>(freq_.QuadPart);
+    }
+};
+
 class AsrEngine {
 public:
     void Lock() { lock_.lock(); }

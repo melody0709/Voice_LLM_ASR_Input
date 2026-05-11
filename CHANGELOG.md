@@ -2,6 +2,26 @@
 
 > 🇨🇳 [中文版](doc/CHANGELOG_zh.md)
 
+## v0.7.3 (2026-05-11)
+
+### Added
+
+- **WASAPI Shared Mode capture**: Audio input upgraded from MME `waveIn` to WASAPI Shared Mode with custom resampling. Captures at system mix format (typically 48kHz/32bit float/stereo) and resamples to 16kHz/16bit/mono via linear interpolation. Automatic fallback to `waveIn` if WASAPI initialization fails
+- **Debug Mode**: Tray right-click checkbox to open a CMD console with real-time per-stage timing output. Covers VAD, ASR decode, punctuation, cloud API, LLM refine, and paste injection. Total excludes recording duration. P0 §3 of the optimization plan
+- **Config fields**: `audio_backend` (wasapi/waveIn) and `audio_device_id` (WASAPI device ID, empty=default) persisted in config.json
+
+### Changed
+
+- **`HiResTimer` moved** from `engine.cpp` to `engine.h` for reuse across modules
+
+### Fixed
+
+- **WASAPI lifecycle bug**: `Stop()` only stops the capture thread but does not release resources; added `Release()` for proper cleanup. Without this, the second recording would hang because `IsInitialized()` remained true
+- **WASAPI resample phase drift**: Updated phase to `m_resamplePhase -= written / m_resampleRatio` to prevent drift with non-integer sample rate ratios
+- **Baidu ASR response parsing**: `err_no` field parsed as integer instead of string comparison; added diagnostic `printf` on empty/error responses; fixed `WinHttpReadData` to only append bytes actually read (not full buffer)
+- **Debug timing state leak**: `g_vadModelName` now cleared in `StopRecordingSession()` alongside other timing variables
+- **Redundant buffer clear removed**: `WasapiCapture::Start()` no longer duplicates `g_audioData`/`g_audioLevel` clear already done by `StartAudioCapture()`
+
 ## v0.7.2 (2026-05-09)
 
 ### Fixed

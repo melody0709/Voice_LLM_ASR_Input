@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cwctype>
 #include <fstream>
 #include <sstream>
@@ -313,10 +314,11 @@ void LoadConfig() {
     g_config.llmModel = Utf8ToWide(ExtractJsonString(json, "llm_model", WideToUtf8(g_config.llmModel)));
     g_config.llmPrompt = Utf8ToWide(ExtractJsonString(json, "llm_prompt", ""));
     g_config.enableLlmDebug = ExtractJsonBool(json, "enable_llm_debug", false);
+    g_config.enableDebugMode = ExtractJsonBool(json, "enable_debug_mode", false);
     g_config.asrBackend = Utf8ToWide(ExtractJsonString(json, "asr_backend", WideToUtf8(g_config.asrBackend)));
     g_config.baiduApiKey = Utf8ToWide(ExtractJsonString(json, "baidu_api_key", ""));
     g_config.baiduSecretKey = llm::DecryptString(Utf8ToWide(ExtractJsonString(json, "baidu_secret_key", "")));
-    g_config.baiduDevPid = _wtoi(Utf8ToWide(ExtractJsonString(json, "baidu_dev_pid", "1537")).c_str());
+    g_config.baiduDevPid = ExtractJsonInt(json, "baidu_dev_pid", 1537);
     g_config.cloudProvider = Utf8ToWide(ExtractJsonString(json, "cloud_provider", "volcengine"));
     if (g_config.cloudProvider.empty()) g_config.cloudProvider = L"volcengine";
     g_config.volcApiKey = llm::DecryptString(Utf8ToWide(ExtractJsonString(json, "volc_api_key", "")));
@@ -342,6 +344,8 @@ void LoadConfig() {
     g_config.volcHotwordsName = Utf8ToWide(ExtractJsonString(json, "volc_hotwords_name", ""));
     g_config.volcCorrectTableId = Utf8ToWide(ExtractJsonString(json, "volc_correct_table_id", ""));
     g_config.volcCorrectTableName = Utf8ToWide(ExtractJsonString(json, "volc_correct_table_name", ""));
+    g_config.audioBackend = Utf8ToWide(ExtractJsonString(json, "audio_backend", WideToUtf8(g_config.audioBackend)));
+    g_config.audioDeviceId = Utf8ToWide(ExtractJsonString(json, "audio_device_id", ""));
     if (g_config.modelDir.empty()) {
         g_config.modelDir = DefaultModelDir(g_config.modelId);
     }
@@ -381,6 +385,7 @@ void SaveConfig() {
          << "  \"llm_model\": \"" << EscapeJson(g_config.llmModel) << "\",\n"
          << "  \"llm_prompt\": \"" << EscapeJson(g_config.llmPrompt) << "\",\n"
          << "  \"enable_llm_debug\": " << (g_config.enableLlmDebug ? "true" : "false") << ",\n"
+         << "  \"enable_debug_mode\": " << (g_config.enableDebugMode ? "true" : "false") << ",\n"
          << "  \"asr_backend\": \"" << EscapeJson(g_config.asrBackend) << "\",\n"
          << "  \"baidu_api_key\": \"" << EscapeJson(g_config.baiduApiKey) << "\",\n"
          << "  \"baidu_secret_key\": \"" << EscapeJson(llm::EncryptString(g_config.baiduSecretKey)) << "\",\n"
@@ -404,7 +409,9 @@ void SaveConfig() {
          << "  \"volc_hotwords_id\": \"" << EscapeJson(g_config.volcHotwordsId) << "\",\n"
          << "  \"volc_hotwords_name\": \"" << EscapeJson(g_config.volcHotwordsName) << "\",\n"
          << "  \"volc_correct_table_id\": \"" << EscapeJson(g_config.volcCorrectTableId) << "\",\n"
-         << "  \"volc_correct_table_name\": \"" << EscapeJson(g_config.volcCorrectTableName) << "\"\n"
+         << "  \"volc_correct_table_name\": \"" << EscapeJson(g_config.volcCorrectTableName) << "\",\n"
+         << "  \"audio_backend\": \"" << EscapeJson(g_config.audioBackend) << "\",\n"
+         << "  \"audio_device_id\": \"" << EscapeJson(g_config.audioDeviceId) << "\"\n"
          << "}\n";
 }
 
@@ -462,13 +469,27 @@ void CALLBACK WaveInProc(HWAVEIN waveIn, UINT msg, DWORD_PTR, DWORD_PTR param1, 
 }
 
 bool StartAudioCapture(std::wstring& error) {
-    if (g_waveIn) return true;
+    if (g_waveIn || g_wasapiCapture.IsInitialized()) return true;
 
     g_audioLevel.store(0.0f);
     g_hudSmoothedLevel = 0.0f;
     EnterCriticalSection(&g_audioLock);
     g_audioData.clear();
     LeaveCriticalSection(&g_audioLock);
+
+    if (g_config.audioBackend == L"wasapi") {
+        if (g_wasapiCapture.Init(g_config.audioDeviceId)) {
+            if (g_wasapiCapture.Start(error)) {
+                g_captureActive = true;
+                return true;
+            }
+            printf("[Audio] WASAPI Start failed: %ls\n", error.c_str());
+            g_wasapiCapture.Release();
+            error.clear();
+        } else {
+            printf("[Audio] WASAPI Init failed, falling back to waveIn\n");
+        }
+    }
 
     WAVEFORMATEX format = {};
     format.wFormatTag = WAVE_FORMAT_PCM;
@@ -511,7 +532,11 @@ bool StartAudioCapture(std::wstring& error) {
 }
 
 std::vector<BYTE> StopAudioCapture() {
-    if (g_waveIn) {
+    if (g_wasapiCapture.IsInitialized()) {
+        g_captureActive = false;
+        g_wasapiCapture.Stop();
+        g_wasapiCapture.Release();
+    } else if (g_waveIn) {
         g_captureActive = false;
         waveInStop(g_waveIn);
         waveInReset(g_waveIn);
@@ -655,11 +680,17 @@ std::wstring AsrEngine::Recognize(const std::vector<float>& samples, int sampleR
     std::vector<float> workSamples = samples;
 
     if (config.enableVad && workSamples.size() > 0) {
+        HiResTimer tVad;
         if (config.vadModel == L"firered") {
             std::lock_guard<std::mutex> g(lock_);
             if (EnsureFireRedVad()) {
                 fireRedVad->Reset();
                 bool hasSpeech = fireRedVad->Process(workSamples.data(), static_cast<int>(workSamples.size()));
+                double ms = tVad.ElapsedMs();
+                if (config.enableDebugMode) {
+                    g_vadMs = ms;
+                    g_vadModelName = L"FireRed";
+                }
                 if (!hasSpeech) return L"";
             }
         } else {
@@ -673,6 +704,12 @@ std::wstring AsrEngine::Recognize(const std::vector<float>& samples, int sampleR
                 }
                 vad->Flush();
 
+                double ms = tVad.ElapsedMs();
+                if (config.enableDebugMode) {
+                    g_vadMs = ms;
+                    g_vadModelName = L"Silero";
+                }
+
                 if (!vad->IsEmpty()) {
                     auto seg = vad->Front();
                     workSamples = std::move(seg.samples);
@@ -685,23 +722,29 @@ std::wstring AsrEngine::Recognize(const std::vector<float>& samples, int sampleR
 
     std::wstring text;
     {
+        HiResTimer tAsr;
         std::lock_guard<std::mutex> g(lock_);
         auto stream = recognizer->CreateStream();
         stream.AcceptWaveform(sampleRate, workSamples.data(), static_cast<int32_t>(workSamples.size()));
         recognizer->Decode(&stream);
         auto result = recognizer->GetResult(&stream);
         text = Utf8ToWide(result.text);
+        double ms = tAsr.ElapsedMs();
+        if (config.enableDebugMode) g_asrDecodeMs = ms;
     }
 
     if (text == L"<sil>" || text == L"<blk>") return L"";
 
     if (config.postprocess == L"itn" || config.postprocess == L"punct" || config.postprocess == L"llm") {
+        HiResTimer tPunct;
         std::lock_guard<std::mutex> g(lock_);
         if (EnsurePunctuation(threads)) {
             std::string utf8 = WideToUtf8(text);
             std::string punctuated = punctuation->AddPunctuation(utf8);
             text = Utf8ToWide(punctuated);
         }
+        double ms = tPunct.ElapsedMs();
+        if (config.enableDebugMode) g_punctMs = ms;
     }
 
     return text;

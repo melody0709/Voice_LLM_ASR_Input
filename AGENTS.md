@@ -51,6 +51,8 @@ Windows 11 本地 CPU 语音输入工具：托盘常驻，按住快捷键录音�
 - `ExtractJsonStr` 处理 `\\"` 时不能只看前一个字符，必须统计连续反斜杠数量——偶数个后的 `"` 是结束符。
 - 火山引擎 WebSocket `connected` 必须用 `std::atomic<bool>`，不能用 `volatile bool`。
 - 火山引擎 `context` 字段值必须是 JSON 字符串（内部引号转义），不能是原始 JSON 对象。
+- WASAPI 生命周期必须是 `Init → Start → Stop → Release`，`Stop()` 只停线程不清资源，没有 `Release()` 第二次录音会卡死。`Init()` 成功但 `Start()` 失败时也必须 `Release()`。
+- WASAPI 重采样相位更新必须用 `m_resamplePhase -= written / m_resampleRatio`（实际消耗的源样本数），不能用 `m_resamplePhase -= numFrames`（输入帧数），否则非整数采样率比会越界。
 
 ## 后续优先级
 

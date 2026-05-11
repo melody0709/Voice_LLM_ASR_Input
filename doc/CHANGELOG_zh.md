@@ -2,6 +2,26 @@
 
 > 🇬🇧 [English](../CHANGELOG.md)
 
+## v0.7.3 (2026-05-11)
+
+### 新增
+
+- **WASAPI Shared Mode 录音**：音频输入从 MME `waveIn` 升级到 WASAPI Shared Mode + 自定义重采样。以系统混合格式（通常 48kHz/32bit float/立体声）捕获，通过线性插值重采样到 16kHz/16bit/单声道。WASAPI 初始化失败时自动 fallback 到 `waveIn`
+- **Debug Mode**：托盘右键 checkbox 打开 CMD 控制台，每次识别实时打印各阶段耗时。覆盖 VAD、ASR 解码、标点、云端 API、LLM 纠错、粘贴注入。Total 不含录制时长。对应优化方案 P0 §3
+- **Config 字段**：`audio_backend`（wasapi/waveIn）和 `audio_device_id`（WASAPI 设备 ID，空=默认）持久化到 config.json
+
+### 变更
+
+- **`HiResTimer` 移至 `engine.h`**：供跨模块复用
+
+### 修复
+
+- **WASAPI 生命周期 bug**：`Stop()` 仅停线程不清资源，新增 `Release()` 完整清理。缺少此步会导致第二次录音卡死
+- **WASAPI 重采样相位漂移**：相位更新改为 `m_resamplePhase -= written / m_resampleRatio`，修复非整数倍采样率比下的越界问题
+- **百度 ASR 响应解析**：`err_no` 字段改为整数解析；空响应/错误响应增加诊断 `printf`；`WinHttpReadData` 仅追加实际读取的字节
+- **Debug 计时状态清理**：`StopRecordingSession()` 中增补 `g_vadModelName.clear()`
+- **移除重复清空**：`WasapiCapture::Start()` 不再重复清空 `g_audioData`/`g_audioLevel`（`StartAudioCapture()` 已统一处理）
+
 ## v0.7.2 (2026-05-09)
 
 ### 修复

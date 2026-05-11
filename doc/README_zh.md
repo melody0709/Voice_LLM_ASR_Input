@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  当前版本：<code>v0.7.2</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
+  当前版本：<code>v0.7.3</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -185,6 +185,8 @@ CHANGELOG.md        — 版本变更记录
 详见 [CHANGELOG.md](CHANGELOG.md)
 
 **最近更新：**
+- **v0.7.3** — WASAPI Shared Mode 录音（48kHz→16kHz 重采样 + waveIn 降级）、Debug Mode 控制台每阶段计时、百度 ASR 响应解析修复
+
 - **v0.7.2** — 线程安全修复（火山引擎线程 join、百度 Token mutex、VolcDebugLog mutex）、SSL 证书验证恢复、`g_volcAudioCs` 泄漏修复、工具函数去重到 `utils.h`、模型下载器异步化、`AsrEngine::lock` 封装
 - **v0.7.1** — `bigmodel_nostream` 加速（跳过中间接收）、WinHTTP 连接复用、`ExtractJsonStr` 转义修复、线程安全修复
 - **v0.7.0** — 火山引擎 ASR 全参数支持、热词/替换词表、对话上下文、`corpus` 合并修复、`context` 格式修复
