@@ -80,6 +80,9 @@ constexpr COLORREF DividerColor = RGB(226, 232, 240);
 constexpr COLORREF HintTextColor = RGB(120, 130, 145);
 constexpr int RowInputY(int row) { return FirstRowY + row * RowHeight; }
 constexpr int RowLabelY(int row) { return FirstRowY + LabelYOffset + row * RowHeight; }
+// UiStyle constants are designed for 150% DPI (144 dpi).
+// Scale = DpiScaleForWindow * 96/144; S() converts design px to physical px.
+extern float Scale;
 }
 
 constexpr UINT ID_TRAY_VERSION = 1001;

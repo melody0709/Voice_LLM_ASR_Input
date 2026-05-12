@@ -23,6 +23,21 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "imm32.lib")
 
+#ifndef WM_DPICHANGED
+#define WM_DPICHANGED 0x02E0
+#endif
+
+float UiStyle::Scale = 1.0f;
+
+namespace {
+void UpdateUiScale(HWND hwnd) {
+    UiStyle::Scale = DpiScaleForWindow(hwnd) * 96.0f / 144.0f;
+}
+int S(int px) {
+    return DipToPx(static_cast<float>(px), UiStyle::Scale);
+}
+}
+
 void SetStatus(HWND hwnd, const std::wstring& text) {
     SetWindowTextW(GetDlgItem(hwnd, IDC_STATUS), text.c_str());
 }
@@ -252,30 +267,30 @@ void ShowSettingsPage(HWND hwnd, int page) {
 void LayoutSettingsWindow(HWND hwnd) {
     RECT rc;
     GetClientRect(hwnd, &rc);
-    const int margin = UiStyle::Margin;
-    const int footerHeight = UiStyle::FooterHeight;
-    const int footerTop = (rc.bottom - footerHeight > UiStyle::FooterMinTop) ? rc.bottom - footerHeight : UiStyle::FooterMinTop;
-    const int tabBottom = footerTop - 4;
+    const int margin = S(UiStyle::Margin);
+    const int footerHeight = S(UiStyle::FooterHeight);
+    const int footerTop = (rc.bottom - footerHeight > S(UiStyle::FooterMinTop)) ? rc.bottom - footerHeight : S(UiStyle::FooterMinTop);
+    const int tabBottom = footerTop - S(4);
     HWND tab = GetDlgItem(hwnd, IDC_SETTINGS_TAB);
     if (tab) {
-        MoveWindow(tab, margin, 12, rc.right - margin * 2, tabBottom - 12, TRUE);
+        MoveWindow(tab, margin, S(12), rc.right - margin * 2, tabBottom - S(12), TRUE);
     }
     const int availableFooterH = rc.bottom - footerTop;
-    const int btnY = footerTop + (availableFooterH - UiStyle::ActionBtnH) / 2;
+    const int btnY = footerTop + (availableFooterH - S(UiStyle::ActionBtnH)) / 2;
     HWND status = GetDlgItem(hwnd, IDC_STATUS);
     if (status) {
-        MoveWindow(status, margin, btnY + 4, rc.right - margin * 2 - 300, 28, TRUE);
+        MoveWindow(status, margin, btnY + S(4), rc.right - margin * 2 - S(300), S(28), TRUE);
     }
     HWND save = GetDlgItem(hwnd, IDC_SAVE);
     HWND close = GetDlgItem(hwnd, IDC_CANCEL);
-    if (save) MoveWindow(save, rc.right - margin - 192, btnY, UiStyle::FooterBtnW, UiStyle::ActionBtnH, TRUE);
-    if (close) MoveWindow(close, rc.right - margin - UiStyle::FooterBtnW, btnY, UiStyle::FooterBtnW, UiStyle::ActionBtnH, TRUE);
+    if (save) MoveWindow(save, rc.right - margin - S(192), btnY, S(UiStyle::FooterBtnW), S(UiStyle::ActionBtnH), TRUE);
+    if (close) MoveWindow(close, rc.right - margin - S(UiStyle::FooterBtnW), btnY, S(UiStyle::FooterBtnW), S(UiStyle::ActionBtnH), TRUE);
     if (g_cloudAsrHintControl) {
         RECT tabRc;
         GetWindowRect(tab, &tabRc);
         MapWindowPoints(nullptr, hwnd, reinterpret_cast<LPPOINT>(&tabRc), 2);
-        const int hintY = tabRc.bottom - UiStyle::LabelH - 4;
-        SetWindowPos(g_cloudAsrHintControl, nullptr, UiStyle::ContentLeft, hintY, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+        const int hintY = tabRc.bottom - S(UiStyle::LabelH) - S(4);
+        SetWindowPos(g_cloudAsrHintControl, nullptr, S(UiStyle::ContentLeft), hintY, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
     }
 }
 
@@ -1087,6 +1102,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         return reinterpret_cast<LRESULT>(g_settingsBgBrush);
     }
     case WM_CREATE: {
+        UpdateUiScale(hwnd);
         SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(g_appIcon));
         SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(g_appIcon));
         g_recognitionControls.clear();
@@ -1098,7 +1114,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         g_volcengineControls.clear();
 
         HWND tab = CreateWindowW(WC_TABCONTROLW, nullptr, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
-                                UiStyle::Margin, 16, 786, 330, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_TAB)), g_instance, nullptr);
+                                S(UiStyle::Margin), S(16), S(786), S(330), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_TAB)), g_instance, nullptr);
         ApplyUiFont(tab);
         TCITEMW item = {};
         item.mask = TCIF_TEXT;
@@ -1111,131 +1127,131 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         item.pszText = const_cast<LPWSTR>(L"LLM Prompt");
         TabCtrl_InsertItem(tab, 3, &item);
 
-        HWND control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(0), UiStyle::LabelWidth, UiStyle::LabelH, L"ASR Backend");
+        HWND control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(0)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"ASR Backend");
         AddRecognitionControl(control);
-        AddRecognitionControl(CreateCombo(hwnd, IDC_ASR_BACKEND, UiStyle::InputLeft, UiStyle::RowInputY(0), 330, UiStyle::ComboH));
+        AddRecognitionControl(CreateCombo(hwnd, IDC_ASR_BACKEND, S(UiStyle::InputLeft), S(UiStyle::RowInputY(0)), S(330), S(UiStyle::ComboH)));
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(1), UiStyle::LabelWidth, UiStyle::LabelH, L"ASR model");
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(1)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"ASR model");
         AddRecognitionControl(control);
-        AddRecognitionControl(CreateCombo(hwnd, IDC_MODEL, UiStyle::InputLeft, UiStyle::RowInputY(1), 330, 180));
-        AddRecognitionControl(CreateButton(hwnd, IDC_DOWNLOAD_MODELS, UiStyle::InputLeft + 350, UiStyle::RowInputY(1) - 1, 220, UiStyle::BtnH, L"Download Local Model"));
+        AddRecognitionControl(CreateCombo(hwnd, IDC_MODEL, S(UiStyle::InputLeft), S(UiStyle::RowInputY(1)), S(330), S(180)));
+        AddRecognitionControl(CreateButton(hwnd, IDC_DOWNLOAD_MODELS, S(UiStyle::InputLeft) + S(350), S(UiStyle::RowInputY(1)) - S(1), S(220), S(UiStyle::BtnH), L"Download Local Model"));
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(2), UiStyle::LabelWidth, UiStyle::LabelH, L"Model folder");
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(2)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Model folder");
         AddRecognitionControl(control);
         HWND modelDir = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                                        UiStyle::InputLeft, UiStyle::RowInputY(2), UiStyle::InputW, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_MODEL_DIR)), g_instance, nullptr);
+                                        S(UiStyle::InputLeft), S(UiStyle::RowInputY(2)), S(UiStyle::InputW), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_MODEL_DIR)), g_instance, nullptr);
         ApplyUiFont(modelDir);
         AddRecognitionControl(modelDir);
-        AddRecognitionControl(CreateButton(hwnd, IDC_BROWSE, UiStyle::SideBtnX, UiStyle::RowInputY(2) - 1, UiStyle::SideBtnW, UiStyle::BtnH, L"Browse..."));
+        AddRecognitionControl(CreateButton(hwnd, IDC_BROWSE, S(UiStyle::SideBtnX), S(UiStyle::RowInputY(2)) - S(1), S(UiStyle::SideBtnW), S(UiStyle::BtnH), L"Browse..."));
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(3), UiStyle::LabelWidth, UiStyle::LabelH, L"Threads");
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(3)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Threads");
         AddRecognitionControl(control);
-        AddRecognitionControl(CreateCombo(hwnd, IDC_THREADS, UiStyle::InputLeft, UiStyle::RowInputY(3), 130, UiStyle::ComboH));
+        AddRecognitionControl(CreateCombo(hwnd, IDC_THREADS, S(UiStyle::InputLeft), S(UiStyle::RowInputY(3)), S(130), S(UiStyle::ComboH)));
         HWND vad = CreateWindowW(L"BUTTON", L"Enable VAD", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                 358, UiStyle::RowInputY(3) + 4, 140, UiStyle::LabelH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VAD)), g_instance, nullptr);
+                                 S(358), S(UiStyle::RowInputY(3)) + S(4), S(140), S(UiStyle::LabelH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VAD)), g_instance, nullptr);
         HWND partial = CreateWindowW(L"BUTTON", L"Partial result", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                     518, UiStyle::RowInputY(3) + 4, 160, UiStyle::LabelH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PARTIAL)), g_instance, nullptr);
+                                     S(518), S(UiStyle::RowInputY(3)) + S(4), S(160), S(UiStyle::LabelH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PARTIAL)), g_instance, nullptr);
         ApplyUiFont(vad);
         ApplyUiFont(partial);
         AddRecognitionControl(vad);
         AddRecognitionControl(partial);
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(4), UiStyle::LabelWidth, UiStyle::LabelH, L"VAD model");
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(4)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"VAD model");
         AddRecognitionControl(control);
-        AddRecognitionControl(CreateCombo(hwnd, IDC_VAD_MODEL, UiStyle::InputLeft, UiStyle::RowInputY(4), UiStyle::ComboW, UiStyle::ComboH));
+        AddRecognitionControl(CreateCombo(hwnd, IDC_VAD_MODEL, S(UiStyle::InputLeft), S(UiStyle::RowInputY(4)), S(UiStyle::ComboW), S(UiStyle::ComboH)));
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(5), UiStyle::LabelWidth, UiStyle::LabelH, L"Punctuation");
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(5)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Punctuation");
         AddRecognitionControl(control);
-        AddRecognitionControl(CreateCombo(hwnd, IDC_POSTPROCESS, UiStyle::InputLeft, UiStyle::RowInputY(5), UiStyle::ComboW, UiStyle::ComboH));
+        AddRecognitionControl(CreateCombo(hwnd, IDC_POSTPROCESS, S(UiStyle::InputLeft), S(UiStyle::RowInputY(5)), S(UiStyle::ComboW), S(UiStyle::ComboH)));
 
-        const int shortcutY = UiStyle::RowInputY(6);
+        const int shortcutY = S(UiStyle::RowInputY(6));
         HWND shortcutGroup = CreateWindowW(L"BUTTON", L"Shortcut", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-                                           30, shortcutY, 788, 170, hwnd, nullptr, g_instance, nullptr);
+                                           S(30), shortcutY, S(788), S(170), hwnd, nullptr, g_instance, nullptr);
         ApplyUiFont(shortcutGroup);
         AddRecognitionControl(shortcutGroup);
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, shortcutY + 28, UiStyle::LabelWidth, UiStyle::LabelH, L"Hold hotkey");
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), shortcutY + S(28), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Hold hotkey");
         AddRecognitionControl(control);
-        AddRecognitionControl(CreateHotkeyEdit(hwnd, IDC_HOTKEY, UiStyle::InputLeft, shortcutY + 20, 300, UiStyle::HotkeyEditH, CurrentConfiguredHotkey()));
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, shortcutY + 68, 740, UiStyle::LabelH, L"Click the field, then press the key or key combination to use while recording.");
+        AddRecognitionControl(CreateHotkeyEdit(hwnd, IDC_HOTKEY, S(UiStyle::InputLeft), shortcutY + S(20), S(300), S(UiStyle::HotkeyEditH), CurrentConfiguredHotkey()));
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), shortcutY + S(68), S(740), S(UiStyle::LabelH), L"Click the field, then press the key or key combination to use while recording.");
         AddRecognitionControl(control);
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, shortcutY + 98, 740, UiStyle::LabelH, L"Esc cancels recording a shortcut. Backspace/Delete clears it.");
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), shortcutY + S(98), S(740), S(UiStyle::LabelH), L"Esc cancels recording a shortcut. Backspace/Delete clears it.");
         AddRecognitionControl(control);
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(0), UiStyle::LabelWidth, UiStyle::LabelH, L"Provider");
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(0)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Provider");
         AddLlmControl(control);
-        AddLlmControl(CreateCombo(hwnd, IDC_LLM_PROVIDER, UiStyle::InputLeft, UiStyle::RowInputY(0), 480, 400));
-        AddLlmControl(CreateButton(hwnd, IDC_LLM_PROVIDER_ADD, UiStyle::SideBtnX, UiStyle::RowInputY(0) - 1, 44, UiStyle::BtnH, L"+"));
-        AddLlmControl(CreateButton(hwnd, IDC_LLM_PROVIDER_DEL, UiStyle::SideBtnX + 48, UiStyle::RowInputY(0) - 1, 44, UiStyle::BtnH, L"\u2212"));
+        AddLlmControl(CreateCombo(hwnd, IDC_LLM_PROVIDER, S(UiStyle::InputLeft), S(UiStyle::RowInputY(0)), S(480), S(400)));
+        AddLlmControl(CreateButton(hwnd, IDC_LLM_PROVIDER_ADD, S(UiStyle::SideBtnX), S(UiStyle::RowInputY(0)) - S(1), S(44), S(UiStyle::BtnH), L"+"));
+        AddLlmControl(CreateButton(hwnd, IDC_LLM_PROVIDER_DEL, S(UiStyle::SideBtnX) + S(48), S(UiStyle::RowInputY(0)) - S(1), S(44), S(UiStyle::BtnH), L"\u2212"));
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(1), UiStyle::LabelWidth, UiStyle::LabelH, L"API Base URL");
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(1)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"API Base URL");
         AddLlmControl(control);
         HWND llmEndpoint = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                                           UiStyle::InputLeft, UiStyle::RowInputY(1), UiStyle::InputWFull, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_ENDPOINT)), g_instance, nullptr);
+                                           S(UiStyle::InputLeft), S(UiStyle::RowInputY(1)), S(UiStyle::InputWFull), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_ENDPOINT)), g_instance, nullptr);
         ApplyUiFont(llmEndpoint);
         AddLlmControl(llmEndpoint);
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(2), UiStyle::LabelWidth, UiStyle::LabelH, L"API Key");
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(2)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"API Key");
         AddLlmControl(control);
         HWND llmKey = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD,
-                                      UiStyle::InputLeft, UiStyle::RowInputY(2), UiStyle::InputW, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_KEY)), g_instance, nullptr);
+                                      S(UiStyle::InputLeft), S(UiStyle::RowInputY(2)), S(UiStyle::InputW), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_KEY)), g_instance, nullptr);
         ApplyUiFont(llmKey);
         AddLlmControl(llmKey);
-        AddLlmControl(CreateButton(hwnd, IDC_LLM_SHOW_KEY, UiStyle::SideBtnX, UiStyle::RowInputY(2) - 1, UiStyle::SideBtnW, UiStyle::BtnH, L"Show"));
+        AddLlmControl(CreateButton(hwnd, IDC_LLM_SHOW_KEY, S(UiStyle::SideBtnX), S(UiStyle::RowInputY(2)) - S(1), S(UiStyle::SideBtnW), S(UiStyle::BtnH), L"Show"));
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(3), UiStyle::LabelWidth, UiStyle::LabelH, L"Model");
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(3)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Model");
         AddLlmControl(control);
         HWND llmModel = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                                        UiStyle::InputLeft, UiStyle::RowInputY(3), UiStyle::InputWFull, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_MODEL)), g_instance, nullptr);
+                                        S(UiStyle::InputLeft), S(UiStyle::RowInputY(3)), S(UiStyle::InputWFull), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_MODEL)), g_instance, nullptr);
         ApplyUiFont(llmModel);
         AddLlmControl(llmModel);
 
-        AddLlmControl(CreateButton(hwnd, IDC_LLM_TEST, UiStyle::InputLeft, UiStyle::RowInputY(4), UiStyle::ActionBtnW, UiStyle::ActionBtnH, L"Test Connection"));
+        AddLlmControl(CreateButton(hwnd, IDC_LLM_TEST, S(UiStyle::InputLeft), S(UiStyle::RowInputY(4)), S(UiStyle::ActionBtnW), S(UiStyle::ActionBtnH), L"Test Connection"));
         HWND llmDebug = CreateWindowW(L"BUTTON", L"Log refine before/after", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                      348, UiStyle::RowInputY(4) + 6, 220, UiStyle::CheckH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_DEBUG)), g_instance, nullptr);
+                                      S(348), S(UiStyle::RowInputY(4)) + S(6), S(220), S(UiStyle::CheckH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_DEBUG)), g_instance, nullptr);
         ApplyUiFont(llmDebug);
         AddLlmControl(llmDebug);
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(5), UiStyle::LabelWidth, UiStyle::LabelH, L"Extra Params");
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(5)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Extra Params");
         AddLlmControl(control);
         HWND llmExtra = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                                        UiStyle::InputLeft, UiStyle::RowInputY(5), UiStyle::InputW, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_EXTRA)), g_instance, nullptr);
+                                        S(UiStyle::InputLeft), S(UiStyle::RowInputY(5)), S(UiStyle::InputW), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_EXTRA)), g_instance, nullptr);
         ApplyUiFont(llmExtra);
         AddLlmControl(llmExtra);
-        AddLlmControl(CreateButton(hwnd, IDC_LLM_EXTRA_RESET, UiStyle::SideBtnX, UiStyle::RowInputY(5) - 1, UiStyle::SideBtnW, UiStyle::BtnH, L"Reset"));
+        AddLlmControl(CreateButton(hwnd, IDC_LLM_EXTRA_RESET, S(UiStyle::SideBtnX), S(UiStyle::RowInputY(5)) - S(1), S(UiStyle::SideBtnW), S(UiStyle::BtnH), L"Reset"));
         {
             HWND hint = CreateWindowW(L"STATIC",
                 L"JSON snippet merged into request body. e.g. \"thinking\":{\"type\":\"disabled\"}",
-                WS_CHILD | WS_VISIBLE, UiStyle::InputLeft, UiStyle::RowInputY(5) + UiStyle::EditH + 2, UiStyle::InputW, 20, hwnd, nullptr, g_instance, nullptr);
+                WS_CHILD | WS_VISIBLE, S(UiStyle::InputLeft), S(UiStyle::RowInputY(5)) + S(UiStyle::EditH) + S(2), S(UiStyle::InputW), S(20), hwnd, nullptr, g_instance, nullptr);
             ApplyUiFont(hint);
             AddLlmControl(hint);
         }
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(0), UiStyle::LabelWidth, UiStyle::LabelH, L"Preset");
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(0)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Preset");
         AddPromptControl(control);
-        AddPromptControl(CreateCombo(hwnd, IDC_LLM_PRESET_COMBO, UiStyle::InputLeft, UiStyle::RowInputY(0), 220, 200));
+        AddPromptControl(CreateCombo(hwnd, IDC_LLM_PRESET_COMBO, S(UiStyle::InputLeft), S(UiStyle::RowInputY(0)), S(220), S(200)));
 
         control = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE,
-                                UiStyle::ContentLeft, UiStyle::RowInputY(0) + UiStyle::EditH + 4,
-                                UiStyle::InputWFull + UiStyle::InputLeft - UiStyle::ContentLeft, 40,
+                                S(UiStyle::ContentLeft), S(UiStyle::RowInputY(0)) + S(UiStyle::EditH) + S(4),
+                                S(UiStyle::InputWFull) + S(UiStyle::InputLeft) - S(UiStyle::ContentLeft), S(40),
                                 hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_PRESET_DESC)), g_instance, nullptr);
         ApplyUiFont(control);
         AddPromptControl(control);
 
-        const int groupBoxY = UiStyle::RowInputY(0) + UiStyle::EditH + 4 + 40 + 8;
+        const int groupBoxY = S(UiStyle::RowInputY(0)) + S(UiStyle::EditH) + S(4) + S(40) + S(8);
         HWND promptGroup = CreateWindowW(L"BUTTON", L"System Prompt",
                                           WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-                                          30, groupBoxY, 788, 400,
+                                          S(30), groupBoxY, S(788), S(400),
                                           hwnd, nullptr, g_instance, nullptr);
         ApplyUiFont(promptGroup);
         AddPromptControl(promptGroup);
 
-        const int promptEditY = groupBoxY + 28;
-        const int editWidth = 788 - (UiStyle::ContentLeft - 30) - 8;
-        const int editHeight = 400 - 28 - 8 - 48 - 4;
+        const int promptEditY = groupBoxY + S(28);
+        const int editWidth = S(788) - (S(UiStyle::ContentLeft) - S(30)) - S(8);
+        const int editHeight = S(400) - S(28) - S(8) - S(48) - S(4);
         HWND llmPrompt = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr,
                                           WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_WANTRETURN,
-                                          UiStyle::ContentLeft, promptEditY,
+                                          S(UiStyle::ContentLeft), promptEditY,
                                           editWidth, editHeight,
                                           hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_PROMPT)), g_instance, nullptr);
         ApplyUiFont(llmPrompt);
@@ -1244,164 +1260,164 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         control = CreateWindowW(L"STATIC",
                                 L"Note: System Prompt only takes effect when Punctuation is set to \"Auto punctuate + LLM\" in the Recognition tab.",
                                 WS_CHILD | WS_VISIBLE,
-                                UiStyle::ContentLeft, promptEditY + editHeight + 4,
-                                editWidth, 48,
+                                S(UiStyle::ContentLeft), promptEditY + editHeight + S(4),
+                                editWidth, S(48),
                                 hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LLM_PROMPT_HINT)), g_instance, nullptr);
         ApplyUiFont(control);
         AddPromptControl(control);
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(0), UiStyle::LabelWidth, UiStyle::LabelH, L"Provider");
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(0)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Provider");
         AddCloudAsrControl(control);
-        AddCloudAsrControl(CreateCombo(hwnd, IDC_CLOUD_PROVIDER, UiStyle::InputLeft, UiStyle::RowInputY(0), 300, UiStyle::ComboH));
+        AddCloudAsrControl(CreateCombo(hwnd, IDC_CLOUD_PROVIDER, S(UiStyle::InputLeft), S(UiStyle::RowInputY(0)), S(300), S(UiStyle::ComboH)));
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(1), UiStyle::LabelWidth, UiStyle::LabelH, L"API Key");
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(1)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"API Key");
         AddBaiduControl(control);
         HWND baiduApiKey = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD,
-                                           UiStyle::InputLeft, UiStyle::RowInputY(1), 330, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_BAIDU_API_KEY)), g_instance, nullptr);
+                                           S(UiStyle::InputLeft), S(UiStyle::RowInputY(1)), S(330), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_BAIDU_API_KEY)), g_instance, nullptr);
         ApplyUiFont(baiduApiKey);
         AddBaiduControl(baiduApiKey);
-        AddBaiduControl(CreateButton(hwnd, IDC_BAIDU_SHOW_API_KEY, UiStyle::SmallBtnX, UiStyle::RowInputY(1) - 1, UiStyle::SmallBtnW, UiStyle::BtnH, L"Show"));
+        AddBaiduControl(CreateButton(hwnd, IDC_BAIDU_SHOW_API_KEY, S(UiStyle::SmallBtnX), S(UiStyle::RowInputY(1)) - S(1), S(UiStyle::SmallBtnW), S(UiStyle::BtnH), L"Show"));
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(2), UiStyle::LabelWidth, UiStyle::LabelH, L"Secret Key");
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(2)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Secret Key");
         AddBaiduControl(control);
         HWND baiduSecretKey = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD,
-                                              UiStyle::InputLeft, UiStyle::RowInputY(2), 330, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_BAIDU_SECRET_KEY)), g_instance, nullptr);
+                                              S(UiStyle::InputLeft), S(UiStyle::RowInputY(2)), S(330), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_BAIDU_SECRET_KEY)), g_instance, nullptr);
         ApplyUiFont(baiduSecretKey);
         AddBaiduControl(baiduSecretKey);
-        AddBaiduControl(CreateButton(hwnd, IDC_BAIDU_SHOW_KEY, UiStyle::SmallBtnX, UiStyle::RowInputY(2) - 1, UiStyle::SmallBtnW, UiStyle::BtnH, L"Show"));
+        AddBaiduControl(CreateButton(hwnd, IDC_BAIDU_SHOW_KEY, S(UiStyle::SmallBtnX), S(UiStyle::RowInputY(2)) - S(1), S(UiStyle::SmallBtnW), S(UiStyle::BtnH), L"Show"));
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(3), UiStyle::LabelWidth, UiStyle::LabelH, L"Language Model");
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(3)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Language Model");
         AddBaiduControl(control);
-        AddBaiduControl(CreateCombo(hwnd, IDC_BAIDU_DEV_PID, UiStyle::InputLeft, UiStyle::RowInputY(3), UiStyle::ComboW, UiStyle::ComboH));
+        AddBaiduControl(CreateCombo(hwnd, IDC_BAIDU_DEV_PID, S(UiStyle::InputLeft), S(UiStyle::RowInputY(3)), S(UiStyle::ComboW), S(UiStyle::ComboH)));
 
-        AddBaiduControl(CreateButton(hwnd, IDC_BAIDU_TEST, 500, UiStyle::RowInputY(0), UiStyle::ActionBtnW, UiStyle::ActionBtnH, L"Test Connection"));
+        AddBaiduControl(CreateButton(hwnd, IDC_BAIDU_TEST, S(500), S(UiStyle::RowInputY(0)), S(UiStyle::ActionBtnW), S(UiStyle::ActionBtnH), L"Test Connection"));
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(1), UiStyle::LabelWidth, UiStyle::LabelH, L"API Key (X-Api-Key)");
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(1)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"API Key (X-Api-Key)");
         AddVolcengineControl(control);
         HWND volcApiKey = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD,
-                                          UiStyle::InputLeft, UiStyle::RowInputY(1), 330, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_API_KEY)), g_instance, nullptr);
+                                          S(UiStyle::InputLeft), S(UiStyle::RowInputY(1)), S(330), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_API_KEY)), g_instance, nullptr);
         ApplyUiFont(volcApiKey);
         AddVolcengineControl(volcApiKey);
-        AddVolcengineControl(CreateButton(hwnd, IDC_VOLC_SHOW_KEY, UiStyle::SmallBtnX, UiStyle::RowInputY(1) - 1, UiStyle::SmallBtnW, UiStyle::BtnH, L"Show"));
+        AddVolcengineControl(CreateButton(hwnd, IDC_VOLC_SHOW_KEY, S(UiStyle::SmallBtnX), S(UiStyle::RowInputY(1)) - S(1), S(UiStyle::SmallBtnW), S(UiStyle::BtnH), L"Show"));
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(2), 130, UiStyle::LabelH, L"Model");
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(2)), S(130), S(UiStyle::LabelH), L"Model");
         AddVolcengineControl(control);
-        AddVolcengineControl(CreateCombo(hwnd, IDC_VOLC_RESOURCE, UiStyle::InputLeft, UiStyle::RowInputY(2), 480, UiStyle::ComboH));
+        AddVolcengineControl(CreateCombo(hwnd, IDC_VOLC_RESOURCE, S(UiStyle::InputLeft), S(UiStyle::RowInputY(2)), S(480), S(UiStyle::ComboH)));
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowLabelY(3), 130, UiStyle::LabelH, L"ASR Mode");
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(3)), S(130), S(UiStyle::LabelH), L"ASR Mode");
         AddVolcengineControl(control);
-        AddVolcengineControl(CreateCombo(hwnd, IDC_VOLC_MODE, UiStyle::InputLeft, UiStyle::RowInputY(3), 220, UiStyle::ComboH));
+        AddVolcengineControl(CreateCombo(hwnd, IDC_VOLC_MODE, S(UiStyle::InputLeft), S(UiStyle::RowInputY(3)), S(220), S(UiStyle::ComboH)));
 
-        control = CreateLabel(hwnd, 420, UiStyle::RowLabelY(3), 80, UiStyle::LabelH, L"Language");
+        control = CreateLabel(hwnd, S(420), S(UiStyle::RowLabelY(3)), S(80), S(UiStyle::LabelH), L"Language");
         AddVolcengineControl(control);
-        AddVolcengineControl(CreateCombo(hwnd, IDC_VOLC_LANGUAGE, 505, UiStyle::RowInputY(3), 240, UiStyle::ComboH));
+        AddVolcengineControl(CreateCombo(hwnd, IDC_VOLC_LANGUAGE, S(505), S(UiStyle::RowInputY(3)), S(240), S(UiStyle::ComboH)));
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowInputY(4) + 2, UiStyle::LabelWidth + 10, UiStyle::LabelH, L"end_window_size");
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowInputY(4)) + S(2), S(UiStyle::LabelWidth) + S(10), S(UiStyle::LabelH), L"end_window_size");
         AddVolcengineControl(control);
         HWND volcEndWindow = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
-                                             UiStyle::InputLeft + 10, UiStyle::RowInputY(4), 80, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_END_WINDOW_SIZE)), g_instance, nullptr);
+                                             S(UiStyle::InputLeft) + S(10), S(UiStyle::RowInputY(4)), S(80), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_END_WINDOW_SIZE)), g_instance, nullptr);
         ApplyUiFont(volcEndWindow);
         AddVolcengineControl(volcEndWindow);
-        control = CreateLabel(hwnd, UiStyle::InputLeft + 92, UiStyle::RowInputY(4) + 2, 30, UiStyle::LabelH, L"ms");
+        control = CreateLabel(hwnd, S(UiStyle::InputLeft) + S(96), S(UiStyle::RowInputY(4)) + S(2), S(30), S(UiStyle::LabelH), L"ms");
         AddVolcengineControl(control);
 
-        control = CreateLabel(hwnd, 360, UiStyle::RowInputY(4) + 2, 180, UiStyle::LabelH, L"force_to_speech_time");
+        control = CreateLabel(hwnd, S(360), S(UiStyle::RowInputY(4)) + S(2), S(180), S(UiStyle::LabelH), L"force_to_speech_time");
         AddVolcengineControl(control);
         HWND volcForceSpeech = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
-                                               546, UiStyle::RowInputY(4), 60, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_FORCE_TO_SPEECH_TIME)), g_instance, nullptr);
+                                               S(550), S(UiStyle::RowInputY(4)), S(60), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_FORCE_TO_SPEECH_TIME)), g_instance, nullptr);
         ApplyUiFont(volcForceSpeech);
         AddVolcengineControl(volcForceSpeech);
-        control = CreateLabel(hwnd, 614, UiStyle::RowInputY(4) + 2, 30, UiStyle::LabelH, L"ms");
+        control = CreateLabel(hwnd, S(618), S(UiStyle::RowInputY(4)) + S(2), S(30), S(UiStyle::LabelH), L"ms");
         AddVolcengineControl(control);
 
         HWND volcDdc = CreateWindowW(L"BUTTON", L"enable_ddc", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                     UiStyle::ContentLeft, UiStyle::RowInputY(5) + 6, 120, UiStyle::CheckH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_ENABLE_DDC)), g_instance, nullptr);
+                                     S(UiStyle::ContentLeft), S(UiStyle::RowInputY(5)) + S(6), S(120), S(UiStyle::CheckH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_ENABLE_DDC)), g_instance, nullptr);
         ApplyUiFont(volcDdc);
         AddVolcengineControl(volcDdc);
 
         HWND volcNonstream = CreateWindowW(L"BUTTON", L"enable_nonstream", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                           180, UiStyle::RowInputY(5) + 6, 170, UiStyle::CheckH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_ENABLE_NONSTREAM)), g_instance, nullptr);
+                                           S(195), S(UiStyle::RowInputY(5)) + S(6), S(170), S(UiStyle::CheckH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_ENABLE_NONSTREAM)), g_instance, nullptr);
         ApplyUiFont(volcNonstream);
         AddVolcengineControl(volcNonstream);
 
         HWND volcMusicFc = CreateWindowW(L"BUTTON", L"enable_music_fc", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                         370, UiStyle::RowInputY(5) + 6, 150, UiStyle::CheckH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_ENABLE_MUSIC_FC)), g_instance, nullptr);
+                                         S(395), S(UiStyle::RowInputY(5)) + S(6), S(150), S(UiStyle::CheckH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_ENABLE_MUSIC_FC)), g_instance, nullptr);
         ApplyUiFont(volcMusicFc);
         AddVolcengineControl(volcMusicFc);
 
         HWND volcPoiFc = CreateWindowW(L"BUTTON", L"enable_poi_fc", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                       540, UiStyle::RowInputY(5) + 6, 130, UiStyle::CheckH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_ENABLE_POI_FC)), g_instance, nullptr);
+                                       S(575), S(UiStyle::RowInputY(5)) + S(6), S(130), S(UiStyle::CheckH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_ENABLE_POI_FC)), g_instance, nullptr);
         ApplyUiFont(volcPoiFc);
         AddVolcengineControl(volcPoiFc);
 
         HWND volcAccelerate = CreateWindowW(L"BUTTON", L"enable_accelerate", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                            UiStyle::ContentLeft, UiStyle::RowInputY(6) + 6, 160, UiStyle::CheckH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_ENABLE_ACCELERATE)), g_instance, nullptr);
+                                            S(UiStyle::ContentLeft), S(UiStyle::RowInputY(6)) + S(6), S(160), S(UiStyle::CheckH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_ENABLE_ACCELERATE)), g_instance, nullptr);
         ApplyUiFont(volcAccelerate);
         AddVolcengineControl(volcAccelerate);
 
-        control = CreateLabel(hwnd, 260, UiStyle::RowInputY(6) + 2, 50, UiStyle::LabelH, L"score");
+        control = CreateLabel(hwnd, S(260), S(UiStyle::RowInputY(6)) + S(2), S(50), S(UiStyle::LabelH), L"score");
         AddVolcengineControl(control);
         HWND volcAccScore = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
-                                            316, UiStyle::RowInputY(6), 44, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_ACCELERATE_SCORE)), g_instance, nullptr);
+                                            S(320), S(UiStyle::RowInputY(6)), S(44), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_ACCELERATE_SCORE)), g_instance, nullptr);
         ApplyUiFont(volcAccScore);
         AddVolcengineControl(volcAccScore);
-        control = CreateLabel(hwnd, 368, UiStyle::RowInputY(6) + 2, 80, UiStyle::LabelH, L"(0-20)");
+        control = CreateLabel(hwnd, S(372), S(UiStyle::RowInputY(6)) + S(2), S(80), S(UiStyle::LabelH), L"(0-20)");
         AddVolcengineControl(control);
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowInputY(7) + 2, UiStyle::LabelWidth, UiStyle::LabelH, L"Hotwords ID");
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowInputY(7)) + S(2), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Hotwords ID");
         AddVolcengineControl(control);
         HWND volcHotwordsId = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                                              UiStyle::InputLeft, UiStyle::RowInputY(7), 260, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_HOTWORDS_ID)), g_instance, nullptr);
+                                              S(UiStyle::InputLeft), S(UiStyle::RowInputY(7)), S(260), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_HOTWORDS_ID)), g_instance, nullptr);
         ApplyUiFont(volcHotwordsId);
         AddVolcengineControl(volcHotwordsId);
-        control = CreateLabel(hwnd, 462, UiStyle::RowInputY(7) + 2, 48, UiStyle::LabelH, L"Name");
+        control = CreateLabel(hwnd, S(462), S(UiStyle::RowInputY(7)) + S(2), S(48), S(UiStyle::LabelH), L"Name");
         AddVolcengineControl(control);
         HWND volcHotwordsName = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                                                516, UiStyle::RowInputY(7), 210, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_HOTWORDS_NAME)), g_instance, nullptr);
+                                                S(542), S(UiStyle::RowInputY(7)), S(230), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_HOTWORDS_NAME)), g_instance, nullptr);
         ApplyUiFont(volcHotwordsName);
         AddVolcengineControl(volcHotwordsName);
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowInputY(8) + 2, UiStyle::LabelWidth, UiStyle::LabelH, L"Correct ID");
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowInputY(8)) + S(2), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Correct ID");
         AddVolcengineControl(control);
         HWND volcCorrectTableId = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                                                   UiStyle::InputLeft, UiStyle::RowInputY(8), 260, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_CORRECT_TABLE_ID)), g_instance, nullptr);
+                                                   S(UiStyle::InputLeft), S(UiStyle::RowInputY(8)), S(260), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_CORRECT_TABLE_ID)), g_instance, nullptr);
         ApplyUiFont(volcCorrectTableId);
         AddVolcengineControl(volcCorrectTableId);
-        control = CreateLabel(hwnd, 462, UiStyle::RowInputY(8) + 2, 48, UiStyle::LabelH, L"Name");
+        control = CreateLabel(hwnd, S(462), S(UiStyle::RowInputY(8)) + S(2), S(48), S(UiStyle::LabelH), L"Name");
         AddVolcengineControl(control);
         HWND volcCorrectTableName = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                                                     516, UiStyle::RowInputY(8), 210, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_CORRECT_TABLE_NAME)), g_instance, nullptr);
+                                                     S(542), S(UiStyle::RowInputY(8)), S(230), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_CORRECT_TABLE_NAME)), g_instance, nullptr);
         ApplyUiFont(volcCorrectTableName);
         AddVolcengineControl(volcCorrectTableName);
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowInputY(9) + 2, UiStyle::LabelWidth, UiStyle::LabelH, L"Extra / Context");
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowInputY(9)) + S(2), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Extra / Context");
         AddVolcengineControl(control);
-        AddVolcengineControl(CreateButton(hwnd, IDC_VOLC_EXTRA_PARAMS, UiStyle::InputLeft, UiStyle::RowInputY(9), UiStyle::ActionBtnW, UiStyle::ActionBtnH, L"Edit Params"));
+        AddVolcengineControl(CreateButton(hwnd, IDC_VOLC_EXTRA_PARAMS, S(UiStyle::InputLeft), S(UiStyle::RowInputY(9)), S(UiStyle::ActionBtnW), S(UiStyle::ActionBtnH), L"Edit Params"));
 
         HWND volcEnableContext = CreateWindowW(L"BUTTON", L"Use history as context", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                               UiStyle::InputLeft + UiStyle::ActionBtnW + 12, UiStyle::RowInputY(9) + 6, 210, UiStyle::CheckH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_ENABLE_CONTEXT)), g_instance, nullptr);
+                                               S(UiStyle::InputLeft) + S(UiStyle::ActionBtnW) + S(12), S(UiStyle::RowInputY(9)) + S(6), S(210), S(UiStyle::CheckH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_ENABLE_CONTEXT)), g_instance, nullptr);
         ApplyUiFont(volcEnableContext);
         AddVolcengineControl(volcEnableContext);
 
         HWND volcContextHistory = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
-                                                  UiStyle::InputLeft + UiStyle::ActionBtnW + 228, UiStyle::RowInputY(9), 44, UiStyle::EditH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_CONTEXT_HISTORY)), g_instance, nullptr);
+                                                  S(UiStyle::InputLeft) + S(UiStyle::ActionBtnW) + S(232), S(UiStyle::RowInputY(9)), S(44), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_CONTEXT_HISTORY)), g_instance, nullptr);
         ApplyUiFont(volcContextHistory);
         AddVolcengineControl(volcContextHistory);
-        control = CreateLabel(hwnd, UiStyle::InputLeft + UiStyle::ActionBtnW + 278, UiStyle::RowInputY(9) + 2, 80, UiStyle::LabelH, L"history");
+        control = CreateLabel(hwnd, S(UiStyle::InputLeft) + S(UiStyle::ActionBtnW) + S(282), S(UiStyle::RowInputY(9)) + S(2), S(80), S(UiStyle::LabelH), L"history");
         AddVolcengineControl(control);
 
-        AddVolcengineControl(CreateButton(hwnd, IDC_VOLC_TEST, 500, UiStyle::RowInputY(0), UiStyle::ActionBtnW, UiStyle::ActionBtnH, L"Test Connection"));
+        AddVolcengineControl(CreateButton(hwnd, IDC_VOLC_TEST, S(500), S(UiStyle::RowInputY(0)), S(UiStyle::ActionBtnW), S(UiStyle::ActionBtnH), L"Test Connection"));
 
-        control = CreateLabel(hwnd, UiStyle::ContentLeft, UiStyle::RowInputY(9) + 30, 640, UiStyle::LabelH,
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowInputY(9)) + S(30), S(640), S(UiStyle::LabelH),
             L"Cloud ASR sends audio to remote servers. Keys are encrypted with DPAPI locally.");
         AddCloudAsrControl(control);
         g_cloudAsrHintControl = control;
 
         HWND status = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE,
-                                    UiStyle::Margin * 2, UiStyle::FooterMinTop + 21, 520, UiStyle::LabelH, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), g_instance, nullptr);
+                                    S(UiStyle::Margin) * 2, S(UiStyle::FooterMinTop) + S(21), S(520), S(UiStyle::LabelH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), g_instance, nullptr);
         ApplyUiFont(status);
-        CreateButton(hwnd, IDC_SAVE, 626, UiStyle::FooterMinTop + 21, UiStyle::FooterBtnW, UiStyle::ActionBtnH, L"Save");
-        CreateButton(hwnd, IDC_CANCEL, 726, UiStyle::FooterMinTop + 21, UiStyle::FooterBtnW, UiStyle::ActionBtnH, L"Close");
+        CreateButton(hwnd, IDC_SAVE, S(626), S(UiStyle::FooterMinTop) + S(21), S(UiStyle::FooterBtnW), S(UiStyle::ActionBtnH), L"Save");
+        CreateButton(hwnd, IDC_CANCEL, S(726), S(UiStyle::FooterMinTop) + S(21), S(UiStyle::FooterBtnW), S(UiStyle::ActionBtnH), L"Close");
         LoadSettingsControls(hwnd);
         ShowSettingsPage(hwnd, 0);
         LayoutSettingsWindow(hwnd);
@@ -1756,6 +1772,18 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         }
         return 0;
     }
+    case WM_DPICHANGED:
+        UpdateUiScale(hwnd);
+        {
+            RECT* suggested = reinterpret_cast<RECT*>(lParam);
+            SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
+                         suggested->right - suggested->left,
+                         suggested->bottom - suggested->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            LayoutSettingsWindow(hwnd);
+            InvalidateRect(hwnd, nullptr, TRUE);
+        }
+        return 0;
     case WM_CLOSE:
         HideSettingsWindow(hwnd);
         return 0;
@@ -1767,6 +1795,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 void ShowSettingsWindow(HWND owner) {
     UninstallKeyboardHook();
     if (!g_settingsWindow) {
+        UpdateUiScale(nullptr);
         g_settingsWindow = CreateWindowExW(
             WS_EX_APPWINDOW,
             kSettingsClass,
@@ -1774,8 +1803,8 @@ void ShowSettingsWindow(HWND owner) {
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            850,
-            720,
+            S(850),
+            S(720),
             owner,
             nullptr,
             g_instance,
