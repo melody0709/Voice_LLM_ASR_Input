@@ -621,10 +621,10 @@ bool AsrEngine::EnsureVad(int threads) {
 
     sherpa_onnx::cxx::VadModelConfig vc;
     vc.silero_vad.model = WideToUtf8(vadPath);
-    vc.silero_vad.threshold = 0.5f;
-    vc.silero_vad.min_silence_duration = 0.25f;
-    vc.silero_vad.min_speech_duration = 0.25f;
-    vc.silero_vad.max_speech_duration = 30.0f;
+    vc.silero_vad.threshold = 0.4f;
+    vc.silero_vad.min_silence_duration = 0.3f;
+    vc.silero_vad.min_speech_duration = 0.1f;
+    vc.silero_vad.max_speech_duration = 20.0f;
     vc.silero_vad.window_size = 512;
     vc.sample_rate = 16000;
     vc.num_threads = threads;
@@ -672,6 +672,44 @@ bool AsrEngine::EnsurePunctuation(int threads) {
     return true;
 }
 
+VadResult AsrEngine::ApplyVad(const std::vector<float>& samples, const Config& config, int threads) {
+    VadResult result;
+    if (config.vadModel == L"firered") {
+        if (!EnsureFireRedVad()) return result;
+        fireRedVad->Reset();
+        int nSamples = static_cast<int>(samples.size());
+        fireRedVad->Process(samples.data(), nSamples);
+        fireRedVad->Flush();
+        auto concat = fireRedVad->GetConcatenatedSamples(samples.data(), nSamples);
+        if (!concat.empty()) {
+            result.hasSpeech = true;
+            result.samples = std::move(concat);
+        }
+    } else {
+        if (!EnsureVad(threads)) return result;
+        vad->Reset();
+        const size_t windowSize = 512;
+        for (size_t i = 0; i < samples.size(); i += windowSize) {
+            size_t end = std::min(i + windowSize, samples.size());
+            vad->AcceptWaveform(samples.data() + i, static_cast<int32_t>(end - i));
+        }
+        vad->Flush();
+        while (!vad->IsEmpty()) {
+            auto seg = vad->Front();
+            result.samples.insert(result.samples.end(),
+                                   seg.samples.begin(), seg.samples.end());
+            result.hasSpeech = true;
+            vad->Pop();
+        }
+    }
+    return result;
+}
+
+bool AsrEngine::EnsureVadForConfig(const Config& config, int threads) {
+    if (config.vadModel == L"firered") return EnsureFireRedVad();
+    return EnsureVad(threads);
+}
+
 std::wstring AsrEngine::Recognize(const std::vector<float>& samples, int sampleRate, const Config& config) {
     const int threads = ResolveThreads(config.threads);
 
@@ -684,41 +722,15 @@ std::wstring AsrEngine::Recognize(const std::vector<float>& samples, int sampleR
 
     if (config.enableVad && workSamples.size() > 0) {
         HiResTimer tVad;
-        if (config.vadModel == L"firered") {
-            std::lock_guard<std::mutex> g(lock_);
-            if (EnsureFireRedVad()) {
-                fireRedVad->Reset();
-                bool hasSpeech = fireRedVad->Process(workSamples.data(), static_cast<int>(workSamples.size()));
-                double ms = tVad.ElapsedMs();
-                if (config.enableDebugMode) {
-                    g_vadMs = ms;
-                    g_vadModelName = L"FireRed";
-                }
-                if (!hasSpeech) return L"";
-            }
-        } else {
-            std::lock_guard<std::mutex> g(lock_);
-            if (EnsureVad(threads)) {
-                vad->Reset();
-                const size_t windowSize = 512;
-                for (size_t i = 0; i < workSamples.size(); i += windowSize) {
-                    size_t end = std::min(i + windowSize, workSamples.size());
-                    vad->AcceptWaveform(workSamples.data() + i, static_cast<int32_t>(end - i));
-                }
-                vad->Flush();
-
-                double ms = tVad.ElapsedMs();
-                if (config.enableDebugMode) {
-                    g_vadMs = ms;
-                    g_vadModelName = L"Silero";
-                }
-
-                if (!vad->IsEmpty()) {
-                    auto seg = vad->Front();
-                    workSamples = std::move(seg.samples);
-                }
-            }
+        std::lock_guard<std::mutex> g(lock_);
+        VadResult vr = ApplyVad(workSamples, config, threads);
+        double ms = tVad.ElapsedMs();
+        if (config.enableDebugMode) {
+            g_vadMs = ms;
+            g_vadModelName = (config.vadModel == L"firered") ? L"FireRed" : L"Silero";
         }
+        if (!vr.hasSpeech) return L"";
+        if (!vr.samples.empty()) workSamples = std::move(vr.samples);
     }
 
     if (workSamples.empty()) return L"";
@@ -779,13 +791,7 @@ void PreloadAsrEngine(const Config& config) {
     const int threads = ResolveThreads(config.threads);
     g_asrEngine.Lock();
     g_asrEngine.EnsureRecognizer(config);
-    if (config.enableVad) {
-        if (config.vadModel == L"firered") {
-            g_asrEngine.EnsureFireRedVad();
-        } else {
-            g_asrEngine.EnsureVad(threads);
-        }
-    }
+    if (config.enableVad) g_asrEngine.EnsureVadForConfig(config, threads);
     if (config.postprocess == L"itn" || config.postprocess == L"punct" || config.postprocess == L"llm") {
         g_asrEngine.EnsurePunctuation(threads);
     }

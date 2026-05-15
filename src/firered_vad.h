@@ -1,12 +1,11 @@
 #pragma once
-// FireRedVAD — streaming VAD using onnxruntime + kaldi_native_fbank
-// Model: fireredvad_stream_vad_with_cache.onnx
-// Input: 80-dim fbank (25ms window, 10ms shift) + CMVN normalization
 
 #include <cmath>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 #include <algorithm>
 
@@ -16,9 +15,6 @@
 
 namespace firered_vad {
 
-// ---------------------------------------------------------------------------
-// CMVN constants (from models/cmvn.ark, dim=80)
-// ---------------------------------------------------------------------------
 static const float kCmvnMeans[80] = {
     10.42295174919564f, 10.862097411631494f, 11.764544378124809f, 12.490164701573908f,
     13.25983008289003f, 13.89594383242307f,  14.364940238918987f, 14.593948347480778f,
@@ -64,15 +60,12 @@ static const float kCmvnIstd[80] = {
     0.2257750261856693f,  0.22503847248255957f, 0.2263113742246566f,  0.2289949344716713f,
 };
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
 constexpr int kSampleRate = 16000;
 constexpr int kFbankBins = 80;
+constexpr int kFrameShift = 160;
+constexpr int kFrameLength = 400;
+constexpr int kFramesPerSecond = 100;
 
-// ---------------------------------------------------------------------------
-// kaldi_native_fbank options for FireRedVAD
-// ---------------------------------------------------------------------------
 static knf::FbankOptions MakeFbankOpts() {
     knf::FbankOptions opts;
     opts.frame_opts.samp_freq = kSampleRate;
@@ -87,17 +80,169 @@ static knf::FbankOptions MakeFbankOpts() {
     return opts;
 }
 
-// ---------------------------------------------------------------------------
-// FireRedVad config
-// ---------------------------------------------------------------------------
-struct FireRedVadConfig {
-    std::string modelPath;   // path to fireredvad_stream_vad_with_cache.onnx
-    float threshold = 0.5f;  // speech probability threshold
+enum class VadState {
+    SILENCE = 0,
+    POSSIBLE_SPEECH = 1,
+    SPEECH = 2,
+    POSSIBLE_SILENCE = 3
 };
 
-// ---------------------------------------------------------------------------
-// FireRedVad — streaming VAD using onnxruntime
-// ---------------------------------------------------------------------------
+struct FireRedVadConfig {
+    std::string modelPath;
+    float threshold = 0.4f;
+    int smoothWindowSize = 5;
+    int padStartFrame = 8;
+    int minSpeechFrame = 5;
+    int maxSpeechFrame = 2000;
+    int minSilenceFrame = 30;
+};
+
+struct StreamVadPostprocessor {
+    float speechThreshold;
+    int smoothWindowSize;
+    int padStartFrame;
+    int minSpeechFrame;
+    int maxSpeechFrame;
+    int minSilenceFrame;
+
+    VadState state = VadState::SILENCE;
+    std::deque<float> smoothWindow;
+    float smoothSum = 0.0f;
+    int frameCnt = 0;
+    int speechCnt = 0;
+    int silenceCnt = 0;
+    bool hitMaxSpeech = false;
+    int lastSpeechStartFrame = -1;
+    int lastSpeechEndFrame = -1;
+
+    std::vector<std::pair<int, int>> segments;
+
+    StreamVadPostprocessor(float threshold, int smoothWin, int padStart,
+                           int minSpeech, int maxSpeech, int minSilence)
+        : speechThreshold(threshold),
+          smoothWindowSize(std::max(1, smoothWin)),
+          padStartFrame(std::max(smoothWindowSize, padStart)),
+          minSpeechFrame(minSpeech),
+          maxSpeechFrame(maxSpeech),
+          minSilenceFrame(minSilence) {}
+
+    void Reset() {
+        state = VadState::SILENCE;
+        smoothWindow.clear();
+        smoothSum = 0.0f;
+        frameCnt = 0;
+        speechCnt = 0;
+        silenceCnt = 0;
+        hitMaxSpeech = false;
+        lastSpeechStartFrame = -1;
+        lastSpeechEndFrame = -1;
+        segments.clear();
+    }
+
+    float SmoothProb(float prob) {
+        smoothWindow.push_back(prob);
+        smoothSum += prob;
+        if (static_cast<int>(smoothWindow.size()) > smoothWindowSize) {
+            smoothSum -= smoothWindow.front();
+            smoothWindow.pop_front();
+        }
+        return smoothSum / static_cast<float>(smoothWindow.size());
+    }
+
+    void ProcessOneFrame(float rawProb) {
+        frameCnt++;
+        float smoothedProb = SmoothProb(rawProb);
+        bool isSpeech = (smoothedProb >= speechThreshold);
+
+        if (hitMaxSpeech) {
+            int startFrame = frameCnt - 1;
+            if (lastSpeechEndFrame >= 0)
+                startFrame = std::max(startFrame, lastSpeechEndFrame + 1);
+            lastSpeechStartFrame = startFrame;
+            hitMaxSpeech = false;
+        }
+
+        switch (state) {
+        case VadState::SILENCE:
+            if (isSpeech) {
+                state = VadState::POSSIBLE_SPEECH;
+                speechCnt = 1;
+            } else {
+                silenceCnt++;
+                speechCnt = 0;
+            }
+            break;
+
+        case VadState::POSSIBLE_SPEECH:
+            if (isSpeech) {
+                speechCnt++;
+                if (speechCnt >= minSpeechFrame) {
+                    state = VadState::SPEECH;
+                    int startFrame = std::max(0,
+                        (frameCnt - 1) - speechCnt + 1 - padStartFrame);
+                    if (lastSpeechEndFrame >= 0)
+                        startFrame = std::max(startFrame, lastSpeechEndFrame + 1);
+                    lastSpeechStartFrame = startFrame;
+                    silenceCnt = 0;
+                }
+            } else {
+                state = VadState::SILENCE;
+                silenceCnt = 1;
+                speechCnt = 0;
+            }
+            break;
+
+        case VadState::SPEECH:
+            speechCnt++;
+            if (isSpeech) {
+                silenceCnt = 0;
+                if (speechCnt >= maxSpeechFrame) {
+                    hitMaxSpeech = true;
+                    segments.push_back({lastSpeechStartFrame, frameCnt - 1});
+                    lastSpeechEndFrame = frameCnt - 1;
+                    lastSpeechStartFrame = -1;
+                    speechCnt = 0;
+                }
+            } else {
+                state = VadState::POSSIBLE_SILENCE;
+                silenceCnt = 1;
+            }
+            break;
+
+        case VadState::POSSIBLE_SILENCE:
+            speechCnt++;
+            if (isSpeech) {
+                state = VadState::SPEECH;
+                silenceCnt = 0;
+                if (speechCnt >= maxSpeechFrame) {
+                    hitMaxSpeech = true;
+                    segments.push_back({lastSpeechStartFrame, frameCnt - 1});
+                    lastSpeechEndFrame = frameCnt - 1;
+                    lastSpeechStartFrame = -1;
+                    speechCnt = 0;
+                }
+            } else {
+                silenceCnt++;
+                if (silenceCnt >= minSilenceFrame) {
+                    state = VadState::SILENCE;
+                    segments.push_back({lastSpeechStartFrame, frameCnt - 1});
+                    lastSpeechEndFrame = frameCnt - 1;
+                    lastSpeechStartFrame = -1;
+                    speechCnt = 0;
+                }
+            }
+            break;
+        }
+    }
+
+    void Flush() {
+        if (lastSpeechStartFrame >= 0) {
+            segments.push_back({lastSpeechStartFrame, frameCnt - 1});
+            lastSpeechStartFrame = -1;
+        }
+    }
+};
+
 class FireRedVad {
 public:
     ~FireRedVad() = default;
@@ -106,17 +251,14 @@ public:
         auto vad = std::unique_ptr<FireRedVad>(new FireRedVad());
         vad->threshold_ = cfg.threshold;
 
-        // onnxruntime env + session
         vad->env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "FireRedVad");
         Ort::SessionOptions so;
         so.SetIntraOpNumThreads(1);
         so.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
-        // Convert path to wstring for Session constructor
         std::wstring wpath = Utf8ToWide(cfg.modelPath);
         vad->session_ = std::make_unique<Ort::Session>(*vad->env_, wpath.c_str(), so);
 
-        // Get input/output names (store as std::string, keep c_str() pointers)
         Ort::AllocatorWithDefaultOptions alloc;
         {
             auto n = vad->session_->GetInputNameAllocated(0, alloc);
@@ -138,12 +280,14 @@ public:
         vad->inputNames_ = {vad->inputNameStr_.c_str(), vad->cachesInNameStr_.c_str()};
         vad->outputNames_ = {vad->outputNameStr_.c_str(), vad->cachesOutNameStr_.c_str()};
 
-        // Init cache: [8, 1, 128, 19]
         vad->cacheData_.resize(8 * 1 * 128 * 19, 0.0f);
 
-        // Init fbank extractor
         vad->fbank_ = std::make_unique<knf::OnlineGenericBaseFeature<knf::FbankComputer>>(MakeFbankOpts());
         vad->fbankFrame_ = 0;
+
+        vad->postprocessor_ = std::make_unique<StreamVadPostprocessor>(
+            cfg.threshold, cfg.smoothWindowSize, cfg.padStartFrame,
+            cfg.minSpeechFrame, cfg.maxSpeechFrame, cfg.minSilenceFrame);
 
         return vad;
     }
@@ -152,34 +296,51 @@ public:
         std::fill(cacheData_.begin(), cacheData_.end(), 0.0f);
         fbank_ = std::make_unique<knf::OnlineGenericBaseFeature<knf::FbankComputer>>(MakeFbankOpts());
         fbankFrame_ = 0;
+        postprocessor_->Reset();
+        anySpeechSeen_ = false;
     }
 
-    // Process a chunk of raw PCM float samples (normalized -1..1).
-    // Returns true if speech is detected in any frame.
-    bool Process(const float* samples, int nSamples) {
-        // FireRedVAD expects int16-scale values (not normalized float)
+    void Process(const float* samples, int nSamples) {
         scaledBuf_.resize(nSamples);
         for (int i = 0; i < nSamples; i++)
             scaledBuf_[i] = samples[i] * 32768.0f;
 
-        // Feed waveform to fbank extractor
         fbank_->AcceptWaveform(kSampleRate, scaledBuf_.data(), nSamples);
 
         int nReady = fbank_->NumFramesReady();
-        bool anySpeech = false;
         while (fbankFrame_ < nReady) {
             const float* frame = fbank_->GetFrame(fbankFrame_++);
-            // Apply CMVN in-place on a copy
             float feat[kFbankBins];
             for (int d = 0; d < kFbankBins; d++)
                 feat[d] = (frame[d] - kCmvnMeans[d]) * kCmvnIstd[d];
             float prob = ProcessOneFrame(feat);
-            if (prob >= threshold_) anySpeech = true;
+            postprocessor_->ProcessOneFrame(prob);
+            if (prob >= threshold_) anySpeechSeen_ = true;
         }
-        return anySpeech;
     }
 
-    // Get the last probability value (for debugging/UI)
+    bool HasSpeech() const {
+        return anySpeechSeen_ || !postprocessor_->segments.empty();
+    }
+
+    void Flush() {
+        postprocessor_->Flush();
+    }
+
+    std::vector<float> GetConcatenatedSamples(const float* samples, int nSamples) const {
+        std::vector<float> out;
+        if (postprocessor_->segments.empty()) return out;
+
+        for (auto& seg : postprocessor_->segments) {
+            int startSample = std::max(0, seg.first * kFrameShift);
+            int endSample = std::min(nSamples, (seg.second + 1) * kFrameShift);
+            if (endSample > startSample) {
+                out.insert(out.end(), samples + startSample, samples + endSample);
+            }
+        }
+        return out;
+    }
+
     float LastProb() const { return lastProb_; }
 
 private:
@@ -188,12 +349,10 @@ private:
     float ProcessOneFrame(const float* featFrame) {
         Ort::MemoryInfo memInfo = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
-        // feat: [1, 1, 80]
         int64_t featShape[] = {1, 1, kFbankBins};
         auto featTensor = Ort::Value::CreateTensor<float>(memInfo,
             const_cast<float*>(featFrame), kFbankBins, featShape, 3);
 
-        // caches_in: [8, 1, 128, 19]
         int64_t cacheShape[] = {8, 1, 128, 19};
         auto cacheTensor = Ort::Value::CreateTensor<float>(memInfo,
             cacheData_.data(), cacheData_.size(), cacheShape, 4);
@@ -206,11 +365,9 @@ private:
             inputNames_.data(), inputs.data(), 2,
             outputNames_.data(), 2);
 
-        // probs: [1, 1, 1]
         float prob = outputs[0].GetTensorMutableData<float>()[0];
         lastProb_ = prob;
 
-        // Copy caches_out back to cacheData_
         auto& cacheOut = outputs[1];
         const float* cacheOutData = cacheOut.GetTensorData<float>();
         auto outShape = cacheOut.GetTensorTypeAndShapeInfo().GetShape();
@@ -223,10 +380,11 @@ private:
 
     std::unique_ptr<Ort::Env> env_;
     std::unique_ptr<Ort::Session> session_;
-    std::vector<float> cacheData_; // [8*1*128*19]
+    std::vector<float> cacheData_;
     std::unique_ptr<knf::OnlineGenericBaseFeature<knf::FbankComputer>> fbank_;
     int fbankFrame_ = 0;
     std::vector<float> scaledBuf_;
+    std::unique_ptr<StreamVadPostprocessor> postprocessor_;
 
     std::string inputNameStr_;
     std::string cachesInNameStr_;
@@ -237,6 +395,7 @@ private:
 
     float threshold_ = 0.5f;
     float lastProb_ = 0.0f;
+    bool anySpeechSeen_ = false;
 };
 
 } // namespace firered_vad

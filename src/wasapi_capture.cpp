@@ -1,5 +1,6 @@
 #include "wasapi_capture.h"
 #include "globals.h"
+#include "engine.h"
 
 #include <algorithm>
 #include <cmath>
@@ -243,6 +244,21 @@ void WasapiCapture::CaptureThread() {
                         g_volcPendingAudio.insert(g_volcPendingAudio.end(), begin, begin + written * sizeof(int16_t));
                         LeaveCriticalSection(&g_volcAudioCs);
                     }
+
+                    if (g_streamingVadReady) {
+                        std::vector<float> floatBuf(written);
+                        for (UINT32 i = 0; i < written; ++i)
+                            floatBuf[i] = static_cast<float>(out[i]) / 32768.0f;
+
+                        g_asrEngine.Lock();
+                        if (g_config.vadModel == L"firered") {
+                            g_asrEngine.fireRedVad->Process(floatBuf.data(), static_cast<int>(floatBuf.size()));
+                        } else {
+                            g_asrEngine.vad->AcceptWaveform(floatBuf.data(), static_cast<int32_t>(floatBuf.size()));
+                        }
+                        g_asrEngine.Unlock();
+                    }
+
                     m_resamplePhase -= written / m_resampleRatio;
                 }
             }

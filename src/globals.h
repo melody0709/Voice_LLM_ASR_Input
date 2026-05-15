@@ -305,3 +305,5 @@ extern double g_punctMs;
 extern double g_cloudApiMs;
 extern double g_llmMs;
 extern std::wstring g_vadModelName;
+extern std::vector<float> g_streamingVadSamples;
+extern bool g_streamingVadReady;

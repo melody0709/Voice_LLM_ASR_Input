@@ -62,6 +62,11 @@ struct HiResTimer {
     }
 };
 
+struct VadResult {
+    bool hasSpeech = false;
+    std::vector<float> samples;
+};
+
 class AsrEngine {
 public:
     void Lock() { lock_.lock(); }
@@ -78,14 +83,16 @@ public:
 
     std::string MakeKey(const std::wstring& modelId, const std::wstring& modelDir, int threads);
     bool EnsureRecognizer(const Config& config);
-    bool EnsureVad(int threads);
-    bool EnsureFireRedVad();
     bool EnsurePunctuation(int threads);
+    VadResult ApplyVad(const std::vector<float>& samples, const Config& config, int threads);
+    bool EnsureVadForConfig(const Config& config, int threads);
     std::wstring Recognize(const std::vector<float>& samples, int sampleRate, const Config& config);
     void Reload();
 
 private:
     std::mutex lock_;
+    bool EnsureVad(int threads);
+    bool EnsureFireRedVad();
 };
 
 std::vector<float> PcmToFloat(const std::vector<BYTE>& pcm);

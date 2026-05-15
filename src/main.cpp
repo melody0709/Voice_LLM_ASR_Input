@@ -98,6 +98,8 @@ double g_punctMs = 0.0;
 double g_cloudApiMs = 0.0;
 double g_llmMs = 0.0;
 std::wstring g_vadModelName;
+std::vector<float> g_streamingVadSamples;
+bool g_streamingVadReady = false;
 static std::wstring g_lastRawAsrText;
 static size_t g_lastPcmBytes = 0;
 static bool s_wasapiUsed = false;
@@ -292,9 +294,18 @@ void RecognizeAsync(const std::vector<BYTE>& pcm) {
         g_lastPcmBytes = pcm.size();
 
         HiResTimer tPcm;
-        auto samples = PcmToFloat(pcm);
+        std::vector<float> samples;
+        Config workConfig = config;
 
-        std::wstring text = g_asrEngine.Recognize(samples, 16000, config);
+        if (!g_streamingVadSamples.empty()) {
+            samples = std::move(g_streamingVadSamples);
+            g_streamingVadSamples.clear();
+            workConfig.enableVad = false;
+        } else {
+            samples = PcmToFloat(pcm);
+        }
+
+        std::wstring text = g_asrEngine.Recognize(samples, 16000, workConfig);
         // Recognize 内部已设 g_vadMs / g_asrDecodeMs / g_punctMs / g_vadModelName
         if (text.empty()) {
             text = L"(empty result)";
@@ -425,7 +436,8 @@ void StartRecordingSession() {
                     return volc_asr::SendAudio(g_volcSession, c, false, asyncMode, nostreamMode);
                 }
                 auto floatSamples = PcmToFloat(c);
-                bool hasVoice = g_volcVad->Process(floatSamples.data(), (int)floatSamples.size());
+                g_volcVad->Process(floatSamples.data(), (int)floatSamples.size());
+                bool hasVoice = g_volcVad->HasSpeech();
                 if (state == kPreSpeech) {
                     if (hasVoice) {
                         if (doTrim) {
@@ -593,6 +605,23 @@ void StartRecordingSession() {
 
     std::wstring name = (g_config.asrBackend == L"baidu") ? L"Baidu Cloud" : ModelDisplayName(g_config.modelId);
     ShowHud(L"Listening... " + name);
+
+    g_streamingVadReady = false;
+    g_streamingVadSamples.clear();
+    if (g_config.asrBackend != L"baidu" && g_config.asrBackend != L"volcengine" && g_config.enableVad) {
+        const int threads = ResolveThreads(g_config.threads);
+        g_asrEngine.Lock();
+        bool ok = g_asrEngine.EnsureVadForConfig(g_config, threads);
+        if (ok) {
+            if (g_config.vadModel == L"firered") {
+                g_asrEngine.fireRedVad->Reset();
+            } else {
+                g_asrEngine.vad->Reset();
+            }
+        }
+        g_asrEngine.Unlock();
+        g_streamingVadReady = ok;
+    }
 }
 
 void StopRecordingSession() {
@@ -626,6 +655,34 @@ void StopRecordingSession() {
         ShowHud(L"Too short");
         SetTimer(g_hudWindow, kHudHideTimer, 1200, nullptr);
         return;
+    }
+
+    if (g_streamingVadReady) {
+        HiResTimer tVad;
+        g_asrEngine.Lock();
+        if (g_config.vadModel == L"firered") {
+            g_asrEngine.fireRedVad->Flush();
+            auto samples = PcmToFloat(pcm);
+            auto concat = g_asrEngine.fireRedVad->GetConcatenatedSamples(samples.data(), static_cast<int>(samples.size()));
+            if (!concat.empty()) {
+                g_streamingVadSamples = std::move(concat);
+            }
+        } else {
+            g_asrEngine.vad->Flush();
+            while (!g_asrEngine.vad->IsEmpty()) {
+                auto seg = g_asrEngine.vad->Front();
+                g_streamingVadSamples.insert(g_streamingVadSamples.end(),
+                    seg.samples.begin(), seg.samples.end());
+                g_asrEngine.vad->Pop();
+            }
+        }
+        g_asrEngine.Unlock();
+        double ms = tVad.ElapsedMs();
+        if (g_config.enableDebugMode) {
+            g_vadMs = ms;
+            g_vadModelName = (g_config.vadModel == L"firered") ? L"FireRed" : L"Silero";
+        }
+        g_streamingVadReady = false;
     }
 
     std::wstring name = (g_config.asrBackend == L"baidu") ? L"Baidu Cloud" : ModelDisplayName(g_config.modelId);
