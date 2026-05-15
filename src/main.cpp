@@ -63,6 +63,7 @@ CRITICAL_SECTION g_audioLock;
 bool g_captureActive = false;
 std::atomic<float> g_audioLevel{ 0.0f };
 float g_hudSmoothedLevel = 0.0f;
+bool g_hudHasSpoken = false;
 WasapiCapture g_wasapiCapture;
 std::vector<HWND> g_recognitionControls;
 std::vector<HWND> g_shortcutControls;

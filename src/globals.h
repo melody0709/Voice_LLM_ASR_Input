@@ -272,6 +272,7 @@ extern CRITICAL_SECTION g_audioLock;
 extern bool g_captureActive;
 extern std::atomic<float> g_audioLevel;
 extern float g_hudSmoothedLevel;
+extern bool g_hudHasSpoken;
 extern WasapiCapture g_wasapiCapture;
 extern std::vector<HWND> g_recognitionControls;
 extern std::vector<HWND> g_shortcutControls;

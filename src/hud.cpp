@@ -306,6 +306,10 @@ void DrawHudDirect2D(HWND hwnd) {
     g_hudRenderTarget->DrawRoundedRectangle(capsule, g_hudBrush, 1.0f);
 
     const float level = g_recording ? CurrentHudLevel() : 0.18f;
+    const float kAudioThreshold = 0.04f;
+    const bool hasAudio = (level > kAudioThreshold);
+    if (g_recording && hasAudio) g_hudHasSpoken = true;
+    if (!g_recording) g_hudHasSpoken = false;
     const float centerY = height / 2.0f;
     const float barWidth = 6.5f;
     const float barGap = 4.0f;
@@ -316,7 +320,7 @@ void DrawHudDirect2D(HWND hwnd) {
     const double tick = static_cast<double>(GetTickCount64());
 
     for (int i = 0; i < 5; ++i) {
-        const float motion = g_recording ? static_cast<float>(std::sin(tick * 0.012 + i * 1.9) * 0.035) : 0.0f;
+        const float motion = (g_recording && hasAudio) ? static_cast<float>(std::sin(tick * 0.012 + i * 1.9) * 0.035) : 0.0f;
         const float fraction = std::clamp(minFraction + (1.0f - minFraction) * level * weights[i] + motion,
                                           minFraction, 1.0f);
         const float h = barAreaHeight * fraction;
@@ -326,7 +330,7 @@ void DrawHudDirect2D(HWND hwnd) {
         const float gradTop = centerY - h / 2.0f - sweep * h * 0.3f;
         const float gradBottom = centerY + h / 2.0f + (1.0f - sweep) * h * 0.3f;
 
-        auto* brush = g_recording ? g_hudBarGradientRec : g_hudBarGradientIdle;
+        auto* brush = (g_recording && g_hudHasSpoken) ? g_hudBarGradientRec : g_hudBarGradientIdle;
         brush->SetStartPoint(D2D1::Point2F(x, gradBottom));
         brush->SetEndPoint(D2D1::Point2F(x, gradTop));
 
