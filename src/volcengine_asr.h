@@ -121,6 +121,8 @@ struct VolcSession {
     std::wstring partialText;
     std::wstring lastError;
     std::atomic<bool> connected{false};
+    std::atomic<bool> forceAbort{false};
+    ULONGLONG lastUsedTick = 0;
 };
 
 struct VolcResult {
@@ -151,9 +153,12 @@ inline std::wstring ExtractJsonStr(const std::string& json, const std::string& k
         if (json[pos] == '\\' && pos + 1 < json.size()) pos++;
         pos++;
     }
-    VolcDebugLog("ExtractJsonStr: key='%s' raw_bytes=%zu result_wchars=%zu",
-                 key.c_str(), pos - start, Utf8ToWide(json.substr(start, pos - start)).size());
-    return Utf8ToWide(json.substr(start, pos - start));
+    std::wstring result = Utf8ToWide(json.substr(start, pos - start));
+    if (!result.empty()) {
+        VolcDebugLog("ExtractJsonStr: key='%s' raw_bytes=%zu result_wchars=%zu",
+                     key.c_str(), pos - start, result.size());
+    }
+    return result;
 }
 
 inline std::wstring GenerateUuidStr() {
@@ -235,12 +240,18 @@ inline bool ExtractJsonBool(const std::string& json, const std::string& key) {
     return (json[pos] == 't' || json[pos] == '1');
 }
 
-inline VolcResult ReceiveResult(HINTERNET hWebSocket, DWORD timeoutMs) {
+inline VolcResult ReceiveResult(HINTERNET hWebSocket, DWORD timeoutMs, VolcSession* sess = nullptr) {
     VolcResult result;
+    if (sess && sess->forceAbort.load()) {
+        VolcDebugLog("ReceiveResult: aborted (forceAbort)");
+        return result;
+    }
     std::vector<BYTE> recvBuf(65536);
     std::string responseBody;
 
-    VolcDebugLog("ReceiveResult: waiting (timeout=%ums)...", timeoutMs);
+    if (timeoutMs > 1500) {
+        VolcDebugLog("ReceiveResult: waiting (timeout=%ums)...", timeoutMs);
+    }
 
     DWORD actualTimeout = timeoutMs;
     WinHttpSetOption(hWebSocket, WINHTTP_OPTION_WEB_SOCKET_RECEIVE_TIMEOUT,
@@ -252,13 +263,18 @@ inline VolcResult ReceiveResult(HINTERNET hWebSocket, DWORD timeoutMs) {
                                         static_cast<DWORD>(recvBuf.size()),
                                         &bytesRead, &bufType);
 
-    VolcDebugLog("ReceiveResult: err=%u, bytesRead=%u, bufType=%d", err, bytesRead, (int)bufType);
-
-    if (err == ERROR_WINHTTP_TIMEOUT || err == ERROR_WINHTTP_OPERATION_CANCELLED) return result;
-    if (err != ERROR_SUCCESS) return result;
-    if (bytesRead == 0) return result;
-
-    VolcDebugHex("Recv raw", recvBuf.data(), bytesRead);
+    if (err == ERROR_WINHTTP_TIMEOUT || err == ERROR_WINHTTP_OPERATION_CANCELLED) {
+        VolcDebugLog("ReceiveResult: timeout/cancelled (err=%u)", err);
+        return result;
+    }
+    if (err != ERROR_SUCCESS) {
+        VolcDebugLog("ReceiveResult: error %u", err);
+        return result;
+    }
+    if (bytesRead == 0) {
+        VolcDebugLog("ReceiveResult: 0 bytes (close frame)");
+        return result;
+    }
 
     responseBody.append(reinterpret_cast<char*>(recvBuf.data()), bytesRead);
 
@@ -287,8 +303,6 @@ inline VolcResult ReceiveResult(HINTERNET hWebSocket, DWORD timeoutMs) {
         uint8_t msgFlags = b1 & 0x0F;
         uint8_t ser = (b2 >> 4) & 0x0F;
         uint8_t comp = b2 & 0x0F;
-        VolcDebugLog("Frame@%zu: b0=0x%02X b1=0x%02X b2=0x%02X hdrSz=%u msgType=%u flags=%u ser=%u comp=%u",
-                     pos, b0, b1, b2, headerSize, msgType, msgFlags, ser, comp);
         pos += 4;
 
         size_t headerBytes = static_cast<size_t>(headerSize) * 4;
@@ -311,6 +325,7 @@ inline VolcResult ReceiveResult(HINTERNET hWebSocket, DWORD timeoutMs) {
         if (msgType == MSG_ERROR_RESP) {
             uint32_t errorCode = payloadSize;
             VolcDebugLog("Error frame: code=%u", errorCode);
+            VolcDebugHex("Error response raw", recvBuf.data(), bytesRead);
             if (pos + 4 > responseBody.size()) {
                 result.text = L"[VolcEngine error: code=" + std::to_wstring(errorCode) + L"]";
                 return result;
@@ -341,7 +356,6 @@ inline VolcResult ReceiveResult(HINTERNET hWebSocket, DWORD timeoutMs) {
         if (msgType == MSG_FULL_SERVER_RESP) {
             std::string payloadJson(responseBody.begin() + static_cast<ptrdiff_t>(pos),
                                     responseBody.begin() + static_cast<ptrdiff_t>(pos + payloadSize));
-            VolcDebugLog("Server resp payload (%u bytes): %.200s", payloadSize, payloadJson.c_str());
             std::wstring text = ExtractJsonStr(payloadJson, "text");
             if (text.empty()) {
                 size_t rp = payloadJson.find("\"result\"");
@@ -350,8 +364,9 @@ inline VolcResult ReceiveResult(HINTERNET hWebSocket, DWORD timeoutMs) {
                 }
             }
             bool isDefinite = ExtractJsonBool(payloadJson, "definite");
-            VolcDebugLog("Extracted text: wlen=%zu, definite=%d", text.size(), isDefinite);
             if (!text.empty()) {
+                VolcDebugLog("Server resp: text_wlen=%zu definite=%d payload=%.200s",
+                             text.size(), isDefinite, payloadJson.c_str());
                 if (isDefinite) {
                     result.text = text;
                     result.definite = true;
@@ -366,8 +381,13 @@ inline VolcResult ReceiveResult(HINTERNET hWebSocket, DWORD timeoutMs) {
     return result;
 }
 
-inline void WebSocketCloseGracefully(HINTERNET hWebSocket) {
+inline void WebSocketCloseGracefully(HINTERNET hWebSocket, VolcSession* sess = nullptr) {
     if (!hWebSocket) return;
+    if (sess && sess->forceAbort.load()) {
+        VolcDebugLog("WebSocketCloseGracefully: forceAbort, skipping close handshake");
+        WinHttpCloseHandle(hWebSocket);
+        return;
+    }
     DWORD recvTimeout = 3000;
     WinHttpSetOption(hWebSocket, WINHTTP_OPTION_WEB_SOCKET_RECEIVE_TIMEOUT,
                      &recvTimeout, sizeof(recvTimeout));
@@ -381,16 +401,23 @@ inline void WebSocketCloseGracefully(HINTERNET hWebSocket) {
 
 inline bool EnsureConnection(VolcSession& sess) {
     if (sess.hSession && sess.hConnect) {
-        VolcDebugLog("EnsureConnection: reusing existing connection");
-        return true;
+        if (sess.lastUsedTick > 0 && GetTickCount64() - sess.lastUsedTick > 30000) {
+            VolcDebugLog("EnsureConnection: connection expired (%llums old), rebuilding",
+                         GetTickCount64() - sess.lastUsedTick);
+            WinHttpCloseHandle(sess.hConnect);
+            sess.hConnect = nullptr;
+        } else {
+            VolcDebugLog("EnsureConnection: reusing existing connection");
+            return true;
+        }
     }
 
     if (!sess.hSession) {
         sess.hSession = WinHttpOpen(L"VoxType/1.0",
-            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
+            WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME,
             WINHTTP_NO_PROXY_BYPASS, 0);
         if (!sess.hSession) return false;
-        WinHttpSetTimeouts(sess.hSession, 10000, 10000, 15000, 15000);
+        WinHttpSetTimeouts(sess.hSession, 5000, 5000, 5000, 5000);
     }
 
     ULONGLONG t1 = GetTickCount64();
@@ -532,126 +559,138 @@ inline bool OpenSession(VolcSession& sess, const VolcConfig& cfg) {
     std::vector<BYTE> frame = BuildFrame(MSG_FULL_CLIENT_REQ, FLAG_NO_SEQ,
                                          SER_JSON, COMP_NONE, 0, jsonPayload);
 
-    for (int attempt = 0; attempt < 2; attempt++) {
-        if (attempt > 0) VolcDebugLog("OpenSession: retry attempt %d", attempt);
-
-        if (!EnsureConnection(sess)) {
-            VolcDebugLog("OpenSession: EnsureConnection failed");
-            return false;
-        }
-
-        std::wstring path = L"/api/v3/sauc/" + cfg.mode;
-        HINTERNET hReq = WinHttpOpenRequest(sess.hConnect, L"GET",
-            path.c_str(), nullptr, WINHTTP_NO_REFERER,
-            WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
-        if (!hReq) {
-            if (attempt == 0) { WinHttpCloseHandle(sess.hConnect); sess.hConnect = nullptr; continue; }
-            return false;
-        }
-
-        WinHttpSetOption(hReq, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0);
-        DWORD closeTimeout = 5000;
-        WinHttpSetOption(hReq, WINHTTP_OPTION_WEB_SOCKET_CLOSE_TIMEOUT, &closeTimeout, sizeof(closeTimeout));
-        DWORD keepAlive = 15000;
-        WinHttpSetOption(hReq, WINHTTP_OPTION_WEB_SOCKET_KEEPALIVE_INTERVAL, &keepAlive, sizeof(keepAlive));
-
-        std::wstring uuid = GenerateUuidStr();
-        std::wstring headers =
-            L"X-Api-Key: " + cleanKey +
-            L"\r\nX-Api-Resource-Id: " + cfg.resourceId +
-            L"\r\nX-Api-Connect-Id: " + uuid +
-            L"\r\n";
-
-        if (!WinHttpAddRequestHeaders(hReq, headers.c_str(),
-            static_cast<DWORD>(wcslen(headers.c_str())), WINHTTP_ADDREQ_FLAG_ADD)) {
-            WinHttpCloseHandle(hReq);
-            if (attempt == 0) { WinHttpCloseHandle(sess.hConnect); sess.hConnect = nullptr; continue; }
-            return false;
-        }
-
-        WinHttpSetTimeouts(hReq, 10000, 10000, 10000, 10000);
-
-        ULONGLONG t3 = GetTickCount64();
-        if (!WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                                WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
-            WinHttpCloseHandle(hReq);
-            if (attempt == 0) { WinHttpCloseHandle(sess.hConnect); sess.hConnect = nullptr; continue; }
-            return false;
-        }
-
-        if (!WinHttpReceiveResponse(hReq, nullptr)) {
-            WinHttpCloseHandle(hReq);
-            if (attempt == 0) { WinHttpCloseHandle(sess.hConnect); sess.hConnect = nullptr; continue; }
-            return false;
-        }
-        ULONGLONG t4 = GetTickCount64();
-        VolcDebugLog("SendRequest+ReceiveResponse: %llums", t4 - t3);
-
-        DWORD statusCode = 0;
-        DWORD statusCodeSize = sizeof(statusCode);
-        WinHttpQueryHeaders(hReq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                            WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusCodeSize,
-                            WINHTTP_NO_HEADER_INDEX);
-
-        if (statusCode != 101) {
-            WinHttpCloseHandle(hReq);
-            if (attempt == 0) { WinHttpCloseHandle(sess.hConnect); sess.hConnect = nullptr; continue; }
-            return false;
-        }
-
-        sess.hWebSocket = WinHttpWebSocketCompleteUpgrade(hReq, 0);
-        WinHttpCloseHandle(hReq);
-
-        if (!sess.hWebSocket) {
-            if (attempt == 0) { WinHttpCloseHandle(sess.hConnect); sess.hConnect = nullptr; continue; }
-            return false;
-        }
-
-        DWORD recvTimeout = 2000;
-        WinHttpSetOption(sess.hWebSocket, WINHTTP_OPTION_WEB_SOCKET_RECEIVE_TIMEOUT,
-                         &recvTimeout, sizeof(recvTimeout));
-
-        sess.sequence = 0;
-
-        VolcDebugLog("Sending init frame (%zu bytes), json=%zu bytes", frame.size(), jsonPayload.size());
-        VolcDebugHex("Init frame", frame.data(), frame.size());
-        VolcDebugLog("Init JSON: %.300s", requestJson.c_str());
-
-        WinHttpWebSocketSend(sess.hWebSocket,
-                             static_cast<WINHTTP_WEB_SOCKET_BUFFER_TYPE>(VOLC_WEB_SOCKET_BINARY_MSG),
-                             frame.data(), static_cast<DWORD>(frame.size()));
-
-        ULONGLONG t5 = GetTickCount64();
-        VolcResult initResp = ReceiveResult(sess.hWebSocket, 5000);
-        ULONGLONG t6 = GetTickCount64();
-        VolcDebugLog("Init frame receive: %llums", t6 - t5);
-        VolcDebugLog("Init response: '%ls'", initResp.text.c_str());
-        if (initResp.text.find(L"[VolcEngine error:") != std::wstring::npos) {
-            VolcDebugLog("OpenSession FAILED - server error: %ls", initResp.text.c_str());
-            sess.lastError = initResp.text;
-            WebSocketCloseGracefully(sess.hWebSocket);
-            sess.hWebSocket = nullptr;
-            if (attempt == 0) { WinHttpCloseHandle(sess.hConnect); sess.hConnect = nullptr; continue; }
-            return false;
-        }
-
-        VolcDebugLog("=== OpenSession OK (total: %llums) ===", GetTickCount64() - t0);
-        sess.sequence = 2;
-        return true;
+    if (sess.forceAbort.load()) {
+        VolcDebugLog("OpenSession: aborted (forceAbort)");
+        return false;
     }
-    return false;
+
+    if (!EnsureConnection(sess)) {
+        VolcDebugLog("OpenSession: EnsureConnection failed");
+        return false;
+    }
+
+    std::wstring path = L"/api/v3/sauc/" + cfg.mode;
+    HINTERNET hReq = WinHttpOpenRequest(sess.hConnect, L"GET",
+        path.c_str(), nullptr, WINHTTP_NO_REFERER,
+        WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+    if (!hReq) {
+        WinHttpCloseHandle(sess.hConnect); sess.hConnect = nullptr;
+        return false;
+    }
+
+    WinHttpSetOption(hReq, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0);
+    DWORD closeTimeout = 5000;
+    WinHttpSetOption(hReq, WINHTTP_OPTION_WEB_SOCKET_CLOSE_TIMEOUT, &closeTimeout, sizeof(closeTimeout));
+    DWORD keepAlive = 15000;
+    WinHttpSetOption(hReq, WINHTTP_OPTION_WEB_SOCKET_KEEPALIVE_INTERVAL, &keepAlive, sizeof(keepAlive));
+
+    std::wstring uuid = GenerateUuidStr();
+    std::wstring headers =
+        L"X-Api-Key: " + cleanKey +
+        L"\r\nX-Api-Resource-Id: " + cfg.resourceId +
+        L"\r\nX-Api-Connect-Id: " + uuid +
+        L"\r\n";
+
+    if (!WinHttpAddRequestHeaders(hReq, headers.c_str(),
+        static_cast<DWORD>(wcslen(headers.c_str())), WINHTTP_ADDREQ_FLAG_ADD)) {
+        WinHttpCloseHandle(hReq);
+        WinHttpCloseHandle(sess.hConnect); sess.hConnect = nullptr;
+        return false;
+    }
+
+    WinHttpSetTimeouts(hReq, 3000, 3000, 3000, 3000);
+
+    if (sess.forceAbort.load()) {
+        VolcDebugLog("OpenSession: aborted before SendRequest");
+        WinHttpCloseHandle(hReq);
+        return false;
+    }
+
+    ULONGLONG t3 = GetTickCount64();
+    if (!WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                            WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
+        WinHttpCloseHandle(hReq);
+        WinHttpCloseHandle(sess.hConnect); sess.hConnect = nullptr;
+        return false;
+    }
+
+    if (!WinHttpReceiveResponse(hReq, nullptr)) {
+        WinHttpCloseHandle(hReq);
+        WinHttpCloseHandle(sess.hConnect); sess.hConnect = nullptr;
+        return false;
+    }
+    ULONGLONG t4 = GetTickCount64();
+    VolcDebugLog("SendRequest+ReceiveResponse: %llums", t4 - t3);
+
+    DWORD statusCode = 0;
+    DWORD statusCodeSize = sizeof(statusCode);
+    WinHttpQueryHeaders(hReq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                        WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusCodeSize,
+                        WINHTTP_NO_HEADER_INDEX);
+
+    if (statusCode != 101) {
+        WinHttpCloseHandle(hReq);
+        WinHttpCloseHandle(sess.hConnect); sess.hConnect = nullptr;
+        return false;
+    }
+
+    sess.hWebSocket = WinHttpWebSocketCompleteUpgrade(hReq, 0);
+    WinHttpCloseHandle(hReq);
+
+    if (!sess.hWebSocket) {
+        WinHttpCloseHandle(sess.hConnect); sess.hConnect = nullptr;
+        return false;
+    }
+
+    DWORD recvTimeout = 2000;
+    WinHttpSetOption(sess.hWebSocket, WINHTTP_OPTION_WEB_SOCKET_RECEIVE_TIMEOUT,
+                     &recvTimeout, sizeof(recvTimeout));
+
+    sess.sequence = 0;
+
+    VolcDebugLog("Sending init frame (%zu bytes), json=%zu bytes", frame.size(), jsonPayload.size());
+    VolcDebugHex("Init frame", frame.data(), frame.size());
+    VolcDebugLog("Init JSON: %.300s", requestJson.c_str());
+
+    WinHttpWebSocketSend(sess.hWebSocket,
+                         static_cast<WINHTTP_WEB_SOCKET_BUFFER_TYPE>(VOLC_WEB_SOCKET_BINARY_MSG),
+                         frame.data(), static_cast<DWORD>(frame.size()));
+
+    ULONGLONG t5 = GetTickCount64();
+    VolcResult initResp = ReceiveResult(sess.hWebSocket, 5000, &sess);
+    ULONGLONG t6 = GetTickCount64();
+    VolcDebugLog("Init frame receive: %llums", t6 - t5);
+    VolcDebugLog("Init response: '%ls'", initResp.text.c_str());
+    if (initResp.text.find(L"[VolcEngine error:") != std::wstring::npos) {
+        VolcDebugLog("OpenSession FAILED - server error: %ls", initResp.text.c_str());
+        sess.lastError = initResp.text;
+        WebSocketCloseGracefully(sess.hWebSocket, &sess);
+        sess.hWebSocket = nullptr;
+        WinHttpCloseHandle(sess.hConnect); sess.hConnect = nullptr;
+        return false;
+    }
+
+    VolcDebugLog("=== OpenSession OK (total: %llums) ===", GetTickCount64() - t0);
+    sess.sequence = 2;
+    return true;
 }
 
 inline std::wstring SendAudio(VolcSession& sess, const std::vector<BYTE>& pcmChunk, bool isLast, bool asyncMode = false, bool nostreamMode = false) {
     if (!sess.hWebSocket || !sess.connected) return L"";
+    if (sess.forceAbort.load()) {
+        VolcDebugLog("SendAudio: aborted (forceAbort)");
+        return L"";
+    }
 
     uint8_t flags = isLast ? FLAG_NEG_PACKET : FLAG_POS_SEQ;
     uint32_t seq = isLast ? 0 : static_cast<uint32_t>(sess.sequence);
     std::vector<BYTE> frame = BuildFrame(MSG_AUDIO_ONLY, flags,
                                          SER_NONE, COMP_NONE, seq, pcmChunk);
 
-    VolcDebugLog("SendAudio: %zu bytes, isLast=%d, seq=%u, frame=%zu bytes, async=%d nostream=%d",
-                 pcmChunk.size(), isLast, seq, frame.size(), asyncMode, nostreamMode);
+    if (isLast || sess.sequence == 2) {
+        VolcDebugLog("SendAudio: %zu bytes, isLast=%d, seq=%u, frame=%zu bytes, async=%d nostream=%d",
+                     pcmChunk.size(), isLast, seq, frame.size(), asyncMode, nostreamMode);
+    }
 
     ULONGLONG tSend0 = GetTickCount64();
     DWORD err = WinHttpWebSocketSend(sess.hWebSocket,
@@ -660,7 +699,7 @@ inline std::wstring SendAudio(VolcSession& sess, const std::vector<BYTE>& pcmChu
 
     if (err != ERROR_SUCCESS) {
         VolcDebugLog("SendAudio FAILED: err=%u", err);
-        WebSocketCloseGracefully(sess.hWebSocket);
+        WebSocketCloseGracefully(sess.hWebSocket, &sess);
         sess.hWebSocket = nullptr;
         sess.connected = false;
         return L"";
@@ -676,30 +715,34 @@ inline std::wstring SendAudio(VolcSession& sess, const std::vector<BYTE>& pcmChu
 
     if (isLast && nostreamMode) {
         ULONGLONG tDrain0 = GetTickCount64();
+        int emptyFrames = 0;
+        VolcDebugLog("SendAudio nostream drain: waiting for final result...");
         while (true) {
-            VolcResult vr = ReceiveResult(sess.hWebSocket, 1500);
+            if (!sess.connected || sess.forceAbort.load()) break;
+            VolcResult vr = ReceiveResult(sess.hWebSocket, 1500, &sess);
             if (!vr.text.empty()) {
                 ULONGLONG tDrain1 = GetTickCount64();
-                VolcDebugLog("SendAudio nostream drain: got text='%ls' definite=%d in %llums",
-                             vr.text.c_str(), vr.definite, tDrain1 - tDrain0);
+                VolcDebugLog("SendAudio nostream drain: got text='%ls' definite=%d in %llums (empty_frames=%d)",
+                             vr.text.c_str(), vr.definite, tDrain1 - tDrain0, emptyFrames);
                 return vr.text;
             }
+            emptyFrames++;
             if (GetTickCount64() - tDrain0 > 10000) break;
         }
         ULONGLONG tDrain1 = GetTickCount64();
-        VolcDebugLog("SendAudio nostream drain: no text after %llums", tDrain1 - tDrain0);
+        VolcDebugLog("SendAudio nostream drain: no text after %llums (frames=%d)", tDrain1 - tDrain0, emptyFrames);
         return L"";
     }
 
-    VolcResult vr = ReceiveResult(sess.hWebSocket, isLast ? 4000 : 150);
+    VolcResult vr = ReceiveResult(sess.hWebSocket, isLast ? 4000 : 150, &sess);
     ULONGLONG tSend1 = GetTickCount64();
     VolcDebugLog("SendAudio recv: %llums (isLast=%d), text='%ls' definite=%d",
                  tSend1 - tSend0, isLast, vr.text.c_str(), vr.definite);
     return vr.text;
 }
 
-inline std::wstring DrainReceiveBuffer(HINTERNET hWebSocket) {
-    return ReceiveResult(hWebSocket, 1).text;
+inline std::wstring DrainReceiveBuffer(HINTERNET hWebSocket, VolcSession* sess = nullptr) {
+    return ReceiveResult(hWebSocket, 1, sess).text;
 }
 
 inline std::wstring CloseSession(VolcSession& sess) {
@@ -709,25 +752,29 @@ inline std::wstring CloseSession(VolcSession& sess) {
 
     std::wstring finalText;
 
-    for (int retry = 0; retry < 6; retry++) {
-        VolcResult chunk = ReceiveResult(sess.hWebSocket, 500);
-        if (!chunk.text.empty()) {
-            finalText = chunk.text;
-        } else {
-            break;
+    if (!sess.forceAbort.load()) {
+        for (int retry = 0; retry < 6; retry++) {
+            VolcResult chunk = ReceiveResult(sess.hWebSocket, 500, &sess);
+            if (!chunk.text.empty()) {
+                finalText = chunk.text;
+            } else {
+                break;
+            }
+            if (sess.forceAbort.load()) break;
         }
     }
 
-    WebSocketCloseGracefully(sess.hWebSocket);
+    WebSocketCloseGracefully(sess.hWebSocket, &sess);
     sess.hWebSocket = nullptr;
 
+    if (sess.hConnect) {
+        WinHttpCloseHandle(sess.hConnect);
+        sess.hConnect = nullptr;
+    }
     if (g_volcKeepAlive) {
-        VolcDebugLog("CloseSession: keeping hSession/hConnect alive for reuse");
+        VolcDebugLog("CloseSession: keeping hSession alive, hConnect closed");
+        sess.lastUsedTick = GetTickCount64();
     } else {
-        if (sess.hConnect) {
-            WinHttpCloseHandle(sess.hConnect);
-            sess.hConnect = nullptr;
-        }
         if (sess.hSession) {
             WinHttpCloseHandle(sess.hSession);
             sess.hSession = nullptr;
@@ -750,6 +797,20 @@ inline void ClosePersistentConnection(VolcSession& sess) {
         WinHttpCloseHandle(sess.hSession);
         sess.hSession = nullptr;
     }
+}
+
+inline void PrewarmConnection(VolcSession& sess) {
+    VolcDebugLog("=== PrewarmConnection ===");
+    if (sess.hSession && sess.hConnect) {
+        VolcDebugLog("PrewarmConnection: already connected");
+        return;
+    }
+    if (!EnsureConnection(sess)) {
+        VolcDebugLog("PrewarmConnection: failed");
+        return;
+    }
+    sess.lastUsedTick = GetTickCount64();
+    VolcDebugLog("PrewarmConnection: OK (hSession+hConnect ready)");
 }
 
 struct TestResult {
@@ -794,7 +855,7 @@ inline TestResult TestConnection(const VolcConfig& cfg) {
         return res;
     }
 
-    HINTERNET hSession = WinHttpOpen(L"VoxType/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+    HINTERNET hSession = WinHttpOpen(L"VoxType/1.0", WINHTTP_ACCESS_TYPE_NO_PROXY,
                                      WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) {
         res.message = L"WinHttpOpen failed.";

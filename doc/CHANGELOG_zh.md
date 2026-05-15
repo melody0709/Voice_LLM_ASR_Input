@@ -2,6 +2,28 @@
 
 > 🇬🇧 [English](../CHANGELOG.md)
 
+## v0.7.5 (2026-05-15)
+
+### 修复
+
+- **火山引擎 WebSocket 退出时挂死**：在 `VolcSession` 中新增 `forceAbort` 原子标志。录音会话被取消时（如按 Esc、关闭窗口），设置 `forceAbort` 后所有阻塞中的 WebSocket 操作（`OpenSession`、`SendAudio`、`ReceiveResult`、`CloseSession`）立即退出，不再等待网络 I/O
+- **WebSocket 关闭握手挂死**：`WebSocketCloseGracefully` 在 `forceAbort` 设置时跳过关闭握手，直接关闭句柄，避免等待可能永远不会来的服务端响应
+- **过期连接复用**：`EnsureConnection` 现在检查 `lastUsedTick`，空闲超过 30 秒的连接自动重建而非复用，防止服务端超时后出现的 "connection reset" 错误
+- **WinHTTP 代理设置**：`EnsureConnection` 和 `TestConnection` 中从 `WINHTTP_ACCESS_TYPE_DEFAULT_PROXY` 改为 `WINHTTP_ACCESS_TYPE_NO_PROXY`。默认代理类型在未配置代理的机器上会导致不必要的 PAC/自动检测延迟
+
+### 新增
+
+- **连接预热**：新增 `PrewarmConnection()` 函数，在录音开始前提前建立 TCP/TLS 连接，消除首次按热键时约 1.4 秒的连接建立延迟。在设置保存后或启动时火山引擎后端被选中时调用
+- **`lastUsedTick` 字段**：`VolcSession` 新增 `lastUsedTick` 字段，记录连接最后使用时间，用于自动过期和重建陈旧连接
+
+### 变更
+
+- **简化 OpenSession**：移除重试循环（原为 2 次尝试+连接重建）。改为单次尝试，在关键点（`SendRequest` 前、`ReceiveResult` 中）检查 `forceAbort`。连接失败时由下次 `EnsureConnection` 重建
+- **连接复用策略调整**：`CloseSession` 现在每次会话后关闭 `hConnect`（仅保留 `hSession` 存活）。此前两者均保持存活，但服务端在空闲超时后会关闭 TCP 连接，导致缓存的 `hConnect` 失效
+- **缩短 WinHTTP 超时**：连接/发送/接收超时从 10000ms 缩短为 5000ms（会话级）和 3000ms（请求级），加快故障检测
+- **精简日志输出**：`SendAudio` 仅记录首帧（seq=2）和末帧（isLast），而非每个音频块。服务端响应日志合并为一行并附带 payload 预览
+- **Nostream drain 改进**：在 nostream drain 循环中增加空帧计数和 `forceAbort` 检查，防止服务端无响应时无限等待
+
 ## v0.7.4 (2026-05-11)
 
 ### 修复

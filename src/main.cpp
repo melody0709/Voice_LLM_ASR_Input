@@ -336,10 +336,26 @@ void StartRecordingSession() {
         ShowHud(L"Listening... Volcano Engine");
 
         if (g_volcThread.joinable()) g_volcThread.join();
+        g_volcSession.forceAbort = false;
         g_volcThread = std::thread([vcfg, config]() {
             ULONGLONG tTotal0 = GetTickCount64();
 
             if (!volc_asr::OpenSession(g_volcSession, vcfg)) {
+                if (g_volcStreaming.load() && !g_volcSession.forceAbort.load()) {
+                    ShowHud(L"Reconnecting... (1/3)");
+                    VolcDebugLog("Volc thread: Round 1 failed, retrying...");
+                    Sleep(1500);
+                    if (volc_asr::OpenSession(g_volcSession, vcfg)) goto openSessionOk;
+                }
+                EnterCriticalSection(&g_volcAudioCs);
+                bool hasPending = !g_volcPendingAudio.empty();
+                LeaveCriticalSection(&g_volcAudioCs);
+                if (hasPending && !g_volcSession.forceAbort.load()) {
+                    ShowHud(L"Reconnecting... (2/3)");
+                    VolcDebugLog("Volc thread: Round 2 failed, final attempt...");
+                    Sleep(1500);
+                    if (volc_asr::OpenSession(g_volcSession, vcfg)) goto openSessionOk;
+                }
                 g_volcSession.connected = false;
                 std::wstring errMsg = L"VolcEngine connect failed";
                 if (!g_volcSession.lastError.empty()) {
@@ -349,6 +365,7 @@ void StartRecordingSession() {
                 if (g_hudWindow) SetTimer(g_hudWindow, kHudHideTimer, 4000, nullptr);
                 return;
             }
+            openSessionOk:
             g_volcSession.connected = true;
             volc_asr::g_volcKeepAlive = true;
 
@@ -365,15 +382,15 @@ void StartRecordingSession() {
 
             if (asyncMode) {
                 drainThread = std::thread([&]() {
-                    while (!asyncDrainDone && g_volcSession.hWebSocket) {
-                        std::wstring partial = volc_asr::DrainReceiveBuffer(g_volcSession.hWebSocket);
+                    while (!asyncDrainDone && g_volcSession.hWebSocket && !g_volcSession.forceAbort.load()) {
+                        std::wstring partial = volc_asr::DrainReceiveBuffer(g_volcSession.hWebSocket, &g_volcSession);
                         if (!partial.empty() && partial != asyncPartial) {
                             asyncPartial = partial;
                             ShowHud(L"Listening... Volcano Engine\n" + partial);
                         }
                     }
-                    while (g_volcSession.hWebSocket) {
-                        std::wstring partial = volc_asr::DrainReceiveBuffer(g_volcSession.hWebSocket);
+                    while (g_volcSession.hWebSocket && !g_volcSession.forceAbort.load()) {
+                        std::wstring partial = volc_asr::DrainReceiveBuffer(g_volcSession.hWebSocket, &g_volcSession);
                         if (!partial.empty()) {
                             asyncPartial = partial;
                         } else {
@@ -384,6 +401,7 @@ void StartRecordingSession() {
             }
 
             while (true) {
+                if (g_volcSession.forceAbort.load()) break;
                 bool hasData = false;
                 EnterCriticalSection(&g_volcAudioCs);
                 while (!g_volcPendingAudio.empty() && chunk.size() < kChunkBytes) {
@@ -410,17 +428,24 @@ void StartRecordingSession() {
                 }
             }
 
+            if (g_volcSession.forceAbort.load()) {
+                VolcDebugLog("Volc thread: forceAbort detected, skipping drain");
+            }
+
+            int chunksSent = g_volcSession.sequence - 2;
+            VolcDebugLog("Volc thread: send loop ended, chunks_sent=%d", chunksSent);
+
             if (asyncMode) {
                 asyncDrainDone = true;
                 if (drainThread.joinable()) drainThread.join();
             }
 
-            if (!chunk.empty()) {
+            if (!g_volcSession.forceAbort.load() && !chunk.empty()) {
                 std::wstring partial = volc_asr::SendAudio(g_volcSession, chunk, false, asyncMode, nostreamMode);
                 if (!asyncMode && !partial.empty()) lastPartial = partial;
             }
 
-            {
+            if (!g_volcSession.forceAbort.load()) {
                 std::vector<BYTE> empty;
                 std::wstring lastResult = volc_asr::SendAudio(g_volcSession, empty, true, asyncMode, nostreamMode);
                 if (!lastResult.empty()) lastPartial = lastResult;
@@ -430,12 +455,16 @@ void StartRecordingSession() {
             if (finalText.empty()) finalText = lastPartial;
 
             if (finalText.empty()) finalText = L"(empty result)";
+            if (g_volcSession.forceAbort.load() && finalText == L"(empty result)") {
+                finalText = L"VolcEngine timeout";
+            }
 
             bool needLlm = (config.postprocess == L"llm")
                          && !config.llmEndpoint.empty()
                          && !config.llmApiKey.empty()
                          && !finalText.empty()
-                         && finalText.rfind(L"VolcEngine error", 0) != 0;
+                         && finalText.rfind(L"VolcEngine error", 0) != 0
+                         && finalText.rfind(L"VolcEngine timeout", 0) != 0;
 
             if (needLlm) {
                 g_lastRawAsrText = finalText;
@@ -450,6 +479,7 @@ void StartRecordingSession() {
             VolcDebugLog("=== TOTAL session: %llums ===", GetTickCount64() - tTotal0);
             g_cloudApiMs = static_cast<double>(GetTickCount64() - tTotal0) - g_recordingMs;
         });
+        SetTimer(g_mainWindow, kVolcWatchdogTimer, 18000, nullptr);
         return;
     }
 
@@ -477,7 +507,9 @@ void StopRecordingSession() {
             SetTimer(g_hudWindow, kHudHideTimer, 1200, nullptr);
             return;
         }
-        ShowHud(L"Recognizing... Volcano Engine");
+        if (g_volcSession.connected.load()) {
+            ShowHud(L"Recognizing... Volcano Engine");
+        }
         return;
     }
 
@@ -549,6 +581,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (g_hudWindow) SetTimer(g_hudWindow, kHudHideTimer, 1500, nullptr);
         return 0;
     case kAsrResultMessage: {
+        KillTimer(g_mainWindow, kVolcWatchdogTimer);
         std::unique_ptr<std::wstring> result(reinterpret_cast<std::wstring*>(lParam));
         const std::wstring text = result ? *result : L"ASR failed";
         if (wParam == 1 && !text.empty() && text.rfind(L"ASR failed:", 0) != 0) {
@@ -631,6 +664,20 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             ActivateCapsLockLongPress();
             return 0;
         }
+        if (wParam == kVolcWatchdogTimer) {
+            KillTimer(hwnd, kVolcWatchdogTimer);
+            if (g_volcThread.joinable()) {
+                VolcDebugLog("Watchdog: volc thread still running after 15s, force aborting");
+                g_volcSession.forceAbort = true;
+                HINTERNET hWs = g_volcSession.hWebSocket;
+                if (hWs) { WinHttpCloseHandle(hWs); g_volcSession.hWebSocket = nullptr; }
+                HINTERNET hConn = g_volcSession.hConnect;
+                if (hConn) { WinHttpCloseHandle(hConn); g_volcSession.hConnect = nullptr; }
+                HINTERNET hSess = g_volcSession.hSession;
+                if (hSess) { WinHttpCloseHandle(hSess); g_volcSession.hSession = nullptr; }
+            }
+            return 0;
+        }
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
@@ -662,9 +709,22 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     case WM_DESTROY:
         g_volcStreaming.store(false);
+        g_volcSession.forceAbort = true;
         g_captureActive = false;
         StopAudioCapture();
-        if (g_volcThread.joinable()) g_volcThread.join();
+        {
+            HINTERNET hWs = g_volcSession.hWebSocket;
+            if (hWs) { WinHttpCloseHandle(hWs); g_volcSession.hWebSocket = nullptr; }
+            HINTERNET hConn = g_volcSession.hConnect;
+            if (hConn) { WinHttpCloseHandle(hConn); g_volcSession.hConnect = nullptr; }
+            HINTERNET hSess = g_volcSession.hSession;
+            if (hSess) { WinHttpCloseHandle(hSess); g_volcSession.hSession = nullptr; }
+        }
+        if (g_volcThread.joinable()) {
+            if (g_volcThread.get_id() != std::this_thread::get_id()) {
+                g_volcThread.join();
+            }
+        }
         UninstallKeyboardHook();
         RemoveTrayIcon(hwnd);
         PostQuitMessage(0);
@@ -737,6 +797,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                 PostMessageW(g_mainWindow, kPreloadDoneMessage, 0, 0);
             }).detach();
         }
+    }
+
+    if (g_config.asrBackend == L"volcengine" && !g_config.volcApiKey.empty()) {
+        std::thread([]() {
+            volc_asr::PrewarmConnection(g_volcSession);
+        }).detach();
     }
 
     HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\VoxType.SingleInstance");

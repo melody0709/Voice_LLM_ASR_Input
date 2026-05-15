@@ -2,6 +2,28 @@
 
 > 🇨🇳 [中文版](doc/CHANGELOG_zh.md)
 
+## v0.7.5 (2026-05-15)
+
+### Fixed
+
+- **Volcengine WebSocket hang on exit**: Added `forceAbort` atomic flag to `VolcSession`. When the recording session is cancelled (e.g., Esc key, window close), `forceAbort` is set and all pending WebSocket operations (`OpenSession`, `SendAudio`, `ReceiveResult`, `CloseSession`) exit immediately instead of blocking on network I/O
+- **WebSocket close handshake hang**: `WebSocketCloseGracefully` now skips the close handshake when `forceAbort` is set, directly closing the handle to avoid waiting for a server response that may never come
+- **Stale connection reuse**: `EnsureConnection` now checks `lastUsedTick`; connections idle for more than 30 seconds are automatically rebuilt instead of reused, preventing "connection reset" errors from a server-side timeout
+- **WinHTTP proxy setting**: Changed from `WINHTTP_ACCESS_TYPE_DEFAULT_PROXY` to `WINHTTP_ACCESS_TYPE_NO_PROXY` in both `EnsureConnection` and `TestConnection`. The default proxy type causes unnecessary PAC/auto-detect delays on machines without a proxy configured
+
+### Added
+
+- **Connection prewarm**: New `PrewarmConnection()` function establishes TCP/TLS connection in advance before recording starts, eliminating the ~1.4s connection setup latency on first press. Called from the main thread after settings save or on startup when Volcengine backend is selected
+- **`lastUsedTick` field in VolcSession**: Tracks when the connection was last used, enabling automatic expiry and rebuild of stale connections
+
+### Changed
+
+- **Simplified OpenSession**: Removed the retry loop (was 2 attempts with connection rebuild). Now single-attempt with `forceAbort` checks at key points (before `SendRequest`, during `ReceiveResult`). If the connection fails, it is rebuilt on the next `EnsureConnection` call
+- **Connection reuse strategy**: `CloseSession` now closes `hConnect` after each session (only `hSession` is kept alive). Previously both were kept alive, but the server closes the TCP connection after idle timeout, making the cached `hConnect` stale
+- **Reduced WinHTTP timeouts**: Connect/send/receive timeouts reduced from 10000ms to 5000ms (session-level) and 3000ms (request-level) for faster failure detection
+- **Reduced logging verbosity**: `SendAudio` only logs the first frame (seq=2) and last frame (isLast), instead of every audio chunk. Server response logging consolidated into a single line with payload preview
+- **Nostream drain improvements**: Added empty frame counting and `forceAbort` check in the nostream drain loop, preventing infinite waits when the server is unresponsive
+
 ## v0.7.4 (2026-05-11)
 
 ### Fixed

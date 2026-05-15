@@ -35,6 +35,7 @@ constexpr UINT kTrayId = 1;
 constexpr UINT_PTR kHudHideTimer = 1;
 constexpr UINT_PTR kCapsLockLongPressTimer = 2;
 constexpr UINT_PTR kHudAnimationTimer = 3;
+constexpr UINT_PTR kVolcWatchdogTimer = 4;
 constexpr UINT kCapsLockLongPressMs = 300;
 constexpr int kHudMinWidth = 300;
 constexpr int kHudMinHeight = 56;
