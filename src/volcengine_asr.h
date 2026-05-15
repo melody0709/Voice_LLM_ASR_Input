@@ -268,11 +268,17 @@ inline VolcResult ReceiveResult(HINTERNET hWebSocket, DWORD timeoutMs, VolcSessi
         return result;
     }
     if (err != ERROR_SUCCESS) {
-        VolcDebugLog("ReceiveResult: error %u", err);
+        static DWORD s_lastRecvError = 0;
+        if (err != s_lastRecvError) {
+            VolcDebugLog("ReceiveResult: error %u (suppressing repeats)", err);
+            s_lastRecvError = err;
+        }
+        if (sess) sess->connected = false;
         return result;
     }
     if (bytesRead == 0) {
         VolcDebugLog("ReceiveResult: 0 bytes (close frame)");
+        if (sess) sess->connected = false;
         return result;
     }
 
