@@ -2,6 +2,38 @@
 
 > 🇬🇧 [English](../CHANGELOG.md)
 
+## v0.8.0 (2026-05-17)
+
+### 新增
+
+- **本地 ASR 流式 VAD**：VAD 现在在录音期间（WASAPI 采集线程中）实时运行，而非录音结束后。语音段实时收集，松开按键后直接传入 ASR，跳过冗余 VAD 步骤。支持 Silero VAD 和 FireRed VAD
+- **火山引擎 ASR 流式 VAD**：FireRed VAD 在火山引擎录音期间运行，采用三状态机（PreSpeech → InSpeech → PossibleTail）进行智能音频裁剪。说话前静音缓冲并裁剪；尾部静音保持直到语音恢复或录音结束。未检测到语音时返回 "No speech detected"，不发送音频到服务器
+- **FireRed VAD 流式 API**：新增 `StreamVadPostprocessor` 类，提供 `GetConcatenatedSamples()`、`HasSpeech()`、`Flush()`、`Reset()` 方法用于实时 VAD 处理。`GetConcatenatedSamples()` 合并 VAD 段并正确处理重叠
+- **HUD 语音检测视觉反馈**：音量条仅在音频电平超过阈值（0.04）时动画。条形颜色仅在检测到语音时从空闲渐变切换为活跃渐变（`g_hudHasSpoken` 标志）
+- **"No speech detected" HUD 显示时长**：显示 1500ms（正常结果 200ms，错误 2200ms）
+
+### 修复
+
+- **火山引擎 nostream/async 长录音卡死**（严重）：录音超过约 15 秒时，TCP 接收缓冲区满导致 `WinHttpWebSocketSend` 无限阻塞。修复方式：
+  - async 和 nostream 模式均启动 `drainThread`（此前仅 async 有）
+  - `SendAudio(isLast=true)` 在 async/nostream 模式下跳过接收，由 drainThread 处理最终响应
+  - 先发送 isLast 帧再 join drainThread（此前顺序相反——先 join 停止了读取线程，导致 join 期间 TCP 缓冲区溢出）
+  - 删除与 drainThread 竞争同一 WebSocket 句柄的 nostream drain 循环
+- **Watchdog 录音期间误杀会话**：18 秒 watchdog 计时器从录音开始启动，但可能在用户仍在录音时触发。现在 `g_recording` 为 true 时自动续期，仅在录音结束后触发 force-abort
+- **统一 `ExtractJsonStr`**：移除 `baidu_asr.h` 和 `volcengine_asr.h` 中的重复实现，合并到 `utils.h`，正确处理转义引号（通过计算连续反斜杠数量判断）
+- **`PostQuitMessage(0)` 污染外层消息循环**：在 `settings.cpp` 中替换为 `IsWindow(dlg)` 检查（2 处）
+- **`g_streamingVadReady`/`g_volcVadDoTrim` 线程安全**：从普通 `bool` 改为 `std::atomic<bool>`，修复跨线程访问
+- **`s_lastRecvError` 线程安全**：在 `volcengine_asr.h` 中改为 `std::atomic<DWORD>`
+- **`VolcDebugLog` 开销**：现在在格式化日志消息前检查 `g_enableDebugMode`，避免调试模式关闭时的不必要字符串操作
+- **`ReceiveResult` 连接状态追踪**：在错误或零字节读取时设置 `sess->connected = false`，允许正确的连接状态检测
+- **`AddVolcRecognitionHistory` 过滤**：现在也跳过 "No speech detected" 条目
+
+### 变更
+
+- **移除启动时 "ASR ready" HUD 显示**：ASR 预加载完成时的 HUD 通知与 `kHudHideTimer` 冲突，当用户启动后立即按热键时会导致 HUD 提前消失
+- **本地 ASR 流式 VAD 无语音处理**：未检测到语音段时显示 "No speech detected"，而非对静音运行 ASR
+- **火山引擎 ASR 提前退出**：VAD 在 PreSpeech 状态未检测到语音时提前关闭会话，不发送音频到服务器，节省 API 费用
+
 ## v0.7.5 (2026-05-15)
 
 ### 修复

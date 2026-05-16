@@ -240,23 +240,87 @@ void WasapiCapture::CaptureThread() {
                     LeaveCriticalSection(&g_audioLock);
 
                     if (g_volcStreaming.load()) {
-                        EnterCriticalSection(&g_volcAudioCs);
-                        g_volcPendingAudio.insert(g_volcPendingAudio.end(), begin, begin + written * sizeof(int16_t));
-                        LeaveCriticalSection(&g_volcAudioCs);
+                        std::vector<BYTE> frameData(begin, begin + written * sizeof(int16_t));
+
+                        if (g_volcVadDoTrim && g_streamingVadReady) {
+                            constexpr int kPreSpeech = 0, kInSpeech = 1, kPossibleTail = 2;
+                            constexpr int kTailSilentThreshold = 20;
+                            constexpr size_t kPreSpeechKeep = 20;
+
+                            std::vector<float> floatBuf(written);
+                            for (UINT32 i = 0; i < written; ++i)
+                                floatBuf[i] = static_cast<float>(out[i]) / 32768.0f;
+
+                            bool hasVoice = false;
+                            g_asrEngine.Lock();
+                            if (g_config.vadModel == L"firered") {
+                                g_asrEngine.fireRedVad->Process(floatBuf.data(), static_cast<int>(floatBuf.size()));
+                                hasVoice = g_asrEngine.fireRedVad->IsInSpeech();
+                            } else {
+                                g_asrEngine.vad->AcceptWaveform(floatBuf.data(), static_cast<int32_t>(floatBuf.size()));
+                                hasVoice = g_asrEngine.vad->IsDetected();
+                            }
+                            g_asrEngine.Unlock();
+                            if (hasVoice) g_vadDetectedVoice.store(true);
+
+                            EnterCriticalSection(&g_volcAudioCs);
+                            if (g_volcVadState == kPreSpeech) {
+                                if (hasVoice) {
+                                    while (g_volcVadPreBuffer.size() > kPreSpeechKeep)
+                                        g_volcVadPreBuffer.pop_front();
+                                    for (auto& pc : g_volcVadPreBuffer)
+                                        g_volcPendingAudio.insert(g_volcPendingAudio.end(), pc.begin(), pc.end());
+                                    g_volcVadPreBuffer.clear();
+                                    g_volcPendingAudio.insert(g_volcPendingAudio.end(), frameData.begin(), frameData.end());
+                                    g_volcVadState = kInSpeech;
+                                } else {
+                                    g_volcVadPreBuffer.push_back(std::move(frameData));
+                                }
+                            } else if (g_volcVadState == kInSpeech) {
+                                g_volcPendingAudio.insert(g_volcPendingAudio.end(), frameData.begin(), frameData.end());
+                                if (!hasVoice) {
+                                    g_volcVadSilentCount++;
+                                    if (g_volcVadSilentCount >= kTailSilentThreshold) {
+                                        g_volcVadState = kPossibleTail;
+                                        g_volcVadTailBuffer.clear();
+                                    }
+                                } else {
+                                    g_volcVadSilentCount = 0;
+                                }
+                            } else {
+                                g_volcVadTailBuffer.push_back(std::move(frameData));
+                                if (hasVoice) {
+                                    for (auto& tc : g_volcVadTailBuffer)
+                                        g_volcPendingAudio.insert(g_volcPendingAudio.end(), tc.begin(), tc.end());
+                                    g_volcVadTailBuffer.clear();
+                                    g_volcVadSilentCount = 0;
+                                    g_volcVadState = kInSpeech;
+                                }
+                            }
+                            LeaveCriticalSection(&g_volcAudioCs);
+                        } else {
+                            EnterCriticalSection(&g_volcAudioCs);
+                            g_volcPendingAudio.insert(g_volcPendingAudio.end(), frameData.begin(), frameData.end());
+                            LeaveCriticalSection(&g_volcAudioCs);
+                        }
                     }
 
-                    if (g_streamingVadReady) {
+                    if (g_streamingVadReady && !(g_volcStreaming.load() && g_volcVadDoTrim)) {
                         std::vector<float> floatBuf(written);
                         for (UINT32 i = 0; i < written; ++i)
                             floatBuf[i] = static_cast<float>(out[i]) / 32768.0f;
 
+                        bool hasVoice = false;
                         g_asrEngine.Lock();
                         if (g_config.vadModel == L"firered") {
                             g_asrEngine.fireRedVad->Process(floatBuf.data(), static_cast<int>(floatBuf.size()));
+                            hasVoice = g_asrEngine.fireRedVad->IsInSpeech();
                         } else {
                             g_asrEngine.vad->AcceptWaveform(floatBuf.data(), static_cast<int32_t>(floatBuf.size()));
+                            hasVoice = g_asrEngine.vad->IsDetected();
                         }
                         g_asrEngine.Unlock();
+                        if (hasVoice) g_vadDetectedVoice.store(true);
                     }
 
                     m_resamplePhase -= written / m_resampleRatio;

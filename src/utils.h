@@ -44,3 +44,28 @@ inline std::wstring Trim(std::wstring value) {
     const size_t last = value.find_last_not_of(L" \t\r\n");
     return value.substr(first, last - first + 1);
 }
+
+inline std::wstring ExtractJsonStr(const std::string& json, const std::string& key) {
+    std::string search = "\"" + key + "\"";
+    size_t pos = json.find(search);
+    if (pos == std::string::npos) return L"";
+    pos += search.size();
+    pos = json.find(':', pos);
+    if (pos == std::string::npos) return L"";
+    pos++;
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\n' || json[pos] == '\r')) pos++;
+    if (pos >= json.size() || json[pos] != '"') return L"";
+    pos++;
+    size_t start = pos;
+    while (pos < json.size()) {
+        if (json[pos] == '"') {
+            size_t bs = 0;
+            size_t k = pos;
+            while (k > start && json[k - 1] == '\\') { bs++; k--; }
+            if (bs % 2 == 0) break;
+        }
+        if (json[pos] == '\\' && pos + 1 < json.size()) pos++;
+        pos++;
+    }
+    return Utf8ToWide(json.substr(start, pos - start));
+}

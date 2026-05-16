@@ -20,8 +20,11 @@
 
 #define VOLC_DEBUG_LOG 1
 
+extern bool g_enableDebugMode;
+
 #if VOLC_DEBUG_LOG
 inline void VolcDebugLog(const char* fmt, ...) {
+    if (!g_enableDebugMode) return;
     static std::mutex s_logMutex;
     static char logPath[MAX_PATH] = {};
     std::lock_guard<std::mutex> lk(s_logMutex);
@@ -130,37 +133,6 @@ struct VolcResult {
     bool definite = false;
 };
 
-inline std::wstring ExtractJsonStr(const std::string& json, const std::string& key) {
-    std::string search = "\"" + key + "\"";
-    size_t pos = json.find(search);
-    if (pos == std::string::npos) return L"";
-    pos += search.size();
-    pos = json.find(':', pos);
-    if (pos == std::string::npos) return L"";
-    pos++;
-    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\n' || json[pos] == '\r')) pos++;
-    if (pos >= json.size()) return L"";
-    if (json[pos] != '"') return L"";
-    pos++;
-    size_t start = pos;
-    while (pos < json.size()) {
-        if (json[pos] == '"') {
-            size_t bs = 0;
-            size_t k = pos;
-            while (k > start && json[k - 1] == '\\') { bs++; k--; }
-            if (bs % 2 == 0) break;
-        }
-        if (json[pos] == '\\' && pos + 1 < json.size()) pos++;
-        pos++;
-    }
-    std::wstring result = Utf8ToWide(json.substr(start, pos - start));
-    if (!result.empty()) {
-        VolcDebugLog("ExtractJsonStr: key='%s' raw_bytes=%zu result_wchars=%zu",
-                     key.c_str(), pos - start, result.size());
-    }
-    return result;
-}
-
 inline std::wstring GenerateUuidStr() {
     wchar_t buf[48] = {};
     ULONGLONG ticks = GetTickCount64();
@@ -268,10 +240,10 @@ inline VolcResult ReceiveResult(HINTERNET hWebSocket, DWORD timeoutMs, VolcSessi
         return result;
     }
     if (err != ERROR_SUCCESS) {
-        static DWORD s_lastRecvError = 0;
-        if (err != s_lastRecvError) {
+        static std::atomic<DWORD> s_lastRecvError{0};
+        if (err != s_lastRecvError.load()) {
             VolcDebugLog("ReceiveResult: error %u (suppressing repeats)", err);
-            s_lastRecvError = err;
+            s_lastRecvError.store(err);
         }
         if (sess) sess->connected = false;
         return result;
@@ -363,10 +335,16 @@ inline VolcResult ReceiveResult(HINTERNET hWebSocket, DWORD timeoutMs, VolcSessi
             std::string payloadJson(responseBody.begin() + static_cast<ptrdiff_t>(pos),
                                     responseBody.begin() + static_cast<ptrdiff_t>(pos + payloadSize));
             std::wstring text = ExtractJsonStr(payloadJson, "text");
+            if (!text.empty()) {
+                VolcDebugLog("ExtractJsonStr: key='text' result_wchars=%zu", text.size());
+            }
             if (text.empty()) {
                 size_t rp = payloadJson.find("\"result\"");
                 if (rp != std::string::npos) {
                     text = ExtractJsonStr(payloadJson.substr(rp), "text");
+                    if (!text.empty()) {
+                        VolcDebugLog("ExtractJsonStr (result): key='text' result_wchars=%zu", text.size());
+                    }
                 }
             }
             bool isDefinite = ExtractJsonBool(payloadJson, "definite");
@@ -715,28 +693,13 @@ inline std::wstring SendAudio(VolcSession& sess, const std::vector<BYTE>& pcmChu
         sess.sequence++;
     }
 
-    if ((asyncMode || nostreamMode) && !isLast) {
+    if ((asyncMode || nostreamMode) && isLast) {
+        VolcDebugLog("SendAudio: isLast sent (%ls, skipping receive — drainThread will read result)",
+                     asyncMode ? "async" : "nostream");
         return L"";
     }
 
-    if (isLast && nostreamMode) {
-        ULONGLONG tDrain0 = GetTickCount64();
-        int emptyFrames = 0;
-        VolcDebugLog("SendAudio nostream drain: waiting for final result...");
-        while (true) {
-            if (!sess.connected || sess.forceAbort.load()) break;
-            VolcResult vr = ReceiveResult(sess.hWebSocket, 1500, &sess);
-            if (!vr.text.empty()) {
-                ULONGLONG tDrain1 = GetTickCount64();
-                VolcDebugLog("SendAudio nostream drain: got text='%ls' definite=%d in %llums (empty_frames=%d)",
-                             vr.text.c_str(), vr.definite, tDrain1 - tDrain0, emptyFrames);
-                return vr.text;
-            }
-            emptyFrames++;
-            if (GetTickCount64() - tDrain0 > 10000) break;
-        }
-        ULONGLONG tDrain1 = GetTickCount64();
-        VolcDebugLog("SendAudio nostream drain: no text after %llums (frames=%d)", tDrain1 - tDrain0, emptyFrames);
+    if ((asyncMode || nostreamMode) && !isLast) {
         return L"";
     }
 

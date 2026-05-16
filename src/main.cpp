@@ -49,6 +49,7 @@ ID2D1GradientStopCollection* g_hudBarGradientStopsRec = nullptr;
 ID2D1GradientStopCollection* g_hudBarGradientStopsIdle = nullptr;
 IDWriteTextFormat* g_hudTextFormat = nullptr;
 Config g_config;
+bool g_enableDebugMode = false;
 bool g_recording = false;
 UINT g_activeHotkeyKey = 0;
 bool g_capsLockHotkeyPending = false;
@@ -64,14 +65,17 @@ bool g_captureActive = false;
 std::atomic<float> g_audioLevel{ 0.0f };
 float g_hudSmoothedLevel = 0.0f;
 bool g_hudHasSpoken = false;
+std::atomic<bool> g_vadDetectedVoice{false};
 WasapiCapture g_wasapiCapture;
 std::vector<HWND> g_recognitionControls;
-std::vector<HWND> g_shortcutControls;
+std::vector<HWND> g_generalControls;
 std::vector<HWND> g_llmControls;
 std::vector<HWND> g_promptControls;
 std::vector<HWND> g_cloudAsrControls;
 std::vector<HWND> g_baiduControls;
 std::vector<HWND> g_volcengineControls;
+std::vector<HWND> g_vadFireredControls;
+std::vector<HWND> g_vadSileroControls;
 bool g_hudIsRefining = false;
 bool g_llmKeyVisible = false;
 bool g_baiduKeyVisible = false;
@@ -79,10 +83,15 @@ bool g_baiduApiKeyVisible = false;
 bool g_volcKeyVisible = false;
 volc_asr::VolcSession g_volcSession;
 std::atomic<bool> g_volcStreaming{false};
-std::unique_ptr<firered_vad::FireRedVad> g_volcVad;
 std::thread g_volcThread;
 CRITICAL_SECTION g_volcAudioCs;
 std::vector<BYTE> g_volcPendingAudio;
+std::atomic<int> g_volcVadState{0};
+int g_volcVadSilentCount = 0;
+std::deque<std::vector<BYTE>> g_volcVadPreBuffer;
+std::vector<std::vector<BYTE>> g_volcVadTailBuffer;
+std::atomic<bool> g_volcVadDoTrim{false};
+size_t g_volcSentBytes = 0;
 namespace volc_asr { std::atomic<bool> g_volcKeepAlive{false}; }
 AsrEngine g_asrEngine;
 int g_cloudProviderIdx = 0;
@@ -98,8 +107,9 @@ double g_punctMs = 0.0;
 double g_cloudApiMs = 0.0;
 double g_llmMs = 0.0;
 std::wstring g_vadModelName;
+size_t g_vadTrimmedSamples = 0;
 std::vector<float> g_streamingVadSamples;
-bool g_streamingVadReady = false;
+std::atomic<bool> g_streamingVadReady{false};
 static std::wstring g_lastRawAsrText;
 static size_t g_lastPcmBytes = 0;
 static bool s_wasapiUsed = false;
@@ -177,23 +187,6 @@ static std::vector<float> PcmToFloat(const std::vector<BYTE>& pcm) {
     for (size_t i = 0; i < count; ++i)
         floats[i] = static_cast<float>(samples[i]) / 32768.0f;
     return floats;
-}
-
-static void EnsureVolcVad() {
-    if (g_volcVad) return;
-    try {
-        std::wstring modelPath = AppRootDir() + L"\\models\\fireredvad_stream_vad_with_cache.onnx";
-        firered_vad::FireRedVadConfig cfg;
-        cfg.modelPath = WideToUtf8(modelPath);
-        cfg.threshold = 0.5f;
-        g_volcVad = firered_vad::FireRedVad::Create(cfg);
-        if (g_volcVad) {
-            VolcDebugLog("EnsureVolcVad: initialized OK");
-        }
-    } catch (...) {
-        VolcDebugLog("EnsureVolcVad: model load failed, VAD disabled");
-        g_volcVad.reset();
-    }
 }
 
 static void AddVolcRecognitionHistory(const std::wstring& text) {
@@ -290,16 +283,18 @@ void RecognizeAsync(const std::vector<BYTE>& pcm) {
         return;
     }
 
-    std::thread([config, pcm]() {
+    std::vector<float> localStreamingVadSamples = std::move(g_streamingVadSamples);
+    g_streamingVadSamples.clear();
+    std::thread([config, pcm, localStreamingVadSamples = std::move(localStreamingVadSamples)]() {
         g_lastPcmBytes = pcm.size();
 
         HiResTimer tPcm;
         std::vector<float> samples;
         Config workConfig = config;
 
-        if (!g_streamingVadSamples.empty()) {
-            samples = std::move(g_streamingVadSamples);
-            g_streamingVadSamples.clear();
+        if (!localStreamingVadSamples.empty()) {
+            if (config.enableDebugMode) g_vadTrimmedSamples = localStreamingVadSamples.size();
+            samples = std::move(localStreamingVadSamples);
             workConfig.enableVad = false;
         } else {
             samples = PcmToFloat(pcm);
@@ -376,7 +371,36 @@ void StartRecordingSession() {
 
         if (g_volcThread.joinable()) g_volcThread.join();
         g_volcSession.forceAbort = false;
-        EnsureVolcVad();
+
+        g_streamingVadReady = false;
+        g_volcVadState = 0;
+        g_volcVadSilentCount = 0;
+        g_volcVadPreBuffer.clear();
+        g_volcVadTailBuffer.clear();
+        g_volcVadDoTrim = false;
+        g_volcSentBytes = 0;
+
+        bool doVad = g_config.enableVad;
+        if (doVad) {
+            const int threads = ResolveThreads(g_config.threads);
+            g_asrEngine.Lock();
+            bool ok = g_asrEngine.EnsureVadForConfig(g_config, threads);
+            if (ok) {
+                if (g_config.vadModel == L"firered") {
+                    g_asrEngine.fireRedVad->Reset();
+                } else {
+                    g_asrEngine.vad->Reset();
+                }
+            } else {
+                doVad = false;
+            }
+            g_asrEngine.Unlock();
+            if (doVad) {
+                g_streamingVadReady = true;
+                g_volcVadDoTrim = true;
+            }
+            VolcDebugLog("Volc thread: VAD active (%ls), trim=%d", g_config.vadModel.c_str(), g_volcVadDoTrim.load() ? 1 : 0);
+        }
         g_volcThread = std::thread([vcfg, config]() {
             ULONGLONG tTotal0 = GetTickCount64();
 
@@ -415,72 +439,9 @@ void StartRecordingSession() {
             std::vector<BYTE> chunk;
             chunk.reserve(kChunkBytes);
 
-            constexpr int kPreSpeech = 0, kInSpeech = 1, kPossibleTail = 2;
-            int state = kPreSpeech;
-            std::deque<std::vector<BYTE>> preBuffer;
-            std::vector<std::vector<BYTE>> tailBuffer;
-            int silentCount = 0;
-            constexpr int kTailSilentThreshold = 5;
-            constexpr size_t kPreSpeechKeep = 2;
-            bool doVad = (g_volcVad != nullptr);
-            bool doTrim = doVad && g_config.enableVad;
-
-            if (doVad) {
-                g_volcVad->Reset();
-                VolcDebugLog("Volc thread: VAD active, trim=%d", doTrim ? 1 : 0);
-            }
-
-            auto processChunk = [&](std::vector<BYTE>& c) -> std::wstring {
-                if (!doVad) {
-                    state = kInSpeech;
-                    return volc_asr::SendAudio(g_volcSession, c, false, asyncMode, nostreamMode);
-                }
-                auto floatSamples = PcmToFloat(c);
-                g_volcVad->Process(floatSamples.data(), (int)floatSamples.size());
-                bool hasVoice = g_volcVad->HasSpeech();
-                if (state == kPreSpeech) {
-                    if (hasVoice) {
-                        if (doTrim) {
-                            while (preBuffer.size() > kPreSpeechKeep)
-                                preBuffer.pop_front();
-                        }
-                        for (auto& pc : preBuffer)
-                            volc_asr::SendAudio(g_volcSession, pc, false, asyncMode, nostreamMode);
-                        preBuffer.clear();
-                        state = kInSpeech;
-                        VolcDebugLog("VAD: speech detected, entering InSpeech");
-                        return volc_asr::SendAudio(g_volcSession, c, false, asyncMode, nostreamMode);
-                    } else {
-                        preBuffer.push_back(std::move(c));
-                        return L"";
-                    }
-                } else if (state == kInSpeech) {
-                    if (doTrim) {
-                        if (!hasVoice) {
-                            silentCount++;
-                            if (silentCount >= kTailSilentThreshold) {
-                                state = kPossibleTail;
-                                tailBuffer.clear();
-                                VolcDebugLog("VAD: tail silence, entering PossibleTail");
-                            }
-                        } else {
-                            silentCount = 0;
-                        }
-                    }
-                    return volc_asr::SendAudio(g_volcSession, c, false, asyncMode, nostreamMode);
-                } else { // PossibleTail
-                    tailBuffer.push_back(std::move(c));
-                    if (hasVoice) {
-                        VolcDebugLog("VAD: speech resumed, flushing %zu tail chunks", tailBuffer.size());
-                        for (auto& tc : tailBuffer)
-                            volc_asr::SendAudio(g_volcSession, tc, false, asyncMode, nostreamMode);
-                        tailBuffer.clear();
-                        silentCount = 0;
-                        state = kInSpeech;
-                    }
-                    return L"";
-                }
-                return L"";
+            auto sendChunk = [&](std::vector<BYTE>& c) -> std::wstring {
+                g_volcSentBytes += c.size();
+                return volc_asr::SendAudio(g_volcSession, c, false, asyncMode, nostreamMode);
             };
 
             std::wstring lastPartial;
@@ -488,7 +449,7 @@ void StartRecordingSession() {
             std::atomic<bool> asyncDrainDone{false};
             std::thread drainThread;
 
-            if (asyncMode) {
+            if (asyncMode || nostreamMode) {
                 drainThread = std::thread([&]() {
                     while (!asyncDrainDone && g_volcSession.hWebSocket && !g_volcSession.forceAbort.load()) {
                         std::wstring partial = volc_asr::DrainReceiveBuffer(g_volcSession.hWebSocket, &g_volcSession);
@@ -522,7 +483,7 @@ void StartRecordingSession() {
                 LeaveCriticalSection(&g_volcAudioCs);
 
                 if (hasData && chunk.size() >= kChunkBytes) {
-                    std::wstring partial = processChunk(chunk);
+                    std::wstring partial = sendChunk(chunk);
                     chunk.clear();
                     if (!g_volcSession.hWebSocket) break;
                     if (!asyncMode && !partial.empty() && partial != lastPartial) {
@@ -538,24 +499,19 @@ void StartRecordingSession() {
 
             if (g_volcSession.forceAbort.load()) {
                 VolcDebugLog("Volc thread: forceAbort detected, skipping drain");
-                state = kInSpeech;
             }
 
-            // Process remaining partial chunk
             if (!g_volcSession.forceAbort.load() && !chunk.empty()) {
-                std::wstring partial = processChunk(chunk);
+                std::wstring partial = sendChunk(chunk);
                 if (!asyncMode && !partial.empty()) lastPartial = partial;
             }
 
             int chunksSent = g_volcSession.sequence - 2;
-            VolcDebugLog("Volc thread: send loop ended, chunks_sent=%d, vad_state=%d", chunksSent, (int)state);
+            VolcDebugLog("Volc thread: send loop ended, chunks_sent=%d, vad_state=%d", chunksSent, g_volcVadState.load());
 
-            if (asyncMode) {
+            if (g_volcVadState == 0 && g_volcVadDoTrim) {
                 asyncDrainDone = true;
                 if (drainThread.joinable()) drainThread.join();
-            }
-
-            if (state == kPreSpeech) {
                 VolcDebugLog("Volc thread: no speech detected, closing without sending audio");
                 g_volcSession.forceAbort = true;
                 volc_asr::CloseSession(g_volcSession);
@@ -571,8 +527,14 @@ void StartRecordingSession() {
                 if (!lastResult.empty()) lastPartial = lastResult;
             }
 
+            if (asyncMode || nostreamMode) {
+                asyncDrainDone = true;
+                if (drainThread.joinable()) drainThread.join();
+            }
+
             std::wstring finalText = volc_asr::CloseSession(g_volcSession);
             if (finalText.empty()) finalText = lastPartial;
+            if (finalText.empty()) finalText = asyncPartial;
 
             if (finalText.empty()) finalText = L"(empty result)";
             if (g_volcSession.forceAbort.load() && finalText == L"(empty result)") {
@@ -634,10 +596,12 @@ void StopRecordingSession() {
     g_cloudApiMs = 0.0;
     g_llmMs = 0.0;
     g_vadModelName.clear();
+    g_vadTrimmedSamples = 0;
     g_lastRawAsrText.clear();
 
     if (g_config.asrBackend == L"volcengine" && g_volcStreaming.load()) {
         g_volcStreaming.store(false);
+        g_streamingVadReady = false;
         const std::vector<BYTE> pcm = StopAudioCapture();
         if (pcm.size() < 8000) {
             ShowHud(L"Too short");
@@ -683,6 +647,12 @@ void StopRecordingSession() {
             g_vadModelName = (g_config.vadModel == L"firered") ? L"FireRed" : L"Silero";
         }
         g_streamingVadReady = false;
+
+        if (g_streamingVadSamples.empty()) {
+            ShowHud(L"No speech detected");
+            SetTimer(g_hudWindow, kHudHideTimer, 1500, nullptr);
+            return;
+        }
     }
 
     std::wstring name = (g_config.asrBackend == L"baidu") ? L"Baidu Cloud" : ModelDisplayName(g_config.modelId);
@@ -717,12 +687,6 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     case WM_CREATE:
         AddTrayIcon(hwnd);
         InstallKeyboardHook();
-        if (g_config.asrBackend != L"local") {
-            std::wstring name = (g_config.asrBackend == L"baidu") ? L"Baidu Cloud"
-                : (g_config.asrBackend == L"volcengine") ? L"Volcengine" : L"Cloud";
-            ShowHud(L"ASR ready: " + name);
-            if (g_hudWindow) SetTimer(g_hudWindow, kHudHideTimer, 1500, nullptr);
-        }
         return 0;
     case kTrayMessage:
         if (LOWORD(lParam) == WM_RBUTTONUP || LOWORD(lParam) == WM_CONTEXTMENU) {
@@ -732,6 +696,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         return 0;
     case kReloadMessage:
+        g_enableDebugMode = g_config.enableDebugMode;
         g_asrEngine.Reload();
         if (g_config.asrBackend == L"local") {
             const Config cfg = g_config;
@@ -742,8 +707,6 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         return 0;
     case kPreloadDoneMessage:
-        ShowHud(L"ASR ready: " + ModelDisplayName(g_config.modelId));
-        if (g_hudWindow) SetTimer(g_hudWindow, kHudHideTimer, 1500, nullptr);
         return 0;
     case kAsrResultMessage: {
         KillTimer(g_mainWindow, kVolcWatchdogTimer);
@@ -770,10 +733,29 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                         if (g_punctMs > 0) printf(" | Punct %.0f", g_punctMs);
                         printf(" | Paste %.0f = Total %.0fms\n", pasteMs,
                                g_vadMs + g_asrDecodeMs + g_punctMs + pasteMs);
+                        if (g_vadMs > 0 && g_vadTrimmedSamples > 0) {
+                            size_t rawBytes = g_lastPcmBytes > 0 ? g_lastPcmBytes
+                                : static_cast<size_t>(g_recordingMs * 32.0);
+                            size_t trimBytes = g_vadTrimmedSamples * 2;
+                            double trimMs = g_vadTrimmedSamples / 16.0;
+                            printf("  VAD trim: %.1fs/%zuKB -> %.1fs/%zuKB (%.0f%%)\n",
+                                   g_recordingMs / 1000.0, rawBytes / 1024,
+                                   trimMs / 1000.0, trimBytes / 1024,
+                                   rawBytes > 0 ? 100.0 * trimBytes / rawBytes : 0.0);
+                        }
                     } else {
                         const char* backend = (g_config.asrBackend == L"baidu") ? "Baidu" : "Volcengine";
                         printf("  Pipeline: %s %.0f | Paste %.0f = Total %.0fms\n",
                                backend, g_cloudApiMs, pasteMs, g_cloudApiMs + pasteMs);
+                        if (g_config.asrBackend == L"volcengine" && g_volcVadDoTrim) {
+                            size_t rawBytes = static_cast<size_t>(g_recordingMs * 32.0);
+                            if (g_lastPcmBytes > 0) rawBytes = g_lastPcmBytes;
+                            double trimMs = g_volcSentBytes / 32.0;
+                            printf("  VAD trim: %.1fs/%zuKB -> %.1fs/%zuKB (%.0f%%)\n",
+                                   g_recordingMs / 1000.0, rawBytes / 1024,
+                                   trimMs / 1000.0, g_volcSentBytes / 1024,
+                                   rawBytes > 0 ? 100.0 * g_volcSentBytes / rawBytes : 0.0);
+                        }
                     }
 
                     DebugPrintTextLine(L"OK", text);
@@ -833,8 +815,12 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         if (wParam == kVolcWatchdogTimer) {
             KillTimer(hwnd, kVolcWatchdogTimer);
+            if (g_recording) {
+                SetTimer(hwnd, kVolcWatchdogTimer, 18000, nullptr);
+                return 0;
+            }
             if (g_volcThread.joinable()) {
-                VolcDebugLog("Watchdog: volc thread still running after 15s, force aborting");
+                VolcDebugLog("Watchdog: volc thread still running after 18s, force aborting");
                 g_volcSession.forceAbort = true;
                 HINTERNET hWs = g_volcSession.hWebSocket;
                 if (hWs) { WinHttpCloseHandle(hWs); g_volcSession.hWebSocket = nullptr; }
@@ -859,6 +845,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             return 0;
         case ID_TRAY_DEBUG_MODE:
             g_config.enableDebugMode = !g_config.enableDebugMode;
+            g_enableDebugMode = g_config.enableDebugMode;
             if (g_config.enableDebugMode) DebugModeOpenConsole();
             else DebugModeCloseConsole();
             SaveConfig();
@@ -950,6 +937,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     CreateUiResources();
 
     LoadConfig();
+    g_enableDebugMode = g_config.enableDebugMode;
 
     if (g_config.enableDebugMode) {
         DebugModeOpenConsole();

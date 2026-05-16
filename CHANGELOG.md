@@ -2,6 +2,38 @@
 
 > 🇨🇳 [中文版](doc/CHANGELOG_zh.md)
 
+## v0.8.0 (2026-05-17)
+
+### Added
+
+- **Streaming VAD for local ASR**: VAD now runs during recording (in the WASAPI capture thread) instead of after. Speech segments are collected in real-time and passed directly to ASR on release, skipping the redundant VAD step. Supports both Silero VAD and FireRed VAD
+- **Streaming VAD for Volcengine ASR**: FireRed VAD runs during Volcengine recording with a 3-state machine (PreSpeech → InSpeech → PossibleTail) for intelligent audio trimming. Pre-speech silence is buffered and trimmed; tail silence is held until speech resumes or recording ends. When no speech is detected, returns "No speech detected" without sending audio to the server
+- **FireRed VAD streaming API**: Added `StreamVadPostprocessor` class with `GetConcatenatedSamples()`, `HasSpeech()`, `Flush()`, and `Reset()` methods for real-time VAD processing. `GetConcatenatedSamples()` merges VAD segments with proper overlap handling
+- **HUD speech detection visual feedback**: Volume bars only animate when audio level exceeds threshold (0.04). Bar color changes from idle gradient to active gradient only when speech has been detected (`g_hudHasSpoken` flag)
+- **"No speech detected" HUD timing**: Shows for 1500ms (vs 200ms for normal results, 2200ms for errors)
+
+### Fixed
+
+- **Volcengine nostream/async long recording hang** (critical): When recording exceeds ~15s, TCP receive buffer fills up because `SendAudio` only sends without reading responses. This causes `WinHttpWebSocketSend` to block indefinitely. Fixed by:
+  - Adding `drainThread` for both async and nostream modes (previously only async had it)
+  - `SendAudio(isLast=true)` now skips receive in async/nostream modes, letting drainThread handle the final response
+  - Send isLast frame *before* joining drainThread (was reversed before — joining first stopped the reader, causing TCP buffer overflow during the join)
+  - Removed nostream drain loop that competed with drainThread for the same WebSocket handle
+- **Watchdog killing session during recording**: The 18s watchdog timer was started at recording begin but could fire while the user was still recording. Now auto-renews when `g_recording` is true, only triggers force-abort after recording ends
+- **Unified `ExtractJsonStr`**: Removed duplicate implementations from `baidu_asr.h` and `volcengine_asr.h`, consolidated into `utils.h` with proper escape handling (counting consecutive backslashes before quote)
+- **`PostQuitMessage(0)` polluting outer message loop**: Replaced with `IsWindow(dlg)` check in `settings.cpp` (2 occurrences)
+- **`g_streamingVadReady`/`g_volcVadDoTrim` thread safety**: Changed from plain `bool` to `std::atomic<bool>` for cross-thread access
+- **`s_lastRecvError` thread safety**: Changed to `std::atomic<DWORD>` in `volcengine_asr.h`
+- **`VolcDebugLog` overhead**: Now checks `g_enableDebugMode` before formatting log messages, avoiding unnecessary string operations when debug mode is off
+- **`ReceiveResult` connection state tracking**: Now sets `sess->connected = false` on error or zero-byte read, allowing proper connection state detection
+- **`AddVolcRecognitionHistory` filtering**: Now also skips "No speech detected" entries from recognition history
+
+### Changed
+
+- **Removed startup "ASR ready" HUD display**: The HUD notification on ASR preload completion conflicted with `kHudHideTimer` when the user pressed the hotkey immediately after startup, causing the HUD to disappear prematurely
+- **Local ASR with streaming VAD**: When no speech segments are detected, shows "No speech detected" instead of running ASR on silence
+- **Volcengine ASR early exit**: When VAD detects no speech in PreSpeech state, closes session early without sending audio to server, saving API costs
+
 ## v0.7.5 (2026-05-15)
 
 ### Fixed

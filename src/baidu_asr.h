@@ -25,20 +25,6 @@ struct BaiduConfig {
     int devPid = 1537;
 };
 
-inline std::wstring ExtractJsonStr(const std::string& json, const std::string& key) {
-    std::string search = "\"" + key + "\"";
-    size_t pos = json.find(search);
-    if (pos == std::string::npos) return L"";
-    pos = json.find(':', pos + search.size());
-    if (pos == std::string::npos) return L"";
-    pos = json.find('"', pos + 1);
-    if (pos == std::string::npos) return L"";
-    size_t start = pos + 1;
-    size_t end = json.find('"', start);
-    if (end == std::string::npos) return L"";
-    return Utf8ToWide(json.substr(start, end - start));
-}
-
 inline int ExtractJsonInt(const std::string& json, const std::string& key, int fallback = 0) {
     std::string search = "\"" + key + "\"";
     size_t pos = json.find(search);

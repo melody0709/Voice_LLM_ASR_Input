@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  Current version: <code>v0.7.5</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
+  Current version: <code>v0.8.0</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -186,6 +186,7 @@ CHANGELOG.md        — Version change log
 See [CHANGELOG.md](CHANGELOG.md)
 
 **Recent Updates:**
+- **v0.8.0** — Streaming VAD (real-time speech detection during recording, skip silence), Volcengine nostream/async long recording hang fix, HUD speech detection visual feedback, watchdog auto-renew during recording, code quality fixes
 - **v0.7.5** — Volcengine WebSocket hang fix (forceAbort), connection prewarm, connection expiry rebuild, WinHTTP proxy/no-proxy fix, timeout tuning, reduced logging verbosity
 - **v0.7.4** — WeChat Chinese IME paste fix (WM_CHAR bypass IME), IMM32 input method state switching, Unicode SendInput fallback, Force Unicode Input menu
 - **v0.7.3** — WASAPI Shared Mode capture (48kHz→16kHz resample + waveIn fallback), Debug Mode console with per-stage timing, Baidu ASR response parsing fixes

@@ -91,8 +91,8 @@ public:
 
 private:
     std::mutex lock_;
-    bool EnsureVad(int threads);
-    bool EnsureFireRedVad();
+    bool EnsureVad(int threads, const Config& config);
+    bool EnsureFireRedVad(const Config& config);
 };
 
 std::vector<float> PcmToFloat(const std::vector<BYTE>& pcm);

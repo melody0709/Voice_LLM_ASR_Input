@@ -164,7 +164,7 @@ inline std::wstring ParseResponse(const std::string& response) {
     pos = response.find(':', pos);
     if (pos == std::string::npos) return L"";
     pos = response.find('"', pos + 1);
-    if (pos == std::wstring::npos) return L"";
+    if (pos == std::string::npos) return L"";
     std::string value;
     bool escape = false;
     for (++pos; pos < response.size(); ++pos) {

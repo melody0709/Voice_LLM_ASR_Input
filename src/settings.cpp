@@ -209,8 +209,8 @@ void AddRecognitionControl(HWND hwnd) {
     if (hwnd) g_recognitionControls.push_back(hwnd);
 }
 
-void AddShortcutControl(HWND hwnd) {
-    if (hwnd) g_shortcutControls.push_back(hwnd);
+void AddGeneralControl(HWND hwnd) {
+    if (hwnd) g_generalControls.push_back(hwnd);
 }
 
 void AddLlmControl(HWND hwnd) {
@@ -233,6 +233,19 @@ void AddVolcengineControl(HWND hwnd) {
     if (hwnd) g_volcengineControls.push_back(hwnd);
 }
 
+void AddVadFireredControl(HWND hwnd) {
+    if (hwnd) g_vadFireredControls.push_back(hwnd);
+}
+
+void AddVadSileroControl(HWND hwnd) {
+    if (hwnd) g_vadSileroControls.push_back(hwnd);
+}
+
+void ShowVadSubGroup(int vadModelIdx) {
+    for (HWND c : g_vadFireredControls) ShowWindow(c, vadModelIdx == 1 ? SW_SHOW : SW_HIDE);
+    for (HWND c : g_vadSileroControls) ShowWindow(c, vadModelIdx == 0 ? SW_SHOW : SW_HIDE);
+}
+
 void ShowCloudSubPage(HWND hwnd, int providerIdx) {
     g_cloudProviderIdx = providerIdx;
     for (HWND c : g_baiduControls) ShowWindow(c, providerIdx == 1 ? SW_SHOW : SW_HIDE);
@@ -240,22 +253,22 @@ void ShowCloudSubPage(HWND hwnd, int providerIdx) {
 }
 
 void ShowSettingsPage(HWND hwnd, int page) {
+    for (HWND control : g_generalControls) {
+        ShowWindow(control, page == 0 ? SW_SHOW : SW_HIDE);
+    }
     for (HWND control : g_recognitionControls) {
-        ShowWindow(control, page == 0 ? SW_SHOW : SW_HIDE);
-    }
-    for (HWND control : g_shortcutControls) {
-        ShowWindow(control, page == 0 ? SW_SHOW : SW_HIDE);
-    }
-    for (HWND control : g_cloudAsrControls) {
         ShowWindow(control, page == 1 ? SW_SHOW : SW_HIDE);
     }
-    for (HWND control : g_llmControls) {
+    for (HWND control : g_cloudAsrControls) {
         ShowWindow(control, page == 2 ? SW_SHOW : SW_HIDE);
     }
-    for (HWND control : g_promptControls) {
+    for (HWND control : g_llmControls) {
         ShowWindow(control, page == 3 ? SW_SHOW : SW_HIDE);
     }
-    if (page == 1) {
+    for (HWND control : g_promptControls) {
+        ShowWindow(control, page == 4 ? SW_SHOW : SW_HIDE);
+    }
+    if (page == 2) {
         ShowCloudSubPage(hwnd, g_cloudProviderIdx);
     } else {
         for (HWND c : g_baiduControls) ShowWindow(c, SW_HIDE);
@@ -385,6 +398,33 @@ void LoadSettingsControls(HWND hwnd) {
     int vadModelIndex = 0;
     if (g_config.vadModel == L"firered") vadModelIndex = 1;
     ComboBox_SetCurSel(vadModelCombo, vadModelIndex);
+
+    {
+        wchar_t buf[32];
+        swprintf(buf, 32, L"%.2f", g_config.vadThreshold);
+        SetWindowTextW(GetDlgItem(hwnd, IDC_VAD_THRESHOLD), buf);
+    }
+    {
+        wchar_t buf[32];
+        swprintf(buf, 32, L"%d", g_config.vadMinSilence);
+        SetWindowTextW(GetDlgItem(hwnd, IDC_VAD_MIN_SILENCE), buf);
+    }
+    {
+        wchar_t buf[32];
+        swprintf(buf, 32, L"%d", g_config.vadMinSpeech);
+        SetWindowTextW(GetDlgItem(hwnd, IDC_VAD_MIN_SPEECH), buf);
+    }
+    {
+        wchar_t buf[32];
+        swprintf(buf, 32, L"%d", g_config.vadPadStart);
+        SetWindowTextW(GetDlgItem(hwnd, IDC_VAD_PAD_START), buf);
+    }
+    {
+        wchar_t buf[32];
+        swprintf(buf, 32, L"%d", g_config.vadSmoothWindow);
+        SetWindowTextW(GetDlgItem(hwnd, IDC_VAD_SMOOTH_WINDOW), buf);
+    }
+    ShowVadSubGroup(vadModelIndex);
 
     HWND hotkeyEdit = GetDlgItem(hwnd, IDC_HOTKEY);
     auto* hotkeyState = hotkeyEdit ? reinterpret_cast<HotkeyEditState*>(GetWindowLongPtrW(hotkeyEdit, GWLP_USERDATA)) : nullptr;
@@ -600,6 +640,36 @@ void SaveSettingsControls(HWND hwnd) {
     {
         int vadIdx = (int)SendMessageW(GetDlgItem(hwnd, IDC_VAD_MODEL), CB_GETCURSEL, 0, 0);
         g_config.vadModel = (vadIdx == 1) ? L"firered" : L"silero";
+    }
+    {
+        wchar_t buf[32] = {};
+        GetWindowTextW(GetDlgItem(hwnd, IDC_VAD_THRESHOLD), buf, 32);
+        float v = (float)_wtof(buf);
+        if (v > 0.0f && v <= 1.0f) g_config.vadThreshold = v;
+    }
+    {
+        wchar_t buf[32] = {};
+        GetWindowTextW(GetDlgItem(hwnd, IDC_VAD_MIN_SILENCE), buf, 32);
+        int v = _wtoi(buf);
+        if (v > 0) g_config.vadMinSilence = v;
+    }
+    {
+        wchar_t buf[32] = {};
+        GetWindowTextW(GetDlgItem(hwnd, IDC_VAD_MIN_SPEECH), buf, 32);
+        int v = _wtoi(buf);
+        if (v > 0) g_config.vadMinSpeech = v;
+    }
+    {
+        wchar_t buf[32] = {};
+        GetWindowTextW(GetDlgItem(hwnd, IDC_VAD_PAD_START), buf, 32);
+        int v = _wtoi(buf);
+        if (v >= 0) g_config.vadPadStart = v;
+    }
+    {
+        wchar_t buf[32] = {};
+        GetWindowTextW(GetDlgItem(hwnd, IDC_VAD_SMOOTH_WINDOW), buf, 32);
+        int v = _wtoi(buf);
+        if (v > 0) g_config.vadSmoothWindow = v;
     }
     g_config.enablePartial = Button_GetCheck(GetDlgItem(hwnd, IDC_PARTIAL)) == BST_CHECKED;
     {
@@ -876,8 +946,7 @@ LRESULT CALLBACK InputWndProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_CLOSE:
         DestroyWindow(hDlg);
         return 0;
-    case WM_DESTROY:  // InputWndProc WM_DESTROY:
-        PostQuitMessage(0);
+    case WM_DESTROY:
         return 0;
     }
     return DefWindowProcW(hDlg, msg, wParam, lParam);
@@ -915,6 +984,7 @@ bool ShowInputDialog(HWND parent, const wchar_t* title, std::wstring& out) {
         if (IsDialogMessageW(dlg, &msg)) continue;
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
+        if (!IsWindow(dlg)) break;
     }
     if (data.ok) { out = data.result; return true; }
     return false;
@@ -1005,7 +1075,6 @@ LRESULT CALLBACK VolcExtraWndProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPa
         DestroyWindow(hDlg);
         return 0;
     case WM_DESTROY:
-        PostQuitMessage(0);
         return 0;
     }
     return DefWindowProcW(hDlg, msg, wParam, lParam);
@@ -1043,6 +1112,7 @@ bool ShowVolcExtraDialog(HWND parent, std::wstring& out) {
         if (IsDialogMessageW(dlg, &msg)) continue;
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
+        if (!IsWindow(dlg)) break;
     }
     if (data.ok) { out = data.text; return true; }
     return false;
@@ -1106,26 +1176,30 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(g_appIcon));
         SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(g_appIcon));
         g_recognitionControls.clear();
-        g_shortcutControls.clear();
+        g_generalControls.clear();
         g_llmControls.clear();
         g_promptControls.clear();
         g_cloudAsrControls.clear();
         g_baiduControls.clear();
         g_volcengineControls.clear();
+        g_vadFireredControls.clear();
+        g_vadSileroControls.clear();
 
         HWND tab = CreateWindowW(WC_TABCONTROLW, nullptr, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
                                 S(UiStyle::Margin), S(16), S(786), S(330), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_TAB)), g_instance, nullptr);
         ApplyUiFont(tab);
         TCITEMW item = {};
         item.mask = TCIF_TEXT;
-        item.pszText = const_cast<LPWSTR>(L"Recognition");
+        item.pszText = const_cast<LPWSTR>(L"General");
         TabCtrl_InsertItem(tab, 0, &item);
-        item.pszText = const_cast<LPWSTR>(L"Cloud ASR");
+        item.pszText = const_cast<LPWSTR>(L"Recognition");
         TabCtrl_InsertItem(tab, 1, &item);
-        item.pszText = const_cast<LPWSTR>(L"LLM");
+        item.pszText = const_cast<LPWSTR>(L"Cloud ASR");
         TabCtrl_InsertItem(tab, 2, &item);
-        item.pszText = const_cast<LPWSTR>(L"LLM Prompt");
+        item.pszText = const_cast<LPWSTR>(L"LLM");
         TabCtrl_InsertItem(tab, 3, &item);
+        item.pszText = const_cast<LPWSTR>(L"LLM Prompt");
+        TabCtrl_InsertItem(tab, 4, &item);
 
         HWND control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(0)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"ASR Backend");
         AddRecognitionControl(control);
@@ -1160,23 +1234,82 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         AddRecognitionControl(control);
         AddRecognitionControl(CreateCombo(hwnd, IDC_VAD_MODEL, S(UiStyle::InputLeft), S(UiStyle::RowInputY(4)), S(UiStyle::ComboW), S(UiStyle::ComboH)));
 
-        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(5)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Punctuation");
-        AddRecognitionControl(control);
-        AddRecognitionControl(CreateCombo(hwnd, IDC_POSTPROCESS, S(UiStyle::InputLeft), S(UiStyle::RowInputY(5)), S(UiStyle::ComboW), S(UiStyle::ComboH)));
+        const int vadGroupY = S(UiStyle::RowInputY(5));
+        HWND vadGroup = CreateWindowW(L"BUTTON", L"VAD Parameters", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+                                       S(30), vadGroupY, S(788), S(170), hwnd, nullptr, g_instance, nullptr);
+        ApplyUiFont(vadGroup);
+        AddRecognitionControl(vadGroup);
 
-        const int shortcutY = S(UiStyle::RowInputY(6));
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), vadGroupY + S(28), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Threshold");
+        AddRecognitionControl(control);
+        HWND vadThreshold = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                                             S(UiStyle::InputLeft), vadGroupY + S(20), S(100), S(UiStyle::EditH), hwnd,
+                                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VAD_THRESHOLD)), g_instance, nullptr);
+        ApplyUiFont(vadThreshold);
+        AddRecognitionControl(vadThreshold);
+        control = CreateLabel(hwnd, S(UiStyle::InputLeft) + S(108), vadGroupY + S(28), S(80), S(UiStyle::LabelH), L"(0.0~1.0)");
+        AddRecognitionControl(control);
+
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), vadGroupY + S(68), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Min silence");
+        AddRecognitionControl(control);
+        HWND vadMinSilence = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
+                                              S(UiStyle::InputLeft), vadGroupY + S(60), S(100), S(UiStyle::EditH), hwnd,
+                                              reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VAD_MIN_SILENCE)), g_instance, nullptr);
+        ApplyUiFont(vadMinSilence);
+        AddRecognitionControl(vadMinSilence);
+        control = CreateLabel(hwnd, S(UiStyle::InputLeft) + S(108), vadGroupY + S(68), S(80), S(UiStyle::LabelH), L"ms");
+        AddRecognitionControl(control);
+
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), vadGroupY + S(108), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Min speech");
+        AddRecognitionControl(control);
+        HWND vadMinSpeech = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
+                                             S(UiStyle::InputLeft), vadGroupY + S(100), S(100), S(UiStyle::EditH), hwnd,
+                                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VAD_MIN_SPEECH)), g_instance, nullptr);
+        ApplyUiFont(vadMinSpeech);
+        AddRecognitionControl(vadMinSpeech);
+        control = CreateLabel(hwnd, S(UiStyle::InputLeft) + S(108), vadGroupY + S(108), S(80), S(UiStyle::LabelH), L"ms");
+        AddRecognitionControl(control);
+
+        control = CreateLabel(hwnd, S(420), vadGroupY + S(68), S(100), S(UiStyle::LabelH), L"Pad start");
+        AddRecognitionControl(control);
+        AddVadFireredControl(control);
+        HWND vadPadStart = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
+                                            S(530), vadGroupY + S(60), S(100), S(UiStyle::EditH), hwnd,
+                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VAD_PAD_START)), g_instance, nullptr);
+        ApplyUiFont(vadPadStart);
+        AddRecognitionControl(vadPadStart);
+        AddVadFireredControl(vadPadStart);
+        control = CreateLabel(hwnd, S(638), vadGroupY + S(68), S(80), S(UiStyle::LabelH), L"ms");
+        AddRecognitionControl(control);
+        AddVadFireredControl(control);
+
+        control = CreateLabel(hwnd, S(420), vadGroupY + S(108), S(100), S(UiStyle::LabelH), L"Smooth win");
+        AddRecognitionControl(control);
+        AddVadFireredControl(control);
+        HWND vadSmoothWin = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
+                                             S(530), vadGroupY + S(100), S(100), S(UiStyle::EditH), hwnd,
+                                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VAD_SMOOTH_WINDOW)), g_instance, nullptr);
+        ApplyUiFont(vadSmoothWin);
+        AddRecognitionControl(vadSmoothWin);
+        AddVadFireredControl(vadSmoothWin);
+
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(9)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Punctuation");
+        AddRecognitionControl(control);
+        AddRecognitionControl(CreateCombo(hwnd, IDC_POSTPROCESS, S(UiStyle::InputLeft), S(UiStyle::RowInputY(9)), S(UiStyle::ComboW), S(UiStyle::ComboH)));
+
+        const int shortcutY = S(UiStyle::RowInputY(0));
         HWND shortcutGroup = CreateWindowW(L"BUTTON", L"Shortcut", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
                                            S(30), shortcutY, S(788), S(170), hwnd, nullptr, g_instance, nullptr);
         ApplyUiFont(shortcutGroup);
-        AddRecognitionControl(shortcutGroup);
+        AddGeneralControl(shortcutGroup);
 
         control = CreateLabel(hwnd, S(UiStyle::ContentLeft), shortcutY + S(28), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Hold hotkey");
-        AddRecognitionControl(control);
-        AddRecognitionControl(CreateHotkeyEdit(hwnd, IDC_HOTKEY, S(UiStyle::InputLeft), shortcutY + S(20), S(300), S(UiStyle::HotkeyEditH), CurrentConfiguredHotkey()));
+        AddGeneralControl(control);
+        AddGeneralControl(CreateHotkeyEdit(hwnd, IDC_HOTKEY, S(UiStyle::InputLeft), shortcutY + S(20), S(300), S(UiStyle::HotkeyEditH), CurrentConfiguredHotkey()));
         control = CreateLabel(hwnd, S(UiStyle::ContentLeft), shortcutY + S(68), S(740), S(UiStyle::LabelH), L"Click the field, then press the key or key combination to use while recording.");
-        AddRecognitionControl(control);
+        AddGeneralControl(control);
         control = CreateLabel(hwnd, S(UiStyle::ContentLeft), shortcutY + S(98), S(740), S(UiStyle::LabelH), L"Esc cancels recording a shortcut. Backspace/Delete clears it.");
-        AddRecognitionControl(control);
+        AddGeneralControl(control);
 
         control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(0)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Provider");
         AddLlmControl(control);
@@ -1596,6 +1729,13 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         }
         case IDC_ASR_BACKEND:
             if (HIWORD(wParam) == CBN_SELCHANGE) {
+                return 0;
+            }
+            break;
+        case IDC_VAD_MODEL:
+            if (HIWORD(wParam) == CBN_SELCHANGE) {
+                int idx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_VAD_MODEL));
+                ShowVadSubGroup(idx);
                 return 0;
             }
             break;

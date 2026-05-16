@@ -306,10 +306,10 @@ void DrawHudDirect2D(HWND hwnd) {
     g_hudRenderTarget->DrawRoundedRectangle(capsule, g_hudBrush, 1.0f);
 
     const float level = g_recording ? CurrentHudLevel() : 0.18f;
-    const float kAudioThreshold = 0.04f;
+    const float kAudioThreshold = 0.02f;
     const bool hasAudio = (level > kAudioThreshold);
-    if (g_recording && hasAudio) g_hudHasSpoken = true;
-    if (!g_recording) g_hudHasSpoken = false;
+    if (g_recording && (hasAudio || g_vadDetectedVoice.load())) g_hudHasSpoken = true;
+    if (!g_recording) { g_hudHasSpoken = false; g_vadDetectedVoice.store(false); }
     const float centerY = height / 2.0f;
     const float barWidth = 6.5f;
     const float barGap = 4.0f;

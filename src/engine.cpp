@@ -211,7 +211,6 @@ int ExtractJsonInt(const std::string& json, const std::string& key, int fallback
     if (pos == std::string::npos) return fallback;
     const size_t valueStart = json.find_first_not_of(" \t\r\n", pos + 1);
     if (valueStart == std::string::npos) return fallback;
-    // Support both quoted string and raw number
     if (json[valueStart] == '"') {
         size_t end = json.find('"', valueStart + 1);
         if (end == std::string::npos) return fallback;
@@ -225,6 +224,32 @@ int ExtractJsonInt(const std::string& json, const std::string& key, int fallback
     if (valueEnd == std::string::npos) valueEnd = json.size();
     try {
         return std::stoi(json.substr(valueStart, valueEnd - valueStart));
+    } catch (...) {
+        return fallback;
+    }
+}
+
+float ExtractJsonFloat(const std::string& json, const std::string& key, float fallback) {
+    const std::string marker = "\"" + key + "\"";
+    size_t pos = json.find(marker);
+    if (pos == std::string::npos) return fallback;
+    pos = json.find(':', pos + marker.size());
+    if (pos == std::string::npos) return fallback;
+    const size_t valueStart = json.find_first_not_of(" \t\r\n", pos + 1);
+    if (valueStart == std::string::npos) return fallback;
+    if (json[valueStart] == '"') {
+        size_t end = json.find('"', valueStart + 1);
+        if (end == std::string::npos) return fallback;
+        try {
+            return std::stof(json.substr(valueStart + 1, end - valueStart - 1));
+        } catch (...) {
+            return fallback;
+        }
+    }
+    size_t valueEnd = json.find_first_of(",}\r\n", valueStart);
+    if (valueEnd == std::string::npos) valueEnd = json.size();
+    try {
+        return std::stof(json.substr(valueStart, valueEnd - valueStart));
     } catch (...) {
         return fallback;
     }
@@ -304,6 +329,11 @@ void LoadConfig() {
     g_config.threads = Utf8ToWide(ExtractJsonString(json, "threads", WideToUtf8(g_config.threads)));
     g_config.enableVad = ExtractJsonBool(json, "enable_vad", g_config.enableVad);
     g_config.vadModel = Utf8ToWide(ExtractJsonString(json, "vad_model", WideToUtf8(g_config.vadModel)));
+    g_config.vadThreshold = ExtractJsonFloat(json, "vad_threshold", g_config.vadThreshold);
+    g_config.vadMinSilence = ExtractJsonInt(json, "vad_min_silence", g_config.vadMinSilence);
+    g_config.vadMinSpeech = ExtractJsonInt(json, "vad_min_speech", g_config.vadMinSpeech);
+    g_config.vadPadStart = ExtractJsonInt(json, "vad_pad_start", g_config.vadPadStart);
+    g_config.vadSmoothWindow = ExtractJsonInt(json, "vad_smooth_window", g_config.vadSmoothWindow);
     g_config.enablePartial = ExtractJsonBool(json, "enable_partial", g_config.enablePartial);
     g_config.postprocess = Utf8ToWide(ExtractJsonString(json, "postprocess", WideToUtf8(g_config.postprocess)));
     g_config.hotkey = Utf8ToWide(ExtractJsonString(json, "hotkey", WideToUtf8(g_config.hotkey)));
@@ -376,6 +406,11 @@ void SaveConfig() {
          << "  \"threads\": \"" << EscapeJson(g_config.threads) << "\",\n"
          << "  \"enable_vad\": " << (g_config.enableVad ? "true" : "false") << ",\n"
          << "  \"vad_model\": \"" << EscapeJson(g_config.vadModel) << "\",\n"
+         << "  \"vad_threshold\": " << g_config.vadThreshold << ",\n"
+         << "  \"vad_min_silence\": " << g_config.vadMinSilence << ",\n"
+         << "  \"vad_min_speech\": " << g_config.vadMinSpeech << ",\n"
+         << "  \"vad_pad_start\": " << g_config.vadPadStart << ",\n"
+         << "  \"vad_smooth_window\": " << g_config.vadSmoothWindow << ",\n"
          << "  \"enable_partial\": " << (g_config.enablePartial ? "true" : "false") << ",\n"
          << "  \"postprocess\": \"" << EscapeJson(g_config.postprocess) << "\",\n"
          << "  \"hotkey\": \"" << EscapeJson(g_config.hotkey) << "\",\n"
@@ -611,9 +646,9 @@ bool AsrEngine::EnsureRecognizer(const Config& config) {
     return true;
 }
 
-bool AsrEngine::EnsureVad(int threads) {
+bool AsrEngine::EnsureVad(int threads, const Config& config) {
     if (!TryLoadAsrDlls()) return false;
-    const std::string key = "vad|" + std::to_string(threads);
+    const std::string key = "vad|" + std::to_string(threads) + "|" + std::to_string(config.vadThreshold) + "|" + std::to_string(config.vadMinSilence) + "|" + std::to_string(config.vadMinSpeech);
     if (vad && vadKey == key) return true;
 
     const std::wstring vadPath = AppRootDir() + L"\\models\\silero_vad.int8.onnx";
@@ -621,9 +656,9 @@ bool AsrEngine::EnsureVad(int threads) {
 
     sherpa_onnx::cxx::VadModelConfig vc;
     vc.silero_vad.model = WideToUtf8(vadPath);
-    vc.silero_vad.threshold = 0.4f;
-    vc.silero_vad.min_silence_duration = 0.3f;
-    vc.silero_vad.min_speech_duration = 0.1f;
+    vc.silero_vad.threshold = config.vadThreshold;
+    vc.silero_vad.min_silence_duration = static_cast<float>(config.vadMinSilence) / 1000.0f;
+    vc.silero_vad.min_speech_duration = static_cast<float>(config.vadMinSpeech) / 1000.0f;
     vc.silero_vad.max_speech_duration = 20.0f;
     vc.silero_vad.window_size = 512;
     vc.sample_rate = 16000;
@@ -636,13 +671,18 @@ bool AsrEngine::EnsureVad(int threads) {
     return true;
 }
 
-bool AsrEngine::EnsureFireRedVad() {
+bool AsrEngine::EnsureFireRedVad(const Config& config) {
     if (!TryLoadAsrDlls()) return false;
-    const std::string key = "firered_vad";
+    const std::string key = "firered_vad|" + std::to_string(config.vadThreshold) + "|" + std::to_string(config.vadMinSilence) + "|" + std::to_string(config.vadMinSpeech) + "|" + std::to_string(config.vadPadStart) + "|" + std::to_string(config.vadSmoothWindow);
     if (fireRedVad && fireRedVadKey == key) return true;
 
     firered_vad::FireRedVadConfig cfg;
     cfg.modelPath = WideToUtf8(AppRootDir() + L"\\models\\fireredvad_stream_vad_with_cache.onnx");
+    cfg.threshold = config.vadThreshold;
+    cfg.minSilenceMs = config.vadMinSilence;
+    cfg.minSpeechMs = config.vadMinSpeech;
+    cfg.padStartMs = config.vadPadStart;
+    cfg.smoothWindowSize = config.vadSmoothWindow;
     if (GetFileAttributesW(Utf8ToWide(cfg.modelPath).c_str()) == INVALID_FILE_ATTRIBUTES) return false;
 
     auto v = firered_vad::FireRedVad::Create(cfg);
@@ -675,7 +715,7 @@ bool AsrEngine::EnsurePunctuation(int threads) {
 VadResult AsrEngine::ApplyVad(const std::vector<float>& samples, const Config& config, int threads) {
     VadResult result;
     if (config.vadModel == L"firered") {
-        if (!EnsureFireRedVad()) return result;
+        if (!EnsureFireRedVad(config)) return result;
         fireRedVad->Reset();
         int nSamples = static_cast<int>(samples.size());
         fireRedVad->Process(samples.data(), nSamples);
@@ -686,7 +726,7 @@ VadResult AsrEngine::ApplyVad(const std::vector<float>& samples, const Config& c
             result.samples = std::move(concat);
         }
     } else {
-        if (!EnsureVad(threads)) return result;
+        if (!EnsureVad(threads, config)) return result;
         vad->Reset();
         const size_t windowSize = 512;
         for (size_t i = 0; i < samples.size(); i += windowSize) {
@@ -706,8 +746,8 @@ VadResult AsrEngine::ApplyVad(const std::vector<float>& samples, const Config& c
 }
 
 bool AsrEngine::EnsureVadForConfig(const Config& config, int threads) {
-    if (config.vadModel == L"firered") return EnsureFireRedVad();
-    return EnsureVad(threads);
+    if (config.vadModel == L"firered") return EnsureFireRedVad(config);
+    return EnsureVad(threads, config);
 }
 
 std::wstring AsrEngine::Recognize(const std::vector<float>& samples, int sampleRate, const Config& config) {
@@ -731,6 +771,7 @@ std::wstring AsrEngine::Recognize(const std::vector<float>& samples, int sampleR
         }
         if (!vr.hasSpeech) return L"";
         if (!vr.samples.empty()) workSamples = std::move(vr.samples);
+        if (config.enableDebugMode) g_vadTrimmedSamples = workSamples.size();
     }
 
     if (workSamples.empty()) return L"";

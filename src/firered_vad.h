@@ -89,12 +89,12 @@ enum class VadState {
 
 struct FireRedVadConfig {
     std::string modelPath;
-    float threshold = 0.4f;
+    float threshold = 0.2f;
     int smoothWindowSize = 5;
-    int padStartFrame = 8;
-    int minSpeechFrame = 5;
+    int padStartMs = 80;
+    int minSpeechMs = 50;
     int maxSpeechFrame = 2000;
-    int minSilenceFrame = 30;
+    int minSilenceMs = 300;
 };
 
 struct StreamVadPostprocessor {
@@ -241,6 +241,10 @@ struct StreamVadPostprocessor {
             lastSpeechStartFrame = -1;
         }
     }
+
+    bool IsInSpeech() const {
+        return state == VadState::SPEECH || state == VadState::POSSIBLE_SPEECH;
+    }
 };
 
 class FireRedVad {
@@ -286,8 +290,8 @@ public:
         vad->fbankFrame_ = 0;
 
         vad->postprocessor_ = std::make_unique<StreamVadPostprocessor>(
-            cfg.threshold, cfg.smoothWindowSize, cfg.padStartFrame,
-            cfg.minSpeechFrame, cfg.maxSpeechFrame, cfg.minSilenceFrame);
+            cfg.threshold, cfg.smoothWindowSize, cfg.padStartMs / 10,
+            cfg.minSpeechMs / 10, cfg.maxSpeechFrame, cfg.minSilenceMs / 10);
 
         return vad;
     }
@@ -321,6 +325,10 @@ public:
 
     bool HasSpeech() const {
         return anySpeechSeen_ || !postprocessor_->segments.empty();
+    }
+
+    bool IsInSpeech() const {
+        return postprocessor_->IsInSpeech();
     }
 
     void Flush() {
