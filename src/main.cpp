@@ -455,10 +455,10 @@ void StartRecordingSession() {
                 drainThread = std::thread([&]() {
                     VolcDebugLog("drainThread: started (async=%d nostream=%d)", asyncMode ? 1 : 0, nostreamMode ? 1 : 0);
                     while (!asyncDrainDone && g_volcSession.hWebSocket && !g_volcSession.forceAbort.load() && g_volcSession.connected) {
-                        std::wstring partial = volc_asr::DrainReceiveBuffer(g_volcSession.hWebSocket, &g_volcSession);
-                        if (!partial.empty() && partial != asyncPartial) {
-                            asyncPartial = partial;
-                            ShowHud(L"Listening... Volcano Engine\n" + partial);
+                        volc_asr::VolcResult vr = volc_asr::ReceiveResult(g_volcSession.hWebSocket, 200, &g_volcSession);
+                        if (!vr.text.empty() && vr.text != asyncPartial) {
+                            asyncPartial = vr.text;
+                            ShowHud(L"Listening... Volcano Engine\n" + vr.text);
                         }
                     }
                     VolcDebugLog("drainThread: main loop exited, doing final drain...");
