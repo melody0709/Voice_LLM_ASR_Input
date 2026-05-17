@@ -2,6 +2,12 @@
 
 > 🇨🇳 [中文版](doc/CHANGELOG_zh.md)
 
+## v0.8.0.1 (2026-05-17)
+
+### Fixed
+
+- **Volcengine nostream no-speech hang**: When VAD detects no speech in nostream mode, `WinHttpWebSocketReceive` with 1ms timeout does not actually return (Windows WinHTTP minimum timeout granularity is much larger). The drainThread blocks indefinitely, causing `drainThread.join()` to hang until the 18s watchdog triggers. Fixed by closing the WebSocket handle before joining drainThread, which forces `WinHttpWebSocketReceive` to return immediately with `ERROR_WINHTTP_OPERATION_CANCELLED`
+
 ## v0.8.0 (2026-05-17)
 
 ### Added

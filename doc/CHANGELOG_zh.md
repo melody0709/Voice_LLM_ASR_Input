@@ -2,6 +2,12 @@
 
 > 🇬🇧 [English](../CHANGELOG.md)
 
+## v0.8.0.1 (2026-05-17)
+
+### 修复
+
+- **火山引擎 nostream 无语音时卡死**：VAD 在 nostream 模式下未检测到语音时，`WinHttpWebSocketReceive` 设置 1ms 超时实际不生效（Windows WinHTTP 最小超时粒度远大于 1ms），drainThread 无限阻塞，导致 `drainThread.join()` 挂死直到 18 秒 watchdog 触发。修复方式：在 join drainThread 之前先关闭 WebSocket 句柄，强制 `WinHttpWebSocketReceive` 立即返回 `ERROR_WINHTTP_OPERATION_CANCELLED`
+
 ## v0.8.0 (2026-05-17)
 
 ### 新增

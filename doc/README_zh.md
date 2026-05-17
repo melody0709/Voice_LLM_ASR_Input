@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  当前版本：<code>v0.8.0</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
+  当前版本：<code>v0.8.0.1</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -185,6 +185,7 @@ CHANGELOG.md        — 版本变更记录
 详见 [CHANGELOG.md](CHANGELOG.md)
 
 **最近更新：**
+- **v0.8.0.1** — 修复火山引擎 nostream 无语音时卡死（WinHttpWebSocketReceive 1ms 超时不生效）
 - **v0.8.0** — 流式 VAD（录音期间实时语音检测，跳过静音）、火山引擎 nostream/async 长录音卡死修复、HUD 音量条语音检测变色、watchdog 录音期间续期、代码质量修复
 - **v0.7.5** — 火山引擎 WebSocket 挂死修复（forceAbort）、连接预热、连接过期重建、WinHTTP 代理修复、超时调优、日志精简
 - **v0.7.4** — 微信中文输入法粘贴修复（WM_CHAR 绕过 IME）、IMM32 输入法状态切换、Unicode SendInput fallback、Force Unicode Input 菜单

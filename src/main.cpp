@@ -451,6 +451,7 @@ void StartRecordingSession() {
 
             if (asyncMode || nostreamMode) {
                 drainThread = std::thread([&]() {
+                    VolcDebugLog("drainThread: started (async=%d nostream=%d)", asyncMode ? 1 : 0, nostreamMode ? 1 : 0);
                     while (!asyncDrainDone && g_volcSession.hWebSocket && !g_volcSession.forceAbort.load()) {
                         std::wstring partial = volc_asr::DrainReceiveBuffer(g_volcSession.hWebSocket, &g_volcSession);
                         if (!partial.empty() && partial != asyncPartial) {
@@ -458,6 +459,7 @@ void StartRecordingSession() {
                             ShowHud(L"Listening... Volcano Engine\n" + partial);
                         }
                     }
+                    VolcDebugLog("drainThread: main loop exited, doing final drain...");
                     while (g_volcSession.hWebSocket && !g_volcSession.forceAbort.load()) {
                         std::wstring partial = volc_asr::DrainReceiveBuffer(g_volcSession.hWebSocket, &g_volcSession);
                         if (!partial.empty()) {
@@ -466,6 +468,7 @@ void StartRecordingSession() {
                             break;
                         }
                     }
+                    VolcDebugLog("drainThread: done");
                 });
             }
 
@@ -510,11 +513,25 @@ void StartRecordingSession() {
             VolcDebugLog("Volc thread: send loop ended, chunks_sent=%d, vad_state=%d", chunksSent, g_volcVadState.load());
 
             if (g_volcVadState == 0 && g_volcVadDoTrim) {
+                VolcDebugLog("Volc thread: no speech detected, forcing drainThread exit...");
                 asyncDrainDone = true;
-                if (drainThread.joinable()) drainThread.join();
-                VolcDebugLog("Volc thread: no speech detected, closing without sending audio");
                 g_volcSession.forceAbort = true;
-                volc_asr::CloseSession(g_volcSession);
+                if (g_volcSession.hWebSocket) {
+                    WinHttpCloseHandle(g_volcSession.hWebSocket);
+                }
+                if (drainThread.joinable()) drainThread.join();
+                g_volcSession.hWebSocket = nullptr;
+                if (g_volcSession.hConnect) {
+                    WinHttpCloseHandle(g_volcSession.hConnect);
+                    g_volcSession.hConnect = nullptr;
+                }
+                if (volc_asr::g_volcKeepAlive) {
+                    g_volcSession.lastUsedTick = GetTickCount64();
+                } else if (g_volcSession.hSession) {
+                    WinHttpCloseHandle(g_volcSession.hSession);
+                    g_volcSession.hSession = nullptr;
+                }
+                g_volcSession.connected = false;
                 PostMessageW(g_mainWindow, kAsrResultMessage, 0,
                              reinterpret_cast<LPARAM>(new std::wstring(L"No speech detected")));
                 VolcDebugLog("=== TOTAL session: %llums (no speech) ===", GetTickCount64() - tTotal0);
