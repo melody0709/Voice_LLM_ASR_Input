@@ -2,6 +2,17 @@
 
 > 🇨🇳 [中文版](doc/CHANGELOG_zh.md)
 
+## v0.8.2 (2026-05-18)
+
+### Fixed
+
+- **Volcengine nostream/async result loss** (critical): After sending the last audio chunk, drainThread was killed before reading the server's final response. Added `drainFinalDone` atomic flag — main thread now waits for drainThread to complete its final drain (up to 5s) before closing the WebSocket. Final drain uses `ReceiveResult(3000ms)` instead of 1ms polling, giving the server enough time to respond
+- **Volcengine nostream/async long recording truncation** (critical): For recordings >15s, the main thread's wait condition checked `asyncPartial.empty()` — once a partial result arrived, it stopped waiting and killed drainThread, losing all text after the 15s mark. Wait condition now checks `drainFinalDone` instead, ensuring the complete result is captured
+- **WinHttpCloseHandle deadlock** (critical): Main thread called `WinHttpCloseHandle(hWebSocket)` while drainThread was blocked on `WinHttpWebSocketReceive` on the same handle. WinHTTP is not thread-safe — concurrent access causes internal deadlock. Fixed by joining drainThread before closing the WebSocket handle in both normal and no-speech code paths
+- **Volcengine nostream/async logic deadlock**: `asyncDrainDone` was set after waiting for `drainFinalDone`, but drainThread's main loop exits when `asyncDrainDone` becomes true — creating a circular wait. Fixed by setting `asyncDrainDone = true` before the wait loop
+- **Volcengine short audio false timeout**: When the server closes the connection after short audio, the main thread waited 5s for `drainFinalDone` but drainThread was stuck in `WinHttpWebSocketReceive` (WinHTTP timeout unreliable). Now drainThread's main loop also checks `g_volcSession.connected`, exiting promptly when the server closes. `forceAbort` is only set to true when the connection is still alive (real timeout), preventing false "VolcEngine timeout" messages
+- **HUD kHudHideTimer race condition**: After a previous recording's "No speech detected" HUD started its hide timer, quickly pressing the hotkey for a new recording could have its HUD hidden by the stale timer. Fixed with dual protection: `KillTimer(kHudHideTimer)` at recording start, plus `g_recording` check in the timer handler
+
 ## v0.8.0.1 (2026-05-17)
 
 ### Fixed

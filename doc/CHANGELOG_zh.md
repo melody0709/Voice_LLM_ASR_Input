@@ -2,6 +2,17 @@
 
 > 🇬🇧 [English](../CHANGELOG.md)
 
+## v0.8.2 (2026-05-18)
+
+### 修复
+
+- **火山引擎 nostream/async 结果丢失**（严重）：发送最后一个音频包后，drainThread 在读取服务器最终响应前就被终止。新增 `drainFinalDone` 原子标志——主线程现在等待 drainThread 完成最终 drain（最多 5 秒）后再关闭 WebSocket。Final drain 使用 `ReceiveResult(3000ms)` 替代 1ms 轮询，给服务器足够时间返回结果
+- **火山引擎 nostream/async 长录音截断**（严重）：录音超过 15 秒时，主线程等待条件检查 `asyncPartial.empty()`——一旦收到 partial 结果就停止等待并杀死 drainThread，导致 15 秒之后的文字丢失。等待条件改为检查 `drainFinalDone`，确保捕获完整结果
+- **WinHttpCloseHandle 死锁**（严重）：主线程在 drainThread 仍阻塞于同一句柄的 `WinHttpWebSocketReceive` 时调用 `WinHttpCloseHandle(hWebSocket)`。WinHTTP 非线程安全——并发访问导致内部死锁。修复方式：在正常路径和 no-speech 路径中均先 join drainThread 再关闭 WebSocket 句柄
+- **火山引擎 nostream/async 逻辑死锁**：`asyncDrainDone` 在等待 `drainFinalDone` 之后才设置，但 drainThread 主循环在 `asyncDrainDone` 为 true 时退出——形成循环等待。修复方式：将 `asyncDrainDone = true` 移到等待循环之前
+- **火山引擎短音频误报超时**：短音频后服务器关闭连接，主线程等待 `drainFinalDone` 长达 5 秒，但 drainThread 卡在 `WinHttpWebSocketReceive`（WinHTTP 超时不可靠）。现在 drainThread 主循环也检查 `g_volcSession.connected`，服务器关闭时及时退出。`forceAbort` 仅在连接仍存活时（真超时）设为 true，避免误报 "VolcEngine timeout"
+- **HUD kHudHideTimer 竞态条件**：上一次录音的 "No speech detected" HUD 启动隐藏定时器后，快速按热键开始新录音时，旧定时器会把新 HUD 也关掉。双重防护修复：录音开始时 `KillTimer(kHudHideTimer)`，定时器处理函数中检查 `g_recording`
+
 ## v0.8.0.1 (2026-05-17)
 
 ### 修复

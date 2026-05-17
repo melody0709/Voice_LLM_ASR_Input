@@ -448,12 +448,13 @@ void StartRecordingSession() {
             std::wstring lastPartial;
             std::wstring asyncPartial;
             std::atomic<bool> asyncDrainDone{false};
+            std::atomic<bool> drainFinalDone{false};
             std::thread drainThread;
 
             if (asyncMode || nostreamMode) {
                 drainThread = std::thread([&]() {
                     VolcDebugLog("drainThread: started (async=%d nostream=%d)", asyncMode ? 1 : 0, nostreamMode ? 1 : 0);
-                    while (!asyncDrainDone && g_volcSession.hWebSocket && !g_volcSession.forceAbort.load()) {
+                    while (!asyncDrainDone && g_volcSession.hWebSocket && !g_volcSession.forceAbort.load() && g_volcSession.connected) {
                         std::wstring partial = volc_asr::DrainReceiveBuffer(g_volcSession.hWebSocket, &g_volcSession);
                         if (!partial.empty() && partial != asyncPartial) {
                             asyncPartial = partial;
@@ -461,6 +462,13 @@ void StartRecordingSession() {
                         }
                     }
                     VolcDebugLog("drainThread: main loop exited, doing final drain...");
+                    if (g_volcSession.hWebSocket && !g_volcSession.forceAbort.load()) {
+                        volc_asr::VolcResult vr = volc_asr::ReceiveResult(g_volcSession.hWebSocket, 3000, &g_volcSession);
+                        if (!vr.text.empty()) {
+                            asyncPartial = vr.text;
+                            VolcDebugLog("drainThread: final drain got text (%u chars)", (unsigned)vr.text.size());
+                        }
+                    }
                     while (g_volcSession.hWebSocket && !g_volcSession.forceAbort.load()) {
                         std::wstring partial = volc_asr::DrainReceiveBuffer(g_volcSession.hWebSocket, &g_volcSession);
                         if (!partial.empty()) {
@@ -469,6 +477,7 @@ void StartRecordingSession() {
                             break;
                         }
                     }
+                    drainFinalDone = true;
                     VolcDebugLog("drainThread: done");
                 });
             }
@@ -517,11 +526,11 @@ void StartRecordingSession() {
                 VolcDebugLog("Volc thread: no speech detected, forcing drainThread exit...");
                 asyncDrainDone = true;
                 g_volcSession.forceAbort = true;
+                if (drainThread.joinable()) drainThread.join();
                 if (g_volcSession.hWebSocket) {
                     WinHttpCloseHandle(g_volcSession.hWebSocket);
+                    g_volcSession.hWebSocket = nullptr;
                 }
-                if (drainThread.joinable()) drainThread.join();
-                g_volcSession.hWebSocket = nullptr;
                 if (g_volcSession.hConnect) {
                     WinHttpCloseHandle(g_volcSession.hConnect);
                     g_volcSession.hConnect = nullptr;
@@ -547,15 +556,50 @@ void StartRecordingSession() {
 
             if (asyncMode || nostreamMode) {
                 asyncDrainDone = true;
+                if (!drainFinalDone && !g_volcSession.forceAbort.load()) {
+                    VolcDebugLog("Volc thread: waiting for drainThread final drain...");
+                    ULONGLONG waitStart = GetTickCount64();
+                    while (!drainFinalDone
+                           && !g_volcSession.forceAbort.load()
+                           && (GetTickCount64() - waitStart < 5000)) {
+                        Sleep(100);
+                    }
+                    VolcDebugLog("Volc thread: wait done, drainFinalDone=%d, asyncPartial%s empty (%llums)",
+                                 drainFinalDone.load() ? 1 : 0,
+                                 asyncPartial.empty() ? "" : " NOT",
+                                 GetTickCount64() - waitStart);
+                }
+                bool serverClosed = !g_volcSession.connected;
+                g_volcSession.forceAbort = !serverClosed;
                 if (drainThread.joinable()) drainThread.join();
+                if (g_volcSession.hWebSocket) {
+                    WinHttpCloseHandle(g_volcSession.hWebSocket);
+                    g_volcSession.hWebSocket = nullptr;
+                }
+                if (g_volcSession.hConnect) {
+                    WinHttpCloseHandle(g_volcSession.hConnect);
+                    g_volcSession.hConnect = nullptr;
+                }
+                if (volc_asr::g_volcKeepAlive) {
+                    g_volcSession.lastUsedTick = GetTickCount64();
+                } else if (g_volcSession.hSession) {
+                    WinHttpCloseHandle(g_volcSession.hSession);
+                    g_volcSession.hSession = nullptr;
+                }
+                g_volcSession.connected = false;
             }
 
-            std::wstring finalText = volc_asr::CloseSession(g_volcSession);
-            if (finalText.empty()) finalText = lastPartial;
-            if (finalText.empty()) finalText = asyncPartial;
+            std::wstring finalText;
+            if (asyncMode || nostreamMode) {
+                finalText = asyncPartial;
+                if (finalText.empty()) finalText = lastPartial;
+            } else {
+                finalText = volc_asr::CloseSession(g_volcSession);
+                if (finalText.empty()) finalText = lastPartial;
+            }
 
-            if (finalText.empty()) finalText = L"(empty result)";
-            if (g_volcSession.forceAbort.load() && finalText == L"(empty result)") {
+            if (finalText.empty()) finalText = L"No speech detected";
+            if (g_volcSession.forceAbort.load() && finalText == L"No speech detected") {
                 finalText = L"VolcEngine timeout";
             }
 
