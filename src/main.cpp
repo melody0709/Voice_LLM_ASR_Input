@@ -324,6 +324,7 @@ void RecognizeAsync(const std::vector<BYTE>& pcm) {
 
 void StartRecordingSession() {
     if (g_recording) return;
+    if (g_hudWindow) KillTimer(g_hudWindow, kHudHideTimer);
     std::wstring error;
     if (!StartAudioCapture(error)) {
         ShowHud(error);

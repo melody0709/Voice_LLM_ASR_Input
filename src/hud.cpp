@@ -374,6 +374,7 @@ LRESULT CALLBACK HudWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             InvalidateRect(hwnd, nullptr, FALSE);
         } else {
             KillTimer(hwnd, static_cast<UINT_PTR>(wParam));
+            if (g_recording) return 0;
             HideHud();
         }
         return 0;
