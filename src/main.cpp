@@ -435,10 +435,12 @@ void StartRecordingSession() {
             volc_asr::g_volcKeepAlive = true;
 
             constexpr size_t kChunkBytes = 6400;
+            constexpr DWORD kKeepaliveMs = 3500;
             bool asyncMode = (vcfg.mode == L"bigmodel_async");
             bool nostreamMode = (vcfg.mode == L"bigmodel_nostream");
             std::vector<BYTE> chunk;
             chunk.reserve(kChunkBytes);
+            ULONGLONG lastSendTick = GetTickCount64();
 
             auto sendChunk = [&](std::vector<BYTE>& c) -> std::wstring {
                 g_volcSentBytes += c.size();
@@ -498,6 +500,7 @@ void StartRecordingSession() {
                 if (hasData && chunk.size() >= kChunkBytes) {
                     std::wstring partial = sendChunk(chunk);
                     chunk.clear();
+                    lastSendTick = GetTickCount64();
                     if (!g_volcSession.hWebSocket) break;
                     if (!asyncMode && !partial.empty() && partial != lastPartial) {
                         lastPartial = partial;
@@ -506,6 +509,13 @@ void StartRecordingSession() {
                 } else if (!streaming) {
                     break;
                 } else {
+                    DWORD idleMs = static_cast<DWORD>(GetTickCount64() - lastSendTick);
+                    if (idleMs >= kKeepaliveMs && g_volcSession.connected && g_volcSession.hWebSocket) {
+                        std::vector<BYTE> keepalive(kChunkBytes, 0);
+                        sendChunk(keepalive);
+                        lastSendTick = GetTickCount64();
+                        VolcDebugLog("Volc thread: keepalive sent (%ums idle)", idleMs);
+                    }
                     Sleep(20);
                 }
             }
@@ -517,6 +527,18 @@ void StartRecordingSession() {
             if (!g_volcSession.forceAbort.load() && !chunk.empty()) {
                 std::wstring partial = sendChunk(chunk);
                 if (!asyncMode && !partial.empty()) lastPartial = partial;
+            }
+
+            if (!g_volcSession.forceAbort.load()) {
+                EnterCriticalSection(&g_volcAudioCs);
+                std::vector<BYTE> remaining;
+                remaining.swap(g_volcPendingAudio);
+                LeaveCriticalSection(&g_volcAudioCs);
+                if (!remaining.empty()) {
+                    VolcDebugLog("Volc thread: flushing %zu remaining bytes from pending buffer", remaining.size());
+                    std::wstring partial = sendChunk(remaining);
+                    if (!asyncMode && !partial.empty()) lastPartial = partial;
+                }
             }
 
             int chunksSent = g_volcSession.sequence - 2;

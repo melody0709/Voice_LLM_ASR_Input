@@ -21,3 +21,4 @@ models/*
 !models/fireredvad_stream_vad_with_cache.onnx
 config.json
 compile_commands.json
+.plan/ref/

@@ -158,6 +158,7 @@ constexpr int IDC_VAD_PAD_START = 2073;
 constexpr int IDC_VAD_SMOOTH_WINDOW = 2074;
 
 struct Config {
+    int configVersion = 0;
     std::wstring modelId = L"firered_ctc";
     std::wstring modelDir;
     std::wstring threads = L"auto";
@@ -186,7 +187,7 @@ struct Config {
     std::wstring cloudProvider = L"volcengine";
     std::wstring volcApiKey;
     std::wstring volcResourceId = L"volc.seedasr.sauc.duration";
-    std::wstring volcMode = L"bigmodel";
+    std::wstring volcMode = L"bigmodel_nostream";
     std::wstring volcLanguage;
     bool volcEnableNonstream = false;
     int volcEndWindowSize = 800;

@@ -21,6 +21,8 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "winmm.lib")
 
+static constexpr int kCurrentConfigVersion = 1;
+
 bool EqualsIgnoreCase(std::wstring a, std::wstring b) {
     std::transform(a.begin(), a.end(), a.begin(), [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
     std::transform(b.begin(), b.end(), b.begin(), [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
@@ -354,7 +356,7 @@ void LoadConfig() {
     if (g_config.cloudProvider.empty()) g_config.cloudProvider = L"volcengine";
     g_config.volcApiKey = llm::DecryptString(Utf8ToWide(ExtractJsonString(json, "volc_api_key", "")));
     g_config.volcResourceId = Utf8ToWide(ExtractJsonString(json, "volc_resource_id", "volc.seedasr.sauc.duration"));
-    g_config.volcMode = Utf8ToWide(ExtractJsonString(json, "volc_mode", "bigmodel"));
+    g_config.volcMode = Utf8ToWide(ExtractJsonString(json, "volc_mode", "bigmodel_nostream"));
     g_config.volcLanguage = Utf8ToWide(ExtractJsonString(json, "volc_language", ""));
     g_config.volcEnableNonstream = ExtractJsonBool(json, "volc_enable_nonstream", false);
     g_config.volcEndWindowSize = _wtoi(Utf8ToWide(ExtractJsonString(json, "volc_end_window_size", "800")).c_str());
@@ -377,6 +379,13 @@ void LoadConfig() {
     g_config.volcCorrectTableName = Utf8ToWide(ExtractJsonString(json, "volc_correct_table_name", ""));
     g_config.audioBackend = Utf8ToWide(ExtractJsonString(json, "audio_backend", WideToUtf8(g_config.audioBackend)));
     g_config.audioDeviceId = Utf8ToWide(ExtractJsonString(json, "audio_device_id", ""));
+    g_config.configVersion = ExtractJsonInt(json, "config_version", 0);
+
+    if (g_config.configVersion < 1) {
+        if (g_config.volcMode.empty()) g_config.volcMode = L"bigmodel_nostream";
+        if (g_config.volcResourceId.empty()) g_config.volcResourceId = L"volc.seedasr.sauc.duration";
+        if (g_config.cloudProvider.empty()) g_config.cloudProvider = L"volcengine";
+    }
     if (g_config.modelDir.empty()) {
         g_config.modelDir = DefaultModelDir(g_config.modelId);
     }
@@ -395,12 +404,18 @@ void LoadConfig() {
             LoadProviderFromStore(g_config.llmProvider);
         }
     }
+
+    if (g_config.configVersion < kCurrentConfigVersion) {
+        g_config.configVersion = kCurrentConfigVersion;
+        SaveConfig();
+    }
 }
 
 void SaveConfig() {
     SaveCurrentProvider();
     std::ofstream file(ConfigPath(), std::ios::binary | std::ios::trunc);
     file << "{\n"
+         << "  \"config_version\": " << g_config.configVersion << ",\n"
          << "  \"model_id\": \"" << EscapeJson(g_config.modelId) << "\",\n"
          << "  \"model_dir\": \"" << EscapeJson(g_config.modelDir) << "\",\n"
          << "  \"threads\": \"" << EscapeJson(g_config.threads) << "\",\n"
