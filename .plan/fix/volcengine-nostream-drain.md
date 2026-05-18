@@ -48,6 +48,27 @@ nostream 模式 15 秒后有 partial 显示，但最终结果只包含这 15 秒
 drainThread 的 `WinHttpWebSocketReceive` 可能还在阻塞（WinHTTP 超时不可靠），
 导致 `asyncPartial` 始终为空，主线程白等 5 秒超时。
 
+### Bug 6: no-speech 路径 drainThread.join() 阻塞 17+ 秒 (v0.8.2 修复后)
+
+```log
+[11:05:54.147] Volc thread: no speech detected, forcing drainThread exit...
+[11:06:11.622] Watchdog: volc thread still running after 18s, force aborting
+```
+
+VAD 未检测到语音时，`drainThread.join()` 在 `WinHttpCloseHandle(hWebSocket)` 之前
+调用。drainThread 卡在 `WinHttpWebSocketReceive(200ms)` 里（WinHTTP 超时不可靠，
+200ms 可能实际阻塞 17+ 秒），而 `forceAbort` 只在 `ReceiveResult` 入口检查——
+已经进入 `WinHttpWebSocketReceive` 内部后必须等它返回才能检查。
+
+修复：先 `WinHttpCloseHandle` 再 `drainThread.join()`——关闭句柄会强制
+`WinHttpWebSocketReceive` 立即返回 `ERROR_WINHTTP_OPERATION_CANCELLED`。
+
+### Bug 7: Watchdog 线程句柄泄漏 (v0.8.2 修复后)
+
+Watchdog 强制关闭句柄后没有 `g_volcThread.join()`，线程句柄处于 joinable 状态。
+下次 `StartRecordingSession` 调用 `g_volcThread = std::thread(...)` 时会触发
+`std::terminate` 崩溃。
+
 ## 根因
 
 ### 架构问题

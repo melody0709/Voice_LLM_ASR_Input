@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  Current version: <code>v0.8.2</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
+  Current version: <code>v0.8.3</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -186,6 +186,8 @@ CHANGELOG.md        — Version change log
 See [CHANGELOG.md](CHANGELOG.md)
 
 **Recent Updates:**
+- **v0.8.3** — Fix Volcengine no-speech drainThread.join() blocking 17+ seconds (close WebSocket before join), watchdog thread handle leak crash, SendMessage(WM_PASTE) UI thread blocking
+- **v0.8.2** — Fix Volcengine nostream/async result loss, long recording truncation, WinHttpCloseHandle deadlock, logic deadlock, short audio false timeout, HUD timer race
 - **v0.8.0.1** — Fix Volcengine nostream no-speech hang (WinHttpWebSocketReceive 1ms timeout not working)
 - **v0.8.0** — Streaming VAD (real-time speech detection during recording, skip silence), Volcengine nostream/async long recording hang fix, HUD speech detection visual feedback, watchdog auto-renew during recording, code quality fixes
 - **v0.7.5** — Volcengine WebSocket hang fix (forceAbort), connection prewarm, connection expiry rebuild, WinHTTP proxy/no-proxy fix, timeout tuning, reduced logging verbosity

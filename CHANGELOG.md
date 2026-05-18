@@ -2,6 +2,21 @@
 
 > 🇨🇳 [中文版](doc/CHANGELOG_zh.md)
 
+## v0.8.3 (2026-05-18)
+
+### Fixed
+
+- **Volcengine no-speech path drainThread.join() blocking 17+ seconds** (critical): When VAD detected no speech, `drainThread.join()` was called before `WinHttpCloseHandle(hWebSocket)`. Since `WinHttpWebSocketReceive` timeout is unreliable (200ms can block 17+ seconds), drainThread couldn't exit until the 18s watchdog force-closed the handle. Fixed by closing the WebSocket handle **before** joining drainThread — closing the handle forces `WinHttpWebSocketReceive` to return immediately with `ERROR_WINHTTP_OPERATION_CANCELLED`
+- **Volcengine normal path same join-before-close issue**: The async/nostream normal completion path also called `drainThread.join()` before `WinHttpCloseHandle`. Same fix applied — close handle first, then join
+- **Watchdog thread handle leak**: After force-closing handles, the watchdog did not `g_volcThread.join()`, leaving the thread handle in a joinable state. Next `StartRecordingSession` would call `g_volcThread = std::thread(...)` on a joinable thread, causing `std::terminate` crash. Fixed by adding `g_volcThread.join()` after closing handles
+- **SendMessage(WM_PASTE) could block UI thread indefinitely**: `PasteTextImeAware` used synchronous `SendMessage(focus, WM_PASTE)` — if the target window hung, the UI thread would block forever. Changed to `SendMessageTimeoutW` with `SMTO_ABORTIFHUNG` and 2-second timeout
+- **HUD hide timer not set when PasteTextImeAware blocked**: `SetTimer(kHudHideTimer)` was called after `PasteTextImeAware`. If paste blocked, the timer was never set and HUD stayed visible. Moved `SetTimer(kHudHideTimer)` before `PasteTextImeAware`
+
+### Changed
+
+- **drainThread final drain uses loop with 1000ms timeout**: Replaced single `ReceiveResult(3000ms)` with a loop of `ReceiveResult(1000ms)` calls (up to 5 seconds total). This handles nostream mode's multi-packet responses more reliably — each audio chunk gets one response, and the final result may arrive in a later packet
+- **Added PasteTextImeAware debug logging**: Logs start/done with elapsed time to help diagnose paste-related hangs
+
 ## v0.8.2 (2026-05-18)
 
 ### Fixed

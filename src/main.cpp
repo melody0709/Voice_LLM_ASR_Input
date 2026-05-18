@@ -465,10 +465,17 @@ void StartRecordingSession() {
                     }
                     VolcDebugLog("drainThread: main loop exited, doing final drain...");
                     if (g_volcSession.hWebSocket && !g_volcSession.forceAbort.load()) {
-                        volc_asr::VolcResult vr = volc_asr::ReceiveResult(g_volcSession.hWebSocket, 3000, &g_volcSession);
-                        if (!vr.text.empty()) {
-                            asyncPartial = vr.text;
-                            VolcDebugLog("drainThread: final drain got text (%u chars)", (unsigned)vr.text.size());
+                        ULONGLONG drainStart = GetTickCount64();
+                        while (g_volcSession.hWebSocket && !g_volcSession.forceAbort.load()
+                               && (GetTickCount64() - drainStart < 5000)) {
+                            volc_asr::VolcResult vr = volc_asr::ReceiveResult(g_volcSession.hWebSocket, 1000, &g_volcSession);
+                            if (!vr.text.empty()) {
+                                asyncPartial = vr.text;
+                                VolcDebugLog("drainThread: final drain got text (%u chars, %llums)",
+                                             (unsigned)vr.text.size(), GetTickCount64() - drainStart);
+                                break;
+                            }
+                            if (!g_volcSession.connected) break;
                         }
                     }
                     while (g_volcSession.hWebSocket && !g_volcSession.forceAbort.load()) {
@@ -548,11 +555,11 @@ void StartRecordingSession() {
                 VolcDebugLog("Volc thread: no speech detected, forcing drainThread exit...");
                 asyncDrainDone = true;
                 g_volcSession.forceAbort = true;
-                if (drainThread.joinable()) drainThread.join();
                 if (g_volcSession.hWebSocket) {
                     WinHttpCloseHandle(g_volcSession.hWebSocket);
                     g_volcSession.hWebSocket = nullptr;
                 }
+                if (drainThread.joinable()) drainThread.join();
                 if (g_volcSession.hConnect) {
                     WinHttpCloseHandle(g_volcSession.hConnect);
                     g_volcSession.hConnect = nullptr;
@@ -593,11 +600,11 @@ void StartRecordingSession() {
                 }
                 bool serverClosed = !g_volcSession.connected;
                 g_volcSession.forceAbort = !serverClosed;
-                if (drainThread.joinable()) drainThread.join();
                 if (g_volcSession.hWebSocket) {
                     WinHttpCloseHandle(g_volcSession.hWebSocket);
                     g_volcSession.hWebSocket = nullptr;
                 }
+                if (drainThread.joinable()) drainThread.join();
                 if (g_volcSession.hConnect) {
                     WinHttpCloseHandle(g_volcSession.hConnect);
                     g_volcSession.hConnect = nullptr;
@@ -802,10 +809,18 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         } else {
             g_hudIsRefining = false;
             ShowHud(text.empty() ? L"(empty result)" : text);
+            if (g_hudWindow) {
+                const bool isError = text.rfind(L"ASR failed:", 0) == 0;
+                const bool isNoSpeech = (text == L"No speech detected");
+                UINT hideMs = isError ? 2200 : (isNoSpeech ? 1500 : 200);
+                SetTimer(g_hudWindow, kHudHideTimer, hideMs, nullptr);
+            }
             if (!text.empty() && text != L"No speech detected" && text.rfind(L"ASR failed:", 0) != 0) {
+                VolcDebugLog("PasteTextImeAware: starting (text=%u chars)", (unsigned)text.size());
                 HiResTimer tPaste;
                 PasteTextImeAware(text);
                 double pasteMs = tPaste.ElapsedMs();
+                VolcDebugLog("PasteTextImeAware: done (%.0fms)", pasteMs);
 
                 if (g_config.enableDebugMode) {
                     DebugPrintHeader(g_recordingMs, g_lastPcmBytes);
@@ -844,12 +859,6 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
                     DebugPrintTextLine(L"OK", text);
                 }
-            }
-            if (g_hudWindow) {
-                const bool isError = text.rfind(L"ASR failed:", 0) == 0;
-                const bool isNoSpeech = (text == L"No speech detected");
-                UINT hideMs = isError ? 2200 : (isNoSpeech ? 1500 : 200);
-                SetTimer(g_hudWindow, kHudHideTimer, hideMs, nullptr);
             }
         }
         return 0;
@@ -912,6 +921,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 if (hConn) { WinHttpCloseHandle(hConn); g_volcSession.hConnect = nullptr; }
                 HINTERNET hSess = g_volcSession.hSession;
                 if (hSess) { WinHttpCloseHandle(hSess); g_volcSession.hSession = nullptr; }
+                g_volcThread.join();
             }
             return 0;
         }

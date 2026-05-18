@@ -2,6 +2,21 @@
 
 > 🇬🇧 [English](../CHANGELOG.md)
 
+## v0.8.3 (2026-05-18)
+
+### 修复
+
+- **火山引擎 no-speech 路径 drainThread.join() 阻塞 17+ 秒**（严重）：VAD 未检测到语音时，`drainThread.join()` 在 `WinHttpCloseHandle(hWebSocket)` 之前调用。由于 `WinHttpWebSocketReceive` 超时不可靠（200ms 可能实际阻塞 17+ 秒），drainThread 无法退出，直到 18 秒 watchdog 强制关闭句柄。修复：先关闭 WebSocket 句柄再 join drainThread——关闭句柄会强制 `WinHttpWebSocketReceive` 立即返回 `ERROR_WINHTTP_OPERATION_CANCELLED`
+- **火山引擎正常路径同样的 join-before-close 问题**：async/nostream 正常完成路径也是先 join 再 close。同样修复——先关句柄再 join
+- **Watchdog 线程句柄泄漏**：Watchdog 强制关闭句柄后没有 `g_volcThread.join()`，线程句柄处于 joinable 状态。下次 `StartRecordingSession` 调用 `g_volcThread = std::thread(...)` 时会触发 `std::terminate` 崩溃。修复：关闭句柄后添加 `g_volcThread.join()`
+- **SendMessage(WM_PASTE) 可能无限阻塞 UI 线程**：`PasteTextImeAware` 使用同步 `SendMessage(focus, WM_PASTE)`——如果目标窗口挂起，UI 线程会永远阻塞。改为 `SendMessageTimeoutW` + `SMTO_ABORTIFHUNG` + 2 秒超时
+- **PasteTextImeAware 阻塞时 HUD 隐藏定时器未设置**：`SetTimer(kHudHideTimer)` 在 `PasteTextImeAware` 之后调用。如果粘贴阻塞，定时器永远不会设置，HUD 一直显示。将 `SetTimer(kHudHideTimer)` 移到 `PasteTextImeAware` 之前
+
+### 变更
+
+- **drainThread final drain 改为循环读取（1000ms 超时）**：将单次 `ReceiveResult(3000ms)` 替换为循环 `ReceiveResult(1000ms)`（总计最多 5 秒）。更可靠地处理 nostream 模式的多包响应——每个音频包对应一个响应，最终结果可能在后面的包中
+- **添加 PasteTextImeAware 调试日志**：记录开始/完成及耗时，帮助诊断粘贴相关的卡死问题
+
 ## v0.8.2 (2026-05-18)
 
 ### 修复

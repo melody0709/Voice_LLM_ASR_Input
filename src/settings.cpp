@@ -150,7 +150,8 @@ void PasteTextImeAware(const std::wstring& text) {
     HWND focus = GetFocus();
     if (focus) {
         SetClipboardText(text);
-        SendMessage(focus, WM_PASTE, 0, 0);
+        DWORD_PTR result = 0;
+        SendMessageTimeoutW(focus, WM_PASTE, 0, 0, SMTO_ABORTIFHUNG, 2000, &result);
         return;
     }
 
