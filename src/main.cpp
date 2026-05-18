@@ -370,7 +370,14 @@ void StartRecordingSession() {
         g_volcStreaming.store(true);
         ShowHud(L"Listening... Volcano Engine");
 
-        if (g_volcThread.joinable()) g_volcThread.join();
+        if (g_volcThread.joinable()) {
+            g_volcSession.forceAbort = true;
+            if (g_volcSession.hWebSocket) {
+                WinHttpCloseHandle(g_volcSession.hWebSocket);
+                g_volcSession.hWebSocket = nullptr;
+            }
+            g_volcThread.join();
+        }
         g_volcSession.forceAbort = false;
 
         g_streamingVadReady = false;
@@ -407,7 +414,8 @@ void StartRecordingSession() {
 
             if (!volc_asr::OpenSession(g_volcSession, vcfg)) {
                 if (g_volcStreaming.load() && !g_volcSession.forceAbort.load()) {
-                    ShowHud(L"Reconnecting... (1/3)");
+                    PostMessageW(g_mainWindow, kHudUpdateMessage, 0,
+                                 reinterpret_cast<LPARAM>(new std::wstring(L"Reconnecting... (1/3)")));
                     VolcDebugLog("Volc thread: Round 1 failed, retrying...");
                     Sleep(1500);
                     if (volc_asr::OpenSession(g_volcSession, vcfg)) goto openSessionOk;
@@ -416,7 +424,8 @@ void StartRecordingSession() {
                 bool hasPending = !g_volcPendingAudio.empty();
                 LeaveCriticalSection(&g_volcAudioCs);
                 if (hasPending && !g_volcSession.forceAbort.load()) {
-                    ShowHud(L"Reconnecting... (2/3)");
+                    PostMessageW(g_mainWindow, kHudUpdateMessage, 0,
+                                 reinterpret_cast<LPARAM>(new std::wstring(L"Reconnecting... (2/3)")));
                     VolcDebugLog("Volc thread: Round 2 failed, final attempt...");
                     Sleep(1500);
                     if (volc_asr::OpenSession(g_volcSession, vcfg)) goto openSessionOk;
@@ -426,8 +435,11 @@ void StartRecordingSession() {
                 if (!g_volcSession.lastError.empty()) {
                     errMsg = g_volcSession.lastError;
                 }
-                ShowHud(errMsg);
-                if (g_hudWindow) SetTimer(g_hudWindow, kHudHideTimer, 4000, nullptr);
+                PostMessageW(g_mainWindow, kHudUpdateMessage, 0,
+                             reinterpret_cast<LPARAM>(new std::wstring(errMsg)));
+                PostMessageW(g_mainWindow, kAsrResultMessage, 0,
+                             reinterpret_cast<LPARAM>(new std::wstring(errMsg)));
+                VolcDebugLog("VolcEngine connect failed: %ls", errMsg.c_str());
                 return;
             }
             openSessionOk:
@@ -460,7 +472,8 @@ void StartRecordingSession() {
                         volc_asr::VolcResult vr = volc_asr::ReceiveResult(g_volcSession.hWebSocket, 200, &g_volcSession);
                         if (!vr.text.empty() && vr.text != asyncPartial) {
                             asyncPartial = vr.text;
-                            ShowHud(L"Listening... Volcano Engine\n" + vr.text);
+                            PostMessageW(g_mainWindow, kHudUpdateMessage, 0,
+                                         reinterpret_cast<LPARAM>(new std::wstring(L"Listening... Volcano Engine\n" + vr.text)));
                         }
                     }
                     VolcDebugLog("drainThread: main loop exited, doing final drain...");
@@ -511,7 +524,8 @@ void StartRecordingSession() {
                     if (!g_volcSession.hWebSocket) break;
                     if (!asyncMode && !partial.empty() && partial != lastPartial) {
                         lastPartial = partial;
-                        ShowHud(L"Listening... Volcano Engine\n" + partial);
+                        PostMessageW(g_mainWindow, kHudUpdateMessage, 0,
+                                     reinterpret_cast<LPARAM>(new std::wstring(L"Listening... Volcano Engine\n" + partial)));
                     }
                 } else if (!streaming) {
                     break;
@@ -799,6 +813,11 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     case kPreloadDoneMessage:
         return 0;
+    case kHudUpdateMessage: {
+        std::unique_ptr<std::wstring> text(reinterpret_cast<std::wstring*>(lParam));
+        if (text) ShowHud(*text);
+        return 0;
+    }
     case kAsrResultMessage: {
         KillTimer(g_mainWindow, kVolcWatchdogTimer);
         std::unique_ptr<std::wstring> result(reinterpret_cast<std::wstring*>(lParam));
