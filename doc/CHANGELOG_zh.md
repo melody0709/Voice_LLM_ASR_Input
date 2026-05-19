@@ -2,6 +2,25 @@
 
 > 🇬🇧 [English](../CHANGELOG.md)
 
+## v0.8.4 (2026-05-19)
+
+### 新增
+
+- **kHudUpdateMessage 线程安全 HUD 更新**: 新增自定义窗口消息 `kHudUpdateMessage`，工作线程通过向主 UI 线程投递消息更新 HUD 文本，而不是直接调用 `ShowHud`，避免与 Direct2D 渲染的线程安全问题
+- **重连进度 HUD 显示**: 火山引擎重连尝试时，HUD 现在显示进度（如 "Reconnecting... (1/3)"、"Reconnecting... (2/3)"、"Reconnecting... (3/3)"），而不是通用的 "ASR failed: reconnecting..." 消息
+- **连接失败 HUD 日志输出**: 火山引擎连接失败时，HUD 现在显示服务器返回的实际错误信息，帮助用户诊断 API 密钥或网络问题
+
+### 修复
+
+- **火山引擎重连未正确清理 WebSocket 句柄**: 重试连接前未关闭旧 WebSocket 句柄，导致多次重试时句柄泄漏。每次重连前添加 `WinHttpCloseHandle`
+- **动态分配的 HUD 文本内存泄漏**: 工作线程调用 `ShowHud` 时动态分配的字符串从未释放。现在使用 `PostMessageW` + 堆分配的 `std::wstring`，由 UI 线程在消息处理中释放
+- **工作线程的 HUD 更新竞态**: 火山引擎工作线程直接调用 `ShowHud` 可能与 UI 线程产生竞态，导致闪烁或文本过期。所有工作线程的 HUD 更新现在都通过 `kHudUpdateMessage`
+
+### 变更
+
+- **调试模式 `g_enableDebugMode` 在配置重载时同步**: `g_enableDebugMode` 现在在配置加载时立即设置（`wWinMain`、`kReloadMessage`、托盘菜单切换），无需重启即可保持一致
+- **移除启动时 "ASR ready: xxx" HUD 提示**: 启动时为云端后端的 HUD 通知已被移除，因为如果用户在启动后立即按热键，可能和 `kHudHideTimer` 冲突导致 HUD 提前消失
+
 ## v0.8.3 (2026-05-18)
 
 ### 修复

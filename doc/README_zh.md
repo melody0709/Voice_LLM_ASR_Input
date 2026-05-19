@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  当前版本：<code>v0.8.3</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
+  当前版本：<code>v0.8.4</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -185,7 +185,7 @@ CHANGELOG.md        — 版本变更记录
 详见 [CHANGELOG.md](CHANGELOG.md)
 
 **最近更新：**
-- **v0.8.3** — 修复火山引擎 no-speech drainThread.join() 阻塞 17+ 秒（先关 WebSocket 再 join）、watchdog 线程句柄泄漏崩溃、SendMessage(WM_PASTE) 阻塞 UI 线程
+- **v0.8.4** — 修复火山引擎 no-speech drainThread.join() 阻塞 17+ 秒（先关 WebSocket 再 join）、watchdog 线程句柄泄漏崩溃、SendMessage(WM_PASTE) 阻塞 UI 线程
 - **v0.8.2** — 修复火山引擎 nostream/async 结果丢失、长录音截断、WinHttpCloseHandle 死锁、逻辑死锁、短音频误报超时、HUD 定时器竞态
 - **v0.8.0.1** — 修复火山引擎 nostream 无语音时卡死（WinHttpWebSocketReceive 1ms 超时不生效）
 - **v0.8.0** — 流式 VAD（录音期间实时语音检测，跳过静音）、火山引擎 nostream/async 长录音卡死修复、HUD 音量条语音检测变色、watchdog 录音期间续期、代码质量修复

@@ -2,6 +2,25 @@
 
 > 🇨🇳 [中文版](doc/CHANGELOG_zh.md)
 
+## v0.8.4 (2026-05-19)
+
+### Added
+
+- **kHudUpdateMessage for thread-safe HUD updates**: Added a custom window message (`kHudUpdateMessage`) so that HUD text can be updated safely from worker threads by posting a message to the main UI thread instead of calling `ShowHud` directly, avoiding thread safety issues with Direct2D rendering
+- **Reconnection HUD progress display**: During Volcengine reconnection attempts, the HUD now shows progress (e.g., "Reconnecting... (1/3)", "Reconnecting... (2/3)", "Reconnecting... (3/3)") instead of the generic "ASR failed: reconnecting..." message
+- **Connection failure HUD logging**: Failed Volcengine connection attempts now display the actual error message from the server in the HUD, helping users diagnose API key or network issues
+
+### Fixed
+
+- **Volcengine reconnect not properly cleaning up WebSocket handle**: Before retrying connection, the old WebSocket handle was not closed, causing handle leaks across retries. Added `WinHttpCloseHandle` before each reconnect attempt
+- **Dynamically allocated HUD text memory leak**: `ShowHud` was being called from worker threads with dynamically allocated strings that were never freed. Now uses `PostMessageW` with `std::wstring` allocated on the heap, freed by the UI thread in the message handler
+- **HUD update race from worker threads**: Direct `ShowHud` calls from the Volcengine worker thread could race with the UI thread, causing flickering or stale text. All HUD updates from worker threads now go through `kHudUpdateMessage`
+
+### Changed
+
+- **Debug mode `g_enableDebugMode` synced on config reload**: `g_enableDebugMode` is now set immediately when config is loaded (in `wWinMain`, `kReloadMessage`, and tray menu toggle), ensuring debug mode state is consistent without requiring a restart
+- **Removed startup HUD "ASR ready: xxx" display**: The HUD notification on startup for cloud backends was removed because it could conflict with `kHudHideTimer` if the user pressed the hotkey immediately after startup, causing the HUD to disappear prematurely
+
 ## v0.8.3 (2026-05-18)
 
 ### Fixed
