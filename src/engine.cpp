@@ -21,7 +21,7 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "winmm.lib")
 
-static constexpr int kCurrentConfigVersion = 1;
+static constexpr int kCurrentConfigVersion = 2;
 
 bool EqualsIgnoreCase(std::wstring a, std::wstring b) {
     std::transform(a.begin(), a.end(), a.begin(), [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
@@ -385,6 +385,12 @@ void LoadConfig() {
         if (g_config.volcMode.empty()) g_config.volcMode = L"bigmodel_nostream";
         if (g_config.volcResourceId.empty()) g_config.volcResourceId = L"volc.seedasr.sauc.duration";
         if (g_config.cloudProvider.empty()) g_config.cloudProvider = L"volcengine";
+    }
+    if (g_config.configVersion < 2) {
+        g_config.vadThreshold = 0.15f;
+        g_config.vadMinSilence = 500;
+        g_config.vadMinSpeech = 30;
+        g_config.vadPadStart = 150;
     }
     if (g_config.modelDir.empty()) {
         g_config.modelDir = DefaultModelDir(g_config.modelId);

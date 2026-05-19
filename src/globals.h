@@ -165,10 +165,10 @@ struct Config {
     std::wstring threads = L"auto";
     bool enableVad = false;
     std::wstring vadModel = L"firered";
-    float vadThreshold = 0.2f;
-    int vadMinSilence = 300;
-    int vadMinSpeech = 50;
-    int vadPadStart = 80;
+    float vadThreshold = 0.15f;
+    int vadMinSilence = 500;
+    int vadMinSpeech = 30;
+    int vadPadStart = 150;
     int vadSmoothWindow = 5;
     bool enablePartial = false;
     std::wstring postprocess = L"itn";
