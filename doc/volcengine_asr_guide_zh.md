@@ -17,7 +17,7 @@
   - [3.4 Language（语言）](#34-language语言)
   - [3.5 end_window_size / force_to_speech_time](#35-end_window_size--force-to_speech_time)
   - [3.6 功能开关](#36-功能开关)
-  - [3.7 首字加速](#37-首字加速)
+  - [3.7 输入框上下文](#37-输入框上下文)
   - [3.8 热词与替换词](#38-热词与替换词)
   - [3.9 Extra Params](#39-extra-params)
   - [3.10 对话上下文](#310-对话上下文)
@@ -38,7 +38,7 @@ VoxType 通过 WebSocket 协议连接火山引擎豆包大模型语音识别服�
 **关键特性：**
 - 支持热词词表（boosting_table）和替换词词表（correct_table）
 - 支持对话上下文（context），利用历史识别结果提升准确率
-- 支持语义顺滑（DDC）、二遍识别（nonstream）、首字加速等高级功能
+- 支持语义顺滑（DDC）、二遍识别（nonstream）、输入框上下文等高级功能
 - API Key 通过 DPAPI 加密存储在本地 `config.json` 中
 
 ---
@@ -163,12 +163,26 @@ Resource ID 对应计费方式，在控制台开通服务时选择：
 
 **enable_nonstream（二遍识别）**：仅在 `bigmodel_async` 模式下可用。开启后，VAD 分句判停时使用非流式模型重新识别该分句音频，兼顾实时上屏（快）和最终准确率（准）。开启后默认启用 VAD 分句（800ms 判停）。
 
-### 3.7 首字加速
+### 3.7 输入框上下文
 
-| 字段 | API 参数 | 说明 |
-|------|---------|------|
-| enable_accelerate | `enable_accelerate_text` | 启用首字返回加速，降低首字准确率换取更快出字 |
-| score | `accelerate_score` | 加速率，0–20，值越大首字越快 |
+勾选 `Read input field context` 后，录音开始时自动读取当前输入框的已有文本，作为 ASR 上下文发送给服务端，提升识别准确率。
+
+**工作原理：**
+1. 录音开始时，通过分层 Fallback 方案读取输入框文本
+2. 读取方式按优先级依次尝试：WM_GETTEXT（Edit 控件）→ UIA Value → TextPattern → TextPattern2 → 父元素遍历 → ElementFromPoint → MSAA
+3. 读取到的文本截取最后 200 字符，构建为 `corpus.context` 字段
+4. 整个过程有 200ms 超时保护，不会阻塞录音启动
+5. 自动跳过密码框（`UIA_IsPasswordPropertyId` 检测）
+
+**上下文优先级：**
+- 输入框有文本时：只发送输入框文本（`includeHistory=false`），避免重复
+- 输入框无文本时：如果 `Use history as context` 也勾选了，用历史记录兜底
+- 两个开关独立控制，互不依赖
+
+**兼容性：**
+- ✅ 记事本、Word、Chrome/Edge 输入框、VS Code、WPF 应用
+- ❌ 微信/QQ（Qt 自绘控件，UIA/MSAA 不可见）
+- ❌ Java 应用、游戏
 
 ### 3.8 热词与替换词
 
@@ -198,11 +212,21 @@ Resource ID 对应计费方式，在控制台开通服务时选择：
 
 ### 3.10 对话上下文
 
-勾选 `Use history as context` 后，每次识别请求会将最近 N 条识别结果作为对话上下文发送给服务端。
+VoxType 提供两种独立的上下文来源，由两个开关分别控制：
 
-**工作原理：**
+| 开关 | 控制的上下文 | 说明 |
+|------|------------|------|
+| `Use history as context` | 历史识别结果 | 将最近 N 条识别结果作为对话上下文发送 |
+| `Read input field context` | 输入框文本 | 读取当前输入框末尾 200 字符作为上下文（详见 §3.7） |
+
+**上下文优先级：**
+- 输入框有文本时：只发送输入框文本，不发历史记录（避免重复）
+- 输入框无文本时：如果 `Use history as context` 已勾选，用历史记录兜底
+- 窗口标题不再作为 context 发送（对 ASR 识别帮助极小）
+
+**历史记录上下文工作原理：**
 1. 每次识别完成后，结果被存入内存中的历史队列
-2. 下次录音时，历史结果被构建为 `corpus.context` 字段
+2. 下次录音时（输入框无文本时），历史结果被构建为 `corpus.context` 字段
 3. 格式为 `{"context_type":"dialog_ctx","context_data":[{"text":"..."}]}`
 4. 该 JSON 对象会被序列化为字符串（内层引号转义）后作为 `context` 的值
 

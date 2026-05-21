@@ -2,6 +2,27 @@
 
 > 🇬🇧 [English](../CHANGELOG.md)
 
+## v0.8.5 (2026-05-21)
+
+### 新增
+
+- **输入框上下文读取**：新增读取当前输入框文本作为 ASR 上下文的功能，提升识别准确率。采用分层 Fallback 方案：WM_GETTEXT（Edit 控件）→ UIA Value → TextPattern（RangeFromPoint / VisibleRanges）→ TextPattern2（GetCaretRange）→ 父元素遍历 → ElementFromPoint → MSAA（IAccessible）。200ms 超时保护 + 密码框检测
+- **Debug 上下文输出**：控制台输出显示成功 Layer、耗时、窗口类名、UIA 控件类型和实际上下文文本。输入框上下文和历史记录上下文均有输出
+- **`DebugPrintInputContext()` 辅助函数**：提取共享的 debug 输出代码为辅助函数，ASR 和 LLM 结果分支共用
+
+### 变更
+
+- **上下文逻辑重构**：输入框文本和历史记录不再同时发送——输入框文本优先；输入框文本不可用时历史记录兜底。窗口标题不再作为 context 发送（对 ASR 识别帮助极小，浪费 tokens）
+- **上下文开关独立化**："Read input field context" 和 "Use history as context" 改为独立开关，不再嵌套
+- **`GetForegroundWindow()` 在 UI 线程捕获**：前台窗口句柄在 UI 线程捕获后传入 UIA 工作线程，避免窗口焦点切换的竞态条件
+- **`TryTextPatternVisibleRanges` 内存优化**：`GetText(-1)` 改为 `GetText(500)`，累积超过 400 字符时提前退出，避免大视口（如 Word 缩放 25%）下读取过多文本
+- **`inline` 替代 `static` 用于 header-only 全局变量**：`s_triggeredWindows` 和 `s_uiaThreadRunning` 从 `static` 改为 `inline`（C++17），避免多编译单元重复定义问题
+- **Settings UI 重组**：移除 "enable_accelerate" 和 "accelerate_score" 控件（实际价值极小）。"Extra Params" 上移到 Row 6。Row 9 现为 "Context" 标签 + 两个复选框一行排列，"Read input field context" 对齐 Name 输入框
+
+### 移除
+
+- **首字加速功能**：从火山引擎请求、配置和 UI 中移除 `enable_accelerate_text` 和 `accelerate_score`。这些参数实际价值极小
+
 ## v0.8.4 (2026-05-19)
 
 ### 新增
@@ -180,7 +201,7 @@
   - `enable_ddc` — 语义顺滑（去除语气词和重复词）
   - `enable_nonstream` — `bigmodel_async` 模式下开启二遍识别（流式 + 非流式重识别，准确率更高）
   - `enable_music_fc` / `enable_poi_fc` — 音乐和 POI function call
-  - `enable_accelerate_text` + `accelerate_score` — 首字返回加速
+  - `enable_accelerate_text` + `accelerate_score` — 首字返回加速（v0.8.5 已移除）
   - `language` — 语言选择（仅 `bigmodel_nostream` 模式生效，符合 API 规范）
 - **热词与替换词表**：Cloud ASR tab 新增 `Hotwords ID/Name` 和 `Correct ID/Name` 字段
   - `boosting_table_id` / `boosting_table_name` — 引用自学习平台热词词表

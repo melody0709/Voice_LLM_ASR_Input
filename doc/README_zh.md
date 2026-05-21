@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  当前版本：<code>v0.8.4</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
+  当前版本：<code>v0.8.5</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -107,6 +107,7 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
   - Model Version：`Seed-ASR 2.0 (duration)` / `Seed-ASR 2.0 (concurrent)` / `BigASR 1.0 (duration)` / `BigASR 1.0 (concurrent)`
   - Hotwords ID/Name、Correct ID/Name — 引用自学习平台热词词表和替换词词表
   - Use history as context — 将最近识别结果作为对话上下文发送，提升准确率
+  - Read input field context — 读取当前输入框文本作为 ASR 上下文（UIA/MSAA/WM_GETTEXT 分层 Fallback，输入框优先、历史兜底）
 - 云端 ASR 自带标点；使用云端后端时 VAD 和本地标点模型不生效
 
 </details>
@@ -154,8 +155,10 @@ src/
   baidu_asr.h       — 百度智能云 ASR 模块（header-only）
   volcengine_asr.h  — 火山引擎（豆包）ASR 模块（header-only, WebSocket）
   firered_vad.h     — FireRed VAD 模块（header-only）
+  input_context.h   — 输入框上下文读取模块（header-only，UIA/MSAA/WM_GETTEXT）
   llm_refine.h      — LLM 纠错模块（header-only）
   globals.h         — 共享常量、控件 ID、extern 全局变量声明
+  utils.h           — 共享工具函数（WideToUtf8、Utf8ToWide、EscapeJson、Trim）
   resources.rc / resource.h / app.ico / app.manifest
 dll/                — 运行时 DLL（sherpa-onnx、onnxruntime 等）
 third_party/        — 头文件和导入库
@@ -175,7 +178,6 @@ CHANGELOG.md        — 版本变更记录
 - 录音后才识别，尚未实现真正流式 partial
 - 文本注入以剪贴板 + Ctrl+V 为主，管理员权限窗口可能拦截
 - 模型文件较大（约 3GB），首次加载需要几秒
-- LLM 纠错尚未完全实现（Punctuation 的 +L 选项当前按本地标点处理）
 
 </details>
 
@@ -185,6 +187,7 @@ CHANGELOG.md        — 版本变更记录
 详见 [CHANGELOG.md](CHANGELOG.md)
 
 **最近更新：**
+- **v0.8.5** — 输入框上下文（UIA/MSAA/WM_GETTEXT 读取输入框文本作为 ASR 上下文）、上下文逻辑重构（输入框优先、历史兜底、去掉窗口标题）、移除加速首字参数、设置界面重组
 - **v0.8.4** — 修复火山引擎 no-speech drainThread.join() 阻塞 17+ 秒（先关 WebSocket 再 join）、watchdog 线程句柄泄漏崩溃、SendMessage(WM_PASTE) 阻塞 UI 线程
 - **v0.8.2** — 修复火山引擎 nostream/async 结果丢失、长录音截断、WinHttpCloseHandle 死锁、逻辑死锁、短音频误报超时、HUD 定时器竞态
 - **v0.8.0.1** — 修复火山引擎 nostream 无语音时卡死（WinHttpWebSocketReceive 1ms 超时不生效）

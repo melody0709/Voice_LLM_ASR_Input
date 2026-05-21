@@ -7,6 +7,7 @@
 #include "hud.h"
 #include "hotkey.h"
 #include "settings.h"
+#include "input_context.h"
 
 #include <fstream>
 #include <sstream>
@@ -98,6 +99,7 @@ int g_cloudProviderIdx = 0;
 HWND g_cloudAsrHintControl = nullptr;
 
 static std::deque<std::wstring> g_volcRecognitionHistory;
+InputContextResult g_inputContextResult;
 
 static ULONGLONG g_sessionStartTick = 0;
 static double g_recordingMs = 0.0;
@@ -159,22 +161,67 @@ static void DebugPrintTextLine(const wchar_t* prefix, const std::wstring& text) 
     WriteConsoleW(hOut, line.c_str(), static_cast<DWORD>(line.size()), &written, nullptr);
 }
 
-static std::wstring BuildVolcContextJson() {
-    if (g_volcRecognitionHistory.empty()) return L"";
-    std::wstring json = L"{\"context_type\":\"dialog_ctx\",\"context_data\":[";
-    for (size_t i = 0; i < g_volcRecognitionHistory.size(); ++i) {
-        if (i > 0) json += L",";
-        std::wstring text = g_volcRecognitionHistory[i];
-        std::wstring escaped;
-        for (wchar_t c : text) {
-            if (c == L'\\') escaped += L"\\\\";
-            else if (c == L'"') escaped += L"\\\"";
-            else if (c == L'\n') escaped += L"\\n";
-            else if (c == L'\r') escaped += L"\\r";
-            else if (c == L'\t') escaped += L"\\t";
-            else escaped += c;
+static void DebugPrintInputContext() {
+    if (g_config.volcEnableInputContext) {
+        auto& ic = g_inputContextResult;
+        printf("  Context: %s %.0fms", input_context::LayerName(ic.successLayer), ic.elapsedMs);
+        if (!ic.focusWindowClass.empty())
+            printf(" class=%s", ic.focusWindowClass.c_str());
+        if (!ic.controlType.empty())
+            printf(" uia=%s", ic.controlType.c_str());
+        if (ic.inputFieldText.empty()) {
+            printf(" [%ls]\n", input_context::TruncateForDisplay(ic.windowTitle).c_str());
+        } else {
+            printf(" len=%d\n", ic.textLength);
+            printf("  ContextText: \"");
+            DWORD written = 0;
+            WriteConsoleW(GetStdHandle(STD_OUTPUT_HANDLE), ic.inputFieldText.c_str(), (DWORD)ic.inputFieldText.size(), &written, nullptr);
+            printf("\"\n");
         }
-        json += L"{\"text\":\"" + escaped + L"\"}";
+        if (ic.successLayer < 0 && !ic.failReason.empty())
+            printf("  ContextFail: %s\n", ic.failReason.c_str());
+    } else if (g_config.volcEnableContext) {
+        printf("  Context: HISTORY %zu rounds\n", g_volcRecognitionHistory.size());
+    }
+}
+
+static std::wstring JsonEscape(const std::wstring& s) {
+    std::wstring out;
+    out.reserve(s.size());
+    for (wchar_t c : s) {
+        if (c == L'\\') out += L"\\\\";
+        else if (c == L'"') out += L"\\\"";
+        else if (c == L'\n') out += L"\\n";
+        else if (c == L'\r') out += L"\\r";
+        else if (c == L'\t') out += L"\\t";
+        else if (c == L'\b') out += L"\\b";
+        else if (c == L'\f') out += L"\\f";
+        else if (c < 0x20) {
+            wchar_t buf[8];
+            swprintf_s(buf, L"\\u%04x", (unsigned)c);
+            out += buf;
+        }
+        else out += c;
+    }
+    return out;
+}
+
+static std::wstring BuildVolcContextJson(const std::wstring& inputFieldText = L"",
+                                          bool includeHistory = true) {
+    std::wstring json = L"{\"context_type\":\"dialog_ctx\",\"context_data\":[";
+    int idx = 0;
+
+    if (!inputFieldText.empty()) {
+        json += L"{\"text\":\"" + JsonEscape(inputFieldText) + L"\"}";
+        idx++;
+    }
+
+    if (includeHistory) {
+        for (size_t i = 0; i < g_volcRecognitionHistory.size(); ++i) {
+            if (idx > 0) json += L",";
+            json += L"{\"text\":\"" + JsonEscape(g_volcRecognitionHistory[i]) + L"\"}";
+            idx++;
+        }
     }
     json += L"]}";
     return json;
@@ -356,15 +403,28 @@ void StartRecordingSession() {
         vcfg.enableMusicFc = config.volcEnableMusicFc;
         vcfg.enablePoiFc = config.volcEnablePoiFc;
         vcfg.forceToSpeechTime = config.volcForceToSpeechTime;
-        vcfg.enableAccelerateText = config.volcEnableAccelerate;
-        vcfg.accelerateScore = config.volcAccelerateScore;
         vcfg.extraParams = config.volcExtraParams;
         vcfg.hotwordsId = config.volcHotwordsId;
         vcfg.hotwordsName = config.volcHotwordsName;
         vcfg.correctTableId = config.volcCorrectTableId;
         vcfg.correctTableName = config.volcCorrectTableName;
-        if (config.volcEnableContext) {
-            vcfg.contextJson = BuildVolcContextJson();
+        {
+            std::wstring ctxInputText;
+            bool hasInputText = false;
+
+            if (config.volcEnableInputContext) {
+                HiResTimer tCtx;
+                g_inputContextResult = input_context::GetInputFieldContext();
+                g_inputContextResult.elapsedMs = tCtx.ElapsedMs();
+                ctxInputText = g_inputContextResult.inputFieldText;
+                hasInputText = !ctxInputText.empty();
+            }
+
+            if (hasInputText) {
+                vcfg.contextJson = BuildVolcContextJson(ctxInputText, false);
+            } else if (config.volcEnableContext) {
+                vcfg.contextJson = BuildVolcContextJson(L"", true);
+            }
         }
 
         g_volcStreaming.store(true);
@@ -844,6 +904,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 if (g_config.enableDebugMode) {
                     DebugPrintHeader(g_recordingMs, g_lastPcmBytes);
 
+                    DebugPrintInputContext();
+
                     if (g_config.asrBackend == L"local") {
                         printf("  Pipeline: ");
                         if (g_vadMs > 0) printf("VAD(%ls) %.0f | ", g_vadModelName.c_str(), g_vadMs);
@@ -894,6 +956,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
             if (g_config.enableDebugMode) {
                 DebugPrintHeader(g_recordingMs, g_lastPcmBytes);
+
+                DebugPrintInputContext();
 
                 if (g_config.asrBackend == L"local") {
                     printf("  Pipeline: ");

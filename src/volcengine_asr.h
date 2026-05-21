@@ -106,8 +106,6 @@ struct VolcConfig {
     bool enableMusicFc = false;
     bool enablePoiFc = false;
     int forceToSpeechTime = 0;
-    bool enableAccelerateText = false;
-    int accelerateScore = 0;
     std::wstring extraParams;
     std::wstring contextJson;
     std::wstring hotwordsId;
@@ -458,12 +456,6 @@ inline bool OpenSession(VolcSession& sess, const VolcConfig& cfg) {
     }
     if (cfg.forceToSpeechTime > 0) {
         requestJson += ",\"force_to_speech_time\":" + std::to_string(cfg.forceToSpeechTime);
-    }
-    if (cfg.enableAccelerateText) {
-        requestJson += ",\"enable_accelerate_text\":true";
-        if (cfg.accelerateScore > 0) {
-            requestJson += ",\"accelerate_score\":" + std::to_string(cfg.accelerateScore);
-        }
     }
     if (!cfg.extraParams.empty()) {
         std::string extra = WideToUtf8(cfg.extraParams);

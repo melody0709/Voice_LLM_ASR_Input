@@ -2,6 +2,27 @@
 
 > 🇨🇳 [中文版](doc/CHANGELOG_zh.md)
 
+## v0.8.5 (2026-05-21)
+
+### Added
+
+- **Input field context reading**: New feature to read the current input field text as ASR context, improving recognition accuracy. Uses a layered fallback approach: WM_GETTEXT (Edit controls) → UIA Value → TextPattern (RangeFromPoint / VisibleRanges) → TextPattern2 (GetCaretRange) → Parent element walk → ElementFromPoint → MSAA (IAccessible). Protected by 200ms timeout and password field detection
+- **Debug context output**: Console output shows which layer succeeded, elapsed time, window class, UIA control type, and the actual context text. Works for both input field context and history context
+- **`DebugPrintInputContext()` helper**: Extracted shared debug output code into a helper function, used by both ASR and LLM result branches
+
+### Changed
+
+- **Context logic refactor**: Input field text and history are no longer sent simultaneously — input field text takes priority; history is used as fallback only when input field text is unavailable. Window title is no longer sent as context (it provides minimal ASR benefit and wastes tokens)
+- **Independent context switches**: "Read input field context" and "Use history as context" are now independent switches, not nested
+- **`GetForegroundWindow()` captured on UI thread**: The foreground window handle is now captured on the UI thread and passed to the UIA worker thread, avoiding race conditions with window focus changes
+- **`TryTextPatternVisibleRanges` memory optimization**: Changed `GetText(-1)` to `GetText(500)` with early exit at 400 chars, preventing excessive memory usage with large viewports (e.g., Word at 25% zoom)
+- **`inline` instead of `static` for header-only globals**: `s_triggeredWindows` and `s_uiaThreadRunning` changed from `static` to `inline` (C++17) to avoid multiple-definition issues if included from multiple translation units
+- **Settings UI reorganize**: Removed "enable_accelerate" and "accelerate_score" controls (minimal practical value). Moved "Extra Params" to Row 6. Row 9 now has "Context" label with both checkboxes on one line, "Read input field context" aligned with Name input boxes
+
+### Removed
+
+- **Accelerate score feature**: Removed `enable_accelerate_text` and `accelerate_score` from Volcengine request, config, and UI. These parameters had minimal practical benefit
+
 ## v0.8.4 (2026-05-19)
 
 ### Added
@@ -181,7 +202,7 @@
   - `enable_ddc` — Semantic smoothing (removes filler words and repetitions)
   - `enable_nonstream` — Two-pass recognition on `bigmodel_async` mode (streaming + offline re-recognition for higher accuracy)
   - `enable_music_fc` / `enable_poi_fc` — Music and POI function call
-  - `enable_accelerate_text` + `accelerate_score` — First-token acceleration
+  - `enable_accelerate_text` + `accelerate_score` — First-token acceleration (removed in v0.8.5)
   - `language` — Language selection (only effective in `bigmodel_nostream` mode, per API spec)
 - **Hotwords & correction tables**: New `Hotwords ID/Name` and `Correct ID/Name` fields in Cloud ASR tab
   - `boosting_table_id` / `boosting_table_name` — Reference hotword tables from the self-learning platform

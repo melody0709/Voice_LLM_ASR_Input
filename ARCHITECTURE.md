@@ -9,7 +9,7 @@ This document describes the current implementation, not the final ideal design. 
 ```mermaid
 flowchart LR
     User["User holds hotkey"] --> Frontend["VoxType.exe<br/>Win32 tray frontend"]
-    Frontend --> Recorder["waveIn recording<br/>16kHz mono PCM"]
+    Frontend --> Recorder["WASAPI recording<br/>48kHz→16kHz resample"]
     Recorder --> Engine["AsrEngine (C++)<br/>sherpa-onnx-cxx-api"]
     Engine --> VAD["VAD<br/>Silero / FireRed"]
     VAD --> ASR["sherpa-onnx ASR<br/>FireRed/SenseVoice"]
@@ -50,6 +50,8 @@ Since v0.6.0, the source code is organized into multiple modules:
 | `src/baidu_asr.h` | Baidu Cloud ASR module (header-only) |
 | `src/volcengine_asr.h` | Volcengine (豆包) ASR module (header-only, WebSocket) |
 | `src/firered_vad.h` | FireRed VAD module (header-only) |
+| `src/input_context.h` | Input field context reading module (header-only, UIA/MSAA/WM_GETTEXT layered fallback) |
+| `src/utils.h` | Shared utility functions (WideToUtf8, Utf8ToWide, EscapeJson, Trim) |
 
 Global variables are defined in `main.cpp` and accessed by other modules via `extern` declarations in `globals.h`.
 
@@ -112,12 +114,10 @@ Normal hotkey behavior:
 
 ### Recording
 
-Currently uses `waveIn`:
+Currently uses WASAPI Shared Mode (since v0.7.3), with automatic fallback to `waveIn`:
 
-- Sample rate: 16000
-- Channels: mono
-- Bit depth: 16-bit PCM
-- Buffers: 4 buffers of approximately 100ms each
+- WASAPI: Captures at system mix format (typically 48kHz/32bit float/stereo), resamples to 16kHz/16bit/mono via linear interpolation
+- waveIn fallback: 16kHz/16bit/mono, 4 buffers of approximately 100ms each
 
 After recording stops, the audio is saved to:
 
@@ -135,7 +135,7 @@ A borderless capsule HUD is displayed at the bottom center during recording. The
 - Direct2D draws the capsule background, thin border, and 5 volume bars.
 - DirectWrite draws status text, using DIP for measurement and layout.
 - Win32 window size uses the current window DPI to convert DIP to physical pixels, avoiding text clipping on high DPI.
-- The recording callback calculates PCM RMS for each `waveIn` buffer, normalizes it, and drives the volume bars.
+- The recording callback calculates PCM RMS for each audio buffer, normalizes it, and drives the volume bars.
 - Volume bars use attack/release smoothing, redrawn via a ~33ms timer during recording.
 - Currently displays `Listening...`, `Recognizing...`, final text, or error status; real partial text is not yet connected.
 
@@ -199,17 +199,12 @@ Enabled when `Punctuation` is set to `Auto punctuate` or `Auto punctuate + LLM` 
 
 ### Text Injection
 
-Current implementation:
+Current implementation (`PasteTextImeAware`):
 
-1. Open clipboard.
-2. Write `CF_UNICODETEXT`.
-3. Send `Ctrl+V`.
-
-Future improvements:
-
-- Restore original clipboard after pasting.
-- Fallback to Unicode `SendInput` when injection fails.
-- Admin privilege window detection and prompting.
+1. **WeChat** (`Weixin.exe`): `WM_CHAR` character-by-character sending (WeChat's custom Qt controls intercept Ctrl+V)
+2. **Other applications**: Clipboard + `Ctrl+V` + IMM32 temporary English mode switch
+3. **Force Unicode Input** (optional): `SendInput` + `KEYEVENTF_UNICODE` character-by-character sending
+4. All paths use `SendMessageTimeoutW` + `SMTO_ABORTIFHUNG` + 2-second timeout, preventing UI thread blocking if target window hangs
 
 ## Configuration
 

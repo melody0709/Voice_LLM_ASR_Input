@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  Current version: <code>v0.8.4</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
+  Current version: <code>v0.8.5</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -107,6 +107,7 @@ Right-click the tray icon to open Settings, hold the hotkey to start recording, 
   - Model Version: `Seed-ASR 2.0 (duration)` / `Seed-ASR 2.0 (concurrent)` / `BigASR 1.0 (duration)` / `BigASR 1.0 (concurrent)`
   - Hotwords ID/Name, Correct ID/Name — Reference hotword and correction tables from the self-learning platform
   - Use history as context — Sends recent recognition results as dialog context for improved accuracy
+  - Read input field context — Reads current input field text as ASR context (UIA/MSAA/WM_GETTEXT layered fallback, input field priority, history fallback)
 - Cloud ASR includes built-in punctuation; VAD and local punct models are bypassed when using cloud backends
 
 </details>
@@ -154,6 +155,7 @@ src/
   baidu_asr.h       — Baidu Cloud ASR module (header-only)
   volcengine_asr.h  — Volcengine (豆包) ASR module (header-only, WebSocket)
   firered_vad.h     — FireRed VAD module (header-only)
+  input_context.h   — Input field context reading module (header-only, UIA/MSAA/WM_GETTEXT)
   llm_refine.h      — LLM correction module (header-only)
   globals.h         — Shared constants, control IDs, extern global variables
   utils.h           — Shared utility functions (WideToUtf8, Utf8ToWide, EscapeJson, Trim)
@@ -176,7 +178,6 @@ CHANGELOG.md        — Version change log
 - Recognition after recording, true streaming partial not yet implemented
 - Text injection primarily via clipboard + Ctrl+V, admin privilege windows may block
 - Model files are large (~3GB), first load takes a few seconds
-- LLM correction not fully implemented yet (Punctuation's +L option currently treated as local punctuation)
 
 </details>
 
@@ -186,6 +187,7 @@ CHANGELOG.md        — Version change log
 See [CHANGELOG.md](CHANGELOG.md)
 
 **Recent Updates:**
+- **v0.8.5** — Input field context (UIA/MSAA/WM_GETTEXT, read input text as ASR context), context logic refactor (input field priority, history fallback, remove window title), remove accelerate score, settings UI reorganize
 - **v0.8.4** — Fix Volcengine no-speech drainThread.join() blocking 17+ seconds (close WebSocket before join), watchdog thread handle leak crash, SendMessage(WM_PASTE) UI thread blocking
 - **v0.8.2** — Fix Volcengine nostream/async result loss, long recording truncation, WinHttpCloseHandle deadlock, logic deadlock, short audio false timeout, HUD timer race
 - **v0.8.0.1** — Fix Volcengine nostream no-speech hang (WinHttpWebSocketReceive 1ms timeout not working)

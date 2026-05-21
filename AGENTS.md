@@ -1,10 +1,9 @@
 # AGENTS.md
-
-开发者指南。详细架构见 `ARCHITECTURE.md`，版本历史见 `CHANGELOG.md`。
+详细架构见 `ARCHITECTURE.md`，版本历史见 `CHANGELOG.md`。
 
 ## 项目概要
 
-Windows 11 本地 CPU 语音输入工具：托盘常驻，按住快捷键录音松开识别，本地 ASR（sherpa-onnx），可选云端 ASR（百度/火山引擎）和 LLM 纠错。
+Windows 11  语音输入法工具：托盘常驻，按住快捷键录音松开识别，本地 ASR（sherpa-onnx），可选云端 ASR（百度/火山引擎）和 LLM 纠错。
 
 ## 构建
 
@@ -19,7 +18,6 @@ Windows 11 本地 CPU 语音输入工具：托盘常驻，按住快捷键录音�
 ## 开发约定
 
 - 编辑文件优先用精确替换（SearchReplace / apply_patch），避免全文覆写。
-- 不提交 `models/`（VAD 模型除外）、`build/`、`__pycache__/`。不把模型打进 exe。
 - C++ 新增依赖同步更新：`#pragma comment(lib)` + `build.bat` + `CMakeLists.txt`。
 - **版本号只改 `src/resource.h` 的 APP_VERSION_MAJOR/MINOR/PATCH/BUILD**，再同步 `README.md` 版本和 `CHANGELOG.md` 记录。`main.cpp`/`resources.rc` 用宏自动派生。
 - sherpa-onnx `cxx-api.h` 含非 ASCII 注释，编译需 `/utf-8`。
@@ -55,11 +53,3 @@ Windows 11 本地 CPU 语音输入工具：托盘常驻，按住快捷键录音�
 - WASAPI 重采样相位更新必须用 `m_resamplePhase -= written / m_resampleRatio`（实际消耗的源样本数），不能用 `m_resamplePhase -= numFrames`（输入帧数），否则非整数采样率比会越界。
 - **微信粘贴**：微信（`Weixin.exe`）用自定义 Qt 控件，`GetFocus()` 返回 NULL 且 IME 拦截 Ctrl+V。必须用 `WM_CHAR` 逐字符发送，不能用剪贴板+Ctrl+V。其他应用用剪贴板+Ctrl+V+IMM32 切换。
 
-## 后续优先级
-
-1. 本地 ASR 性能日志（VAD/decode/punct 分段耗时）
-2. 流式 partial（模拟或换 OnlineRecognizer）
-3. 用户词库/术语替换
-4. 剪贴板恢复
-5. Admin 窗口注入失败检测
-6. Unicode SendInput 回退

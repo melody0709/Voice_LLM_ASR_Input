@@ -9,7 +9,7 @@
 ```mermaid
 flowchart LR
     User["用户长按快捷键"] --> Frontend["VoxType.exe<br/>Win32 托盘前端"]
-    Frontend --> Recorder["waveIn 录音<br/>16kHz mono PCM"]
+    Frontend --> Recorder["WASAPI 录音<br/>48kHz→16kHz 重采样"]
     Recorder --> Engine["AsrEngine (C++)<br/>sherpa-onnx-cxx-api"]
     Engine --> VAD["VAD<br/>Silero / FireRed"]
     VAD --> ASR["sherpa-onnx ASR<br/>FireRed/SenseVoice"]
@@ -50,6 +50,8 @@ flowchart LR
 | `src/baidu_asr.h` | 百度智能云 ASR 模块（header-only） |
 | `src/volcengine_asr.h` | 火山引擎（豆包）ASR 模块（header-only，WebSocket） |
 | `src/firered_vad.h` | FireRed VAD 模块（header-only） |
+| `src/input_context.h` | 输入框上下文读取模块（header-only，UIA/MSAA/WM_GETTEXT 分层 Fallback） |
+| `src/utils.h` | 共享工具函数（WideToUtf8、Utf8ToWide、EscapeJson、Trim） |
 
 全局变量在 `main.cpp` 中定义，其他模块通过 `globals.h` 的 `extern` 声明引用。
 
@@ -112,12 +114,10 @@ Settings 是普通 Win32 窗口，目前分 4 个 tab：
 
 ### 录音
 
-当前使用 `waveIn`：
+当前使用 WASAPI Shared Mode（v0.7.3 起），自动 fallback 到 `waveIn`：
 
-- 采样率：16000
-- 声道：mono
-- 位深：16-bit PCM
-- buffer：4 个约 100ms buffer
+- WASAPI：以系统混合格式（通常 48kHz/32bit float/立体声）捕获，通过线性插值重采样到 16kHz/16bit/单声道
+- waveIn fallback：16kHz/16bit/单声道，4 个约 100ms buffer
 
 停止录音后写入：
 
@@ -135,7 +135,7 @@ Settings 是普通 Win32 窗口，目前分 4 个 tab：
 - Direct2D 绘制胶囊背景、细边框和 5 根音量条。
 - DirectWrite 绘制状态文本，并用 DIP 进行测量和布局。
 - Win32 窗口尺寸使用当前窗口 DPI 将 DIP 转为物理像素，避免高 DPI 下文本裁切。
-- 录音回调每个 `waveIn` buffer 计算 PCM RMS，归一化后驱动音量条。
+- 录音回调计算每个音频 buffer 的 PCM RMS，归一化后驱动音量条。
 - 音量条使用 attack/release 平滑，录音期间通过约 33ms 定时器重绘。
 - 目前显示 `Listening...`、`Recognizing...`、最终文本或错误状态；真实 partial 文本尚未接入。
 
@@ -199,17 +199,12 @@ models/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8/model.
 
 ### 文本注入
 
-当前实现：
+当前实现（`PasteTextImeAware`）：
 
-1. 打开剪贴板。
-2. 写入 `CF_UNICODETEXT`。
-3. 发送 `Ctrl+V`。
-
-后续可以补：
-
-- 粘贴后恢复原剪贴板。
-- 注入失败时 fallback 到 Unicode `SendInput`。
-- 管理员权限窗口检测和提示。
+1. **微信**（`Weixin.exe`）：`WM_CHAR` 逐字符发送（微信自定义 Qt 控件拦截 Ctrl+V）
+2. **其他应用**：剪贴板 + `Ctrl+V` + IMM32 临时切换英文模式
+3. **Force Unicode Input**（可选）：`SendInput` + `KEYEVENTF_UNICODE` 逐字符发送
+4. 所有路径使用 `SendMessageTimeoutW` + `SMTO_ABORTIFHUNG` + 2 秒超时，防止目标窗口挂起阻塞 UI
 
 ## 配置
 

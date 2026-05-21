@@ -17,7 +17,7 @@ This document provides detailed instructions for configuring the Volcengine (Dou
   - [3.4 Language](#34-language)
   - [3.5 end_window_size / force_to_speech_time](#35-end_window_size--force_to_speech_time)
   - [3.6 Feature Toggles](#36-feature-toggles)
-  - [3.7 First-Token Acceleration](#37-first-token-acceleration)
+  - [3.7 Input Field Context](#37-input-field-context)
   - [3.8 Hotwords & Correction Tables](#38-hotwords--correction-tables)
   - [3.9 Extra Params](#39-extra-params)
   - [3.10 Dialog Context](#310-dialog-context)
@@ -38,7 +38,7 @@ VoxType connects to the Volcengine Doubao large model speech recognition service
 **Key features:**
 - Hotword tables (`boosting_table`) and correction tables (`correct_table`)
 - Dialog context (`context`) using recognition history for improved accuracy
-- Semantic smoothing (DDC), two-pass recognition (nonstream), first-token acceleration
+- Semantic smoothing (DDC), two-pass recognition (nonstream), input field context
 - API Key encrypted with DPAPI and stored locally in `config.json`
 
 ---
@@ -163,12 +163,26 @@ Only effective in `bigmodel_nostream` mode. The parameter is not sent in other m
 
 **enable_nonstream (Two-pass Recognition)**: Only available in `bigmodel_async` mode. When enabled, VAD-segmented utterances are re-recognized with the non-streaming model after VAD sentence boundary detection, combining real-time display (fast) with final accuracy (accurate). Enabling this automatically activates VAD segmentation (800ms default).
 
-### 3.7 First-Token Acceleration
+### 3.7 Input Field Context
 
-| Field | API Parameter | Description |
-|-------|--------------|-------------|
-| enable_accelerate | `enable_accelerate_text` | Enable first-token acceleration, trades accuracy for faster initial output |
-| score | `accelerate_score` | Acceleration rate, 0–20, higher = faster first token |
+When `Read input field context` is checked, the current input field text is automatically read at the start of recording and sent as ASR context to improve recognition accuracy.
+
+**How it works:**
+1. At recording start, input field text is read using a layered fallback approach
+2. Methods are tried in order: WM_GETTEXT (Edit controls) → UIA Value → TextPattern → TextPattern2 → Parent element walk → ElementFromPoint → MSAA
+3. The read text is truncated to the last 200 characters and built into the `corpus.context` field
+4. The entire process has a 200ms timeout protection, never blocking recording startup
+5. Password fields are automatically skipped (`UIA_IsPasswordPropertyId` detection)
+
+**Context priority:**
+- When input field has text: only input field text is sent (`includeHistory=false`), avoiding duplication
+- When input field is empty: if `Use history as context` is also checked, history is used as fallback
+- The two switches are independent and do not depend on each other
+
+**Compatibility:**
+- ✅ Notepad, Word, Chrome/Edge input fields, VS Code, WPF applications
+- ❌ WeChat/QQ (Qt custom controls, invisible to UIA/MSAA)
+- ❌ Java applications, games
 
 ### 3.8 Hotwords & Correction Tables
 
@@ -198,11 +212,21 @@ Click the `Edit Params` button to open an editing dialog for additional `request
 
 ### 3.10 Dialog Context
 
-When `Use history as context` is checked, each recognition request sends the last N recognition results as dialog context to the server.
+VoxType provides two independent context sources, controlled by separate switches:
 
-**How it works:**
+| Switch | Context Source | Description |
+|--------|---------------|-------------|
+| `Use history as context` | Recognition history | Sends the last N recognition results as dialog context |
+| `Read input field context` | Input field text | Reads the last 200 characters from the current input field (see §3.7) |
+
+**Context priority:**
+- When input field has text: only input field text is sent, history is not sent (avoiding duplication)
+- When input field is empty: if `Use history as context` is checked, history is used as fallback
+- Window title is no longer sent as context (minimal ASR benefit)
+
+**History context how it works:**
 1. After each recognition completes, the result is stored in an in-memory history queue
-2. On the next recording, history results are built into the `corpus.context` field
+2. On the next recording (when input field is empty), history results are built into the `corpus.context` field
 3. Format: `{"context_type":"dialog_ctx","context_data":[{"text":"..."}]}`
 4. This JSON object is serialized as a string (inner quotes escaped) as the value of `context`
 

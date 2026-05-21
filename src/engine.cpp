@@ -367,12 +367,10 @@ void LoadConfig() {
     g_config.volcContextHistory = ExtractJsonInt(json, "volc_context_history", 3);
     if (g_config.volcContextHistory < 1) g_config.volcContextHistory = 3;
     if (g_config.volcContextHistory > 20) g_config.volcContextHistory = 20;
+    g_config.volcEnableInputContext = ExtractJsonBool(json, "volc_enable_input_context", false);
     g_config.volcEnableMusicFc = ExtractJsonBool(json, "volc_enable_music_fc", false);
     g_config.volcEnablePoiFc = ExtractJsonBool(json, "volc_enable_poi_fc", false);
     g_config.volcForceToSpeechTime = ExtractJsonInt(json, "volc_force_to_speech_time", 0);
-    g_config.volcEnableAccelerate = ExtractJsonBool(json, "volc_enable_accelerate", false);
-    g_config.volcAccelerateScore = ExtractJsonInt(json, "volc_accelerate_score", 0);
-    if (g_config.volcAccelerateScore < 0 || g_config.volcAccelerateScore > 20) g_config.volcAccelerateScore = 0;
     g_config.volcHotwordsId = Utf8ToWide(ExtractJsonString(json, "volc_hotwords_id", ""));
     g_config.volcHotwordsName = Utf8ToWide(ExtractJsonString(json, "volc_hotwords_name", ""));
     g_config.volcCorrectTableId = Utf8ToWide(ExtractJsonString(json, "volc_correct_table_id", ""));
@@ -459,11 +457,10 @@ void SaveConfig() {
          << "  \"volc_extra_params\": \"" << EscapeJson(g_config.volcExtraParams) << "\",\n"
          << "  \"volc_enable_context\": " << (g_config.volcEnableContext ? "1" : "0") << ",\n"
          << "  \"volc_context_history\": " << g_config.volcContextHistory << ",\n"
+         << "  \"volc_enable_input_context\": " << (g_config.volcEnableInputContext ? "1" : "0") << ",\n"
          << "  \"volc_enable_music_fc\": " << (g_config.volcEnableMusicFc ? "1" : "0") << ",\n"
          << "  \"volc_enable_poi_fc\": " << (g_config.volcEnablePoiFc ? "1" : "0") << ",\n"
          << "  \"volc_force_to_speech_time\": " << g_config.volcForceToSpeechTime << ",\n"
-         << "  \"volc_enable_accelerate\": " << (g_config.volcEnableAccelerate ? "1" : "0") << ",\n"
-         << "  \"volc_accelerate_score\": " << g_config.volcAccelerateScore << ",\n"
          << "  \"volc_hotwords_id\": \"" << EscapeJson(g_config.volcHotwordsId) << "\",\n"
          << "  \"volc_hotwords_name\": \"" << EscapeJson(g_config.volcHotwordsName) << "\",\n"
          << "  \"volc_correct_table_id\": \"" << EscapeJson(g_config.volcCorrectTableId) << "\",\n"

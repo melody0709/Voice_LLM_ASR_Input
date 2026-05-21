@@ -19,6 +19,7 @@
 #include "baidu_asr.h"
 #include "volcengine_asr.h"
 #include "wasapi_capture.h"
+#include "input_context.h"
 #include "resource.h"
 
 constexpr wchar_t kAppName[] = L"VoxType";
@@ -143,12 +144,11 @@ constexpr int IDC_VOLC_ENABLE_DDC = 2052;
 constexpr int IDC_VOLC_EXTRA_PARAMS = 2053;
 constexpr int IDC_VOLC_ENABLE_CONTEXT = 2054;
 constexpr int IDC_VOLC_CONTEXT_HISTORY = 2055;
+constexpr int IDC_VOLC_ENABLE_INPUT_CONTEXT = 2065;
 constexpr int IDC_VOLC_ENABLE_MUSIC_FC = 2056;
 constexpr int IDC_VOLC_HOTWORDS_ID = 2057;
 constexpr int IDC_VOLC_FORCE_TO_SPEECH_TIME = 2058;
 constexpr int IDC_VOLC_ENABLE_POI_FC = 2059;
-constexpr int IDC_VOLC_ENABLE_ACCELERATE = 2060;
-constexpr int IDC_VOLC_ACCELERATE_SCORE = 2061;
 constexpr int IDC_VOLC_HOTWORDS_NAME = 2062;
 constexpr int IDC_VOLC_CORRECT_TABLE_ID = 2063;
 constexpr int IDC_VOLC_CORRECT_TABLE_NAME = 2064;
@@ -196,11 +196,10 @@ struct Config {
     std::wstring volcExtraParams;
     bool volcEnableContext = false;
     int volcContextHistory = 3;
+    bool volcEnableInputContext = false;
     bool volcEnableMusicFc = false;
     bool volcEnablePoiFc = false;
     int volcForceToSpeechTime = 0;
-    bool volcEnableAccelerate = false;
-    int volcAccelerateScore = 0;
     std::wstring volcHotwordsId;
     std::wstring volcHotwordsName;
     std::wstring volcCorrectTableId;
@@ -331,3 +330,4 @@ extern std::wstring g_vadModelName;
 extern size_t g_vadTrimmedSamples;
 extern std::vector<float> g_streamingVadSamples;
 extern std::atomic<bool> g_streamingVadReady;
+extern InputContextResult g_inputContextResult;

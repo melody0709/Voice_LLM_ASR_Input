@@ -586,7 +586,6 @@ void LoadSettingsControls(HWND hwnd) {
     Button_SetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_DDC), g_config.volcEnableDdc ? BST_CHECKED : BST_UNCHECKED);
     Button_SetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_MUSIC_FC), g_config.volcEnableMusicFc ? BST_CHECKED : BST_UNCHECKED);
     Button_SetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_POI_FC), g_config.volcEnablePoiFc ? BST_CHECKED : BST_UNCHECKED);
-    Button_SetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_ACCELERATE), g_config.volcEnableAccelerate ? BST_CHECKED : BST_UNCHECKED);
     {
         wchar_t ew[32] = {};
         _itow_s(g_config.volcEndWindowSize, ew, 10);
@@ -596,11 +595,6 @@ void LoadSettingsControls(HWND hwnd) {
         wchar_t ft[32] = {};
         _itow_s(g_config.volcForceToSpeechTime, ft, 10);
         SetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_FORCE_TO_SPEECH_TIME), ft);
-    }
-    {
-        wchar_t as[32] = {};
-        _itow_s(g_config.volcAccelerateScore, as, 10);
-        SetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_ACCELERATE_SCORE), as);
     }
 
     SetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_HOTWORDS_ID), g_config.volcHotwordsId.c_str());
@@ -614,6 +608,7 @@ void LoadSettingsControls(HWND hwnd) {
         _itow_s(g_config.volcContextHistory, ch, 10);
         SetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_CONTEXT_HISTORY), ch);
     }
+    Button_SetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_INPUT_CONTEXT), g_config.volcEnableInputContext ? BST_CHECKED : BST_UNCHECKED);
 
     SetStatus(hwnd, L"Ready.");
 }
@@ -756,7 +751,6 @@ void SaveSettingsControls(HWND hwnd) {
     g_config.volcEnableDdc = Button_GetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_DDC)) == BST_CHECKED;
     g_config.volcEnableMusicFc = Button_GetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_MUSIC_FC)) == BST_CHECKED;
     g_config.volcEnablePoiFc = Button_GetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_POI_FC)) == BST_CHECKED;
-    g_config.volcEnableAccelerate = Button_GetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_ACCELERATE)) == BST_CHECKED;
     {
         wchar_t ew[32] = {};
         GetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_END_WINDOW_SIZE), ew, 32);
@@ -768,12 +762,6 @@ void SaveSettingsControls(HWND hwnd) {
         GetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_FORCE_TO_SPEECH_TIME), ft, 32);
         int val = _wtoi(ft);
         g_config.volcForceToSpeechTime = (val >= 1) ? val : 0;
-    }
-    {
-        wchar_t as[32] = {};
-        GetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_ACCELERATE_SCORE), as, 32);
-        int val = _wtoi(as);
-        g_config.volcAccelerateScore = (val >= 0 && val <= 20) ? val : 0;
     }
     {
         wchar_t hw[512] = {};
@@ -802,6 +790,7 @@ void SaveSettingsControls(HWND hwnd) {
         int val = _wtoi(ch);
         g_config.volcContextHistory = (val >= 1 && val <= 20) ? val : 3;
     }
+    g_config.volcEnableInputContext = Button_GetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_INPUT_CONTEXT)) == BST_CHECKED;
 
     SaveConfig();
     SetStatus(hwnd, L"Saved. ASR engine reloaded.");
@@ -1484,19 +1473,9 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         ApplyUiFont(volcPoiFc);
         AddVolcengineControl(volcPoiFc);
 
-        HWND volcAccelerate = CreateWindowW(L"BUTTON", L"enable_accelerate", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                            S(UiStyle::ContentLeft), S(UiStyle::RowInputY(6)) + S(6), S(160), S(UiStyle::CheckH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_ENABLE_ACCELERATE)), g_instance, nullptr);
-        ApplyUiFont(volcAccelerate);
-        AddVolcengineControl(volcAccelerate);
-
-        control = CreateLabel(hwnd, S(260), S(UiStyle::RowInputY(6)) + S(2), S(50), S(UiStyle::LabelH), L"score");
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowInputY(6)) + S(2), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Extra Params");
         AddVolcengineControl(control);
-        HWND volcAccScore = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
-                                            S(320), S(UiStyle::RowInputY(6)), S(44), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_ACCELERATE_SCORE)), g_instance, nullptr);
-        ApplyUiFont(volcAccScore);
-        AddVolcengineControl(volcAccScore);
-        control = CreateLabel(hwnd, S(372), S(UiStyle::RowInputY(6)) + S(2), S(80), S(UiStyle::LabelH), L"(0-20)");
-        AddVolcengineControl(control);
+        AddVolcengineControl(CreateButton(hwnd, IDC_VOLC_EXTRA_PARAMS, S(UiStyle::InputLeft), S(UiStyle::RowInputY(6)), S(UiStyle::ActionBtnW), S(UiStyle::ActionBtnH), L"Edit Params"));
 
         control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowInputY(7)) + S(2), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Hotwords ID");
         AddVolcengineControl(control);
@@ -1524,21 +1503,25 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         ApplyUiFont(volcCorrectTableName);
         AddVolcengineControl(volcCorrectTableName);
 
-        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowInputY(9)) + S(2), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Extra / Context");
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowInputY(9)) + S(2), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Context");
         AddVolcengineControl(control);
-        AddVolcengineControl(CreateButton(hwnd, IDC_VOLC_EXTRA_PARAMS, S(UiStyle::InputLeft), S(UiStyle::RowInputY(9)), S(UiStyle::ActionBtnW), S(UiStyle::ActionBtnH), L"Edit Params"));
 
         HWND volcEnableContext = CreateWindowW(L"BUTTON", L"Use history as context", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                               S(UiStyle::InputLeft) + S(UiStyle::ActionBtnW) + S(12), S(UiStyle::RowInputY(9)) + S(6), S(210), S(UiStyle::CheckH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_ENABLE_CONTEXT)), g_instance, nullptr);
+                                               S(UiStyle::InputLeft), S(UiStyle::RowInputY(9)) + S(6), S(210), S(UiStyle::CheckH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_ENABLE_CONTEXT)), g_instance, nullptr);
         ApplyUiFont(volcEnableContext);
         AddVolcengineControl(volcEnableContext);
 
         HWND volcContextHistory = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
-                                                  S(UiStyle::InputLeft) + S(UiStyle::ActionBtnW) + S(232), S(UiStyle::RowInputY(9)), S(44), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_CONTEXT_HISTORY)), g_instance, nullptr);
+                                                  S(UiStyle::InputLeft) + S(220), S(UiStyle::RowInputY(9)), S(44), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_CONTEXT_HISTORY)), g_instance, nullptr);
         ApplyUiFont(volcContextHistory);
         AddVolcengineControl(volcContextHistory);
-        control = CreateLabel(hwnd, S(UiStyle::InputLeft) + S(UiStyle::ActionBtnW) + S(282), S(UiStyle::RowInputY(9)) + S(2), S(80), S(UiStyle::LabelH), L"history");
+        control = CreateLabel(hwnd, S(UiStyle::InputLeft) + S(270), S(UiStyle::RowInputY(9)) + S(2), S(80), S(UiStyle::LabelH), L"history");
         AddVolcengineControl(control);
+
+        HWND volcEnableInputContext = CreateWindowW(L"BUTTON", L"Read input field context", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                                     S(542), S(UiStyle::RowInputY(9)) + S(6), S(280), S(UiStyle::CheckH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VOLC_ENABLE_INPUT_CONTEXT)), g_instance, nullptr);
+        ApplyUiFont(volcEnableInputContext);
+        AddVolcengineControl(volcEnableInputContext);
 
         AddVolcengineControl(CreateButton(hwnd, IDC_VOLC_TEST, S(500), S(UiStyle::RowInputY(0)), S(UiStyle::ActionBtnW), S(UiStyle::ActionBtnH), L"Test Connection"));
 
