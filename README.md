@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  Current version: <code>v0.8.5</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
+  Current version: <code>v0.8.6</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -187,6 +187,7 @@ CHANGELOG.md        — Version change log
 See [CHANGELOG.md](CHANGELOG.md)
 
 **Recent Updates:**
+- **v0.8.6** — Volcengine connection reuse optimization (fast consecutive recording latency reduced from ~1.8s to ~0.4s), 3s expiry detection + hSession connection pool cleanup, time-gated internal retry, progressive external retry
 - **v0.8.5** — Input field context (UIA/MSAA/WM_GETTEXT, read input text as ASR context), context logic refactor (input field priority, history fallback, remove window title), remove accelerate score, settings UI reorganize
 - **v0.8.4** — Fix Volcengine no-speech drainThread.join() blocking 17+ seconds (close WebSocket before join), watchdog thread handle leak crash, SendMessage(WM_PASTE) UI thread blocking
 - **v0.8.2** — Fix Volcengine nostream/async result loss, long recording truncation, WinHttpCloseHandle deadlock, logic deadlock, short audio false timeout, HUD timer race

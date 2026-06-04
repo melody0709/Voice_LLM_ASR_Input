@@ -2,6 +2,25 @@
 
 > 🇨🇳 [中文版](doc/CHANGELOG_zh.md)
 
+## v0.8.6 (2026-05-22)
+
+### Added
+
+- **Volcengine connection reuse**: Keep `hSession+hConnect` alive across recording sessions instead of closing them each time. When the interval between recordings is ≤3s, the existing connection is reused, reducing OpenSession latency from ~1.8s to ~0.4s. When the interval exceeds 3s, the connection is rebuilt with a fresh TCP+TLS handshake
+- **`RebuildConnection()` helper**: Closes both `hConnect` and `hSession` (clearing the WinHTTP connection pool) and recreates them from scratch. Used by internal retry and external reconnect logic
+- **`PrewarmConnection()`**: Pre-establishes `hSession+hConnect` at startup so the first recording doesn't pay the full connection setup cost
+- **`ClosePersistentConnection()`**: Explicitly closes `hSession+hConnect` (used by backend switching and program exit)
+- **Time-gated internal retry in `OpenSessionImpl`**: When a WebSocket upgrade step fails quickly (<2s elapsed), automatically rebuilds the connection and retries once. Timeout-type failures (≥2s) skip internal retry and return immediately, leaving time for the external reconnect loop
+- **Progressive external reconnect**: Reconnect delays changed from fixed 1500ms×2 to progressive 500/1000/2000ms×3, with `RebuildConnection()` called before each retry to ensure a clean connection
+
+### Changed
+
+- **EnsureConnection expiry threshold**: Reduced from 60s to 3s based on empirical testing — the Volcengine server closes idle TCP connections after ~3s. Both `hConnect` and `hSession` are closed on expiry to clear the WinHTTP connection pool (closing only `hConnect` leaves dead TCP connections in the pool, causing subsequent requests to time out)
+- **`CloseSession` conditional keep-alive**: When `g_volcKeepAlive` is true, `hSession+hConnect` are kept alive and `lastUsedTick` is updated; otherwise both are closed
+- **`main.cpp` conditional handle cleanup**: The no-speech path and async/nostream completion path now conditionally keep `hSession+hConnect` based on `g_volcKeepAlive`, matching `CloseSession` behavior
+- **All `OpenSessionImpl` failure points close `hSession` too**: Previously only `hConnect` was closed on failure, leaving stale TCP connections in the WinHTTP connection pool. Now all 7 failure points (including init frame error) close both `hConnect` and `hSession`
+- **`hReq` timeouts reduced**: `WinHttpSetTimeouts(hReq, ...)` changed from 3000ms to 2000ms, so dead connections fail faster and leave more time for the external reconnect loop
+
 ## v0.8.5 (2026-05-21)
 
 ### Added

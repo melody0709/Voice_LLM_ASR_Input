@@ -2,6 +2,25 @@
 
 > 🇬🇧 [English](../CHANGELOG.md)
 
+## v0.8.6 (2026-05-22)
+
+### 新增
+
+- **火山引擎连接复用**：录音结束后保留 `hSession+hConnect`，不再每次关闭。录音间隔 ≤3s 时复用现有连接，OpenSession 延迟从 ~1.8s 降到 ~0.4s。间隔超过 3s 时自动重建全新 TCP+TLS 连接
+- **`RebuildConnection()` 辅助函数**：同时关闭 `hConnect` 和 `hSession`（清空 WinHTTP 连接池）并从头重建。用于内部重试和外部 reconnect 逻辑
+- **`PrewarmConnection()`**：启动时预建立 `hSession+hConnect`，首次录音无需支付完整连接建立开销
+- **`ClosePersistentConnection()`**：显式关闭 `hSession+hConnect`（用于后端切换和程序退出）
+- **`OpenSessionImpl` 时间判断内部重试**：WebSocket 升级步骤快速失败（耗时 <2s）时自动重建连接并重试一次。超时型失败（≥2s）跳过内部重试直接返回，留时间给外部 reconnect 循环
+- **递增外部重试策略**：重试延迟从固定 1500ms×2 改为递增 500/1000/2000ms×3，每次重试前调用 `RebuildConnection()` 确保干净连接
+
+### 变更
+
+- **EnsureConnection 过期阈值**：从 60s 降到 3s（基于实测——火山引擎服务器空闲 ~3s 后关闭 TCP 连接）。过期时同时关闭 `hConnect` 和 `hSession` 以清空 WinHTTP 连接池（只关 `hConnect` 会在池中留下死 TCP 连接，导致后续请求超时）
+- **`CloseSession` 条件保留**：`g_volcKeepAlive` 为 true 时保留 `hSession+hConnect` 并更新 `lastUsedTick`；否则关闭两者
+- **`main.cpp` 条件句柄清理**：no-speech 路径和 async/nostream 完成路径根据 `g_volcKeepAlive` 条件保留 `hSession+hConnect`，与 `CloseSession` 行为一致
+- **所有 `OpenSessionImpl` 失败点同时关闭 `hSession`**：之前只关闭 `hConnect`，导致 WinHTTP 连接池中残留死 TCP 连接。现在所有 7 个失败点（含 init frame 错误）都同时关闭 `hConnect` 和 `hSession`
+- **`hReq` 超时缩短**：`WinHttpSetTimeouts(hReq, ...)` 从 3000ms 改为 2000ms，死连接更快失败，给外部 reconnect 循环留更多时间
+
 ## v0.8.5 (2026-05-21)
 
 ### 新增

@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  当前版本：<code>v0.8.5</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
+  当前版本：<code>v0.8.6</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -187,6 +187,7 @@ CHANGELOG.md        — 版本变更记录
 详见 [CHANGELOG.md](CHANGELOG.md)
 
 **最近更新：**
+- **v0.8.6** — 火山引擎连接复用优化（连续快速录音延迟从 ~1.8s 降到 ~0.4s）、3s 过期检测 + hSession 连接池清理、内部重试时间判断、外部递增重试策略
 - **v0.8.5** — 输入框上下文（UIA/MSAA/WM_GETTEXT 读取输入框文本作为 ASR 上下文）、上下文逻辑重构（输入框优先、历史兜底、去掉窗口标题）、移除加速首字参数、设置界面重组
 - **v0.8.4** — 修复火山引擎 no-speech drainThread.join() 阻塞 17+ 秒（先关 WebSocket 再 join）、watchdog 线程句柄泄漏崩溃、SendMessage(WM_PASTE) 阻塞 UI 线程
 - **v0.8.2** — 修复火山引擎 nostream/async 结果丢失、长录音截断、WinHttpCloseHandle 死锁、逻辑死锁、短音频误报超时、HUD 定时器竞态

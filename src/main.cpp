@@ -473,21 +473,15 @@ void StartRecordingSession() {
             ULONGLONG tTotal0 = GetTickCount64();
 
             if (!volc_asr::OpenSession(g_volcSession, vcfg)) {
-                if (g_volcStreaming.load() && !g_volcSession.forceAbort.load()) {
+                int retryDelays[] = {500, 1000, 2000};
+                for (int i = 0; i < 3; i++) {
+                    if (g_volcSession.forceAbort.load()) break;
                     PostMessageW(g_mainWindow, kHudUpdateMessage, 0,
-                                 reinterpret_cast<LPARAM>(new std::wstring(L"Reconnecting... (1/3)")));
-                    VolcDebugLog("Volc thread: Round 1 failed, retrying...");
-                    Sleep(1500);
-                    if (volc_asr::OpenSession(g_volcSession, vcfg)) goto openSessionOk;
-                }
-                EnterCriticalSection(&g_volcAudioCs);
-                bool hasPending = !g_volcPendingAudio.empty();
-                LeaveCriticalSection(&g_volcAudioCs);
-                if (hasPending && !g_volcSession.forceAbort.load()) {
-                    PostMessageW(g_mainWindow, kHudUpdateMessage, 0,
-                                 reinterpret_cast<LPARAM>(new std::wstring(L"Reconnecting... (2/3)")));
-                    VolcDebugLog("Volc thread: Round 2 failed, final attempt...");
-                    Sleep(1500);
+                                 reinterpret_cast<LPARAM>(new std::wstring(
+                                     L"Reconnecting... (" + std::to_wstring(i + 1) + L"/3)")));
+                    VolcDebugLog("Volc thread: attempt %d failed, retrying in %dms...", i + 1, retryDelays[i]);
+                    Sleep(retryDelays[i]);
+                    volc_asr::RebuildConnection(g_volcSession);
                     if (volc_asr::OpenSession(g_volcSession, vcfg)) goto openSessionOk;
                 }
                 g_volcSession.connected = false;
@@ -634,15 +628,17 @@ void StartRecordingSession() {
                     g_volcSession.hWebSocket = nullptr;
                 }
                 if (drainThread.joinable()) drainThread.join();
-                if (g_volcSession.hConnect) {
-                    WinHttpCloseHandle(g_volcSession.hConnect);
-                    g_volcSession.hConnect = nullptr;
-                }
                 if (volc_asr::g_volcKeepAlive) {
                     g_volcSession.lastUsedTick = GetTickCount64();
-                } else if (g_volcSession.hSession) {
-                    WinHttpCloseHandle(g_volcSession.hSession);
-                    g_volcSession.hSession = nullptr;
+                } else {
+                    if (g_volcSession.hConnect) {
+                        WinHttpCloseHandle(g_volcSession.hConnect);
+                        g_volcSession.hConnect = nullptr;
+                    }
+                    if (g_volcSession.hSession) {
+                        WinHttpCloseHandle(g_volcSession.hSession);
+                        g_volcSession.hSession = nullptr;
+                    }
                 }
                 g_volcSession.connected = false;
                 PostMessageW(g_mainWindow, kAsrResultMessage, 0,
@@ -679,15 +675,17 @@ void StartRecordingSession() {
                     g_volcSession.hWebSocket = nullptr;
                 }
                 if (drainThread.joinable()) drainThread.join();
-                if (g_volcSession.hConnect) {
-                    WinHttpCloseHandle(g_volcSession.hConnect);
-                    g_volcSession.hConnect = nullptr;
-                }
                 if (volc_asr::g_volcKeepAlive) {
                     g_volcSession.lastUsedTick = GetTickCount64();
-                } else if (g_volcSession.hSession) {
-                    WinHttpCloseHandle(g_volcSession.hSession);
-                    g_volcSession.hSession = nullptr;
+                } else {
+                    if (g_volcSession.hConnect) {
+                        WinHttpCloseHandle(g_volcSession.hConnect);
+                        g_volcSession.hConnect = nullptr;
+                    }
+                    if (g_volcSession.hSession) {
+                        WinHttpCloseHandle(g_volcSession.hSession);
+                        g_volcSession.hSession = nullptr;
+                    }
                 }
                 g_volcSession.connected = false;
             }
