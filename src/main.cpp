@@ -14,6 +14,7 @@
 #include <thread>
 #include <deque>
 #include <cstdio>
+#include <algorithm>
 #include <commctrl.h>
 
 #pragma comment(lib, "user32.lib")
@@ -117,6 +118,10 @@ static size_t g_lastPcmBytes = 0;
 static bool s_wasapiUsed = false;
 static std::wstring s_wasapiDeviceName;
 static UINT32 s_wasapiNativeRate = 0;
+static constexpr DWORD kVolcRecordingWatchdogMs = 18000;
+static constexpr DWORD kVolcRetryChunkBytes = 6400;
+static constexpr size_t kVolcMaxReplayBytes = 120u * 32000u;
+static constexpr size_t kVolcShortNoTextRetrySkipBytes = 3u * 32000u;
 
 static bool s_debugConsoleOpen = false;
 
@@ -236,10 +241,132 @@ static std::vector<float> PcmToFloat(const std::vector<BYTE>& pcm) {
     return floats;
 }
 
+static bool StartsWith(const std::wstring& text, const wchar_t* prefix) {
+    return text.rfind(prefix, 0) == 0;
+}
+
+static bool IsOperationalAsrError(const std::wstring& text) {
+    return StartsWith(text, L"ASR failed:")
+        || StartsWith(text, L"Baidu ASR error:")
+        || StartsWith(text, L"Baidu ASR failed:")
+        || StartsWith(text, L"VolcEngine timeout")
+        || StartsWith(text, L"VolcEngine connect failed")
+        || StartsWith(text, L"VolcEngine error")
+        || StartsWith(text, L"[VolcEngine error:");
+}
+
+static DWORD ComputeVolcFinalizeTimeoutMs(double recordingMs, size_t pcmBytes) {
+    const double audioMs = pcmBytes > 0 ? static_cast<double>(pcmBytes) / 32.0 : recordingMs;
+    const DWORD adaptive = static_cast<DWORD>(audioMs * 0.8 + 6000.0);
+    return std::clamp<DWORD>(adaptive, 8000, 30000);
+}
+
+static void CloseVolcSessionHandles(volc_asr::VolcSession& sess) {
+    if (sess.hWebSocket) {
+        volc_asr::WebSocketCloseGracefully(sess.hWebSocket, &sess);
+        sess.hWebSocket = nullptr;
+    }
+    if (sess.hConnect) {
+        WinHttpCloseHandle(sess.hConnect);
+        sess.hConnect = nullptr;
+    }
+    if (sess.hSession) {
+        WinHttpCloseHandle(sess.hSession);
+        sess.hSession = nullptr;
+    }
+    sess.connected = false;
+}
+
+struct VolcRetryResult {
+    std::wstring text;
+    bool closedWithoutText = false;
+    bool transportError = false;
+};
+
+static VolcRetryResult RetryVolcRecognitionOnce(const volc_asr::VolcConfig& vcfg,
+                                                const std::vector<BYTE>& pcm,
+                                                DWORD finalTimeoutMs) {
+    VolcRetryResult result;
+    if (pcm.empty()) {
+        result.closedWithoutText = true;
+        return result;
+    }
+
+    volc_asr::VolcSession retrySess;
+    bool asyncMode = (vcfg.mode == L"bigmodel_async");
+    bool nostreamMode = (vcfg.mode == L"bigmodel_nostream");
+
+    bool sessionOpened = volc_asr::OpenSession(retrySess, vcfg);
+    const int retryDelays[] = {500, 1000};
+    for (int i = 0; !sessionOpened && i < 2; i++) {
+        VolcDebugLog("Volc retry: OpenSession attempt %d failed, retrying in %dms...", i + 1, retryDelays[i]);
+        Sleep(retryDelays[i]);
+        volc_asr::RebuildConnection(retrySess);
+        sessionOpened = volc_asr::OpenSession(retrySess, vcfg);
+    }
+    if (!sessionOpened) {
+        VolcDebugLog("Volc retry: OpenSession failed after 3 attempts");
+        CloseVolcSessionHandles(retrySess);
+        result.transportError = true;
+        return result;
+    }
+    retrySess.connected = true;
+
+    for (size_t offset = 0; offset < pcm.size();) {
+        const size_t take = (std::min)(static_cast<size_t>(kVolcRetryChunkBytes), pcm.size() - offset);
+        std::vector<BYTE> chunk(pcm.begin() + static_cast<ptrdiff_t>(offset),
+                                pcm.begin() + static_cast<ptrdiff_t>(offset + take));
+        volc_asr::SendAudio(retrySess, chunk, false, asyncMode, nostreamMode);
+        if (!retrySess.hWebSocket || !retrySess.connected.load() || retrySess.forceAbort.load()) {
+            VolcDebugLog("Volc retry: send failed at offset=%zu", offset);
+            CloseVolcSessionHandles(retrySess);
+            result.transportError = true;
+            return result;
+        }
+        offset += take;
+    }
+
+    std::vector<BYTE> empty;
+    volc_asr::SendAudio(retrySess, empty, true, asyncMode, nostreamMode);
+    if (!retrySess.hWebSocket || retrySess.forceAbort.load()) {
+        VolcDebugLog("Volc retry: final packet failed");
+        CloseVolcSessionHandles(retrySess);
+        result.transportError = true;
+        return result;
+    }
+
+    const ULONGLONG drainStart = GetTickCount64();
+    while (retrySess.hWebSocket && !retrySess.forceAbort.load()
+           && (GetTickCount64() - drainStart < finalTimeoutMs)) {
+        volc_asr::VolcResult vr = volc_asr::ReceiveResult(retrySess.hWebSocket, 1000, &retrySess);
+        if (!vr.text.empty()) {
+            result.text = vr.text;
+            VolcDebugLog("Volc retry: got text (%u chars, %llums)",
+                         (unsigned)result.text.size(), GetTickCount64() - drainStart);
+            break;
+        }
+        if (!retrySess.connected.load()) break;
+    }
+
+    if (result.text.empty()) {
+        result.closedWithoutText = !retrySess.connected.load();
+        result.transportError = !result.closedWithoutText;
+    }
+
+    CloseVolcSessionHandles(retrySess);
+    if (!result.text.empty()) {
+        VolcDebugLog("Volc retry: succeeded");
+    } else if (result.closedWithoutText) {
+        VolcDebugLog("Volc retry: closed without text");
+    } else {
+        VolcDebugLog("Volc retry: failed");
+    }
+    return result;
+}
+
 static void AddVolcRecognitionHistory(const std::wstring& text) {
     if (text.empty() || text == L"(empty result)" || text == L"Too short" || text == L"No speech detected") return;
-    if (text.rfind(L"VolcEngine error", 0) == 0) return;
-    if (text.rfind(L"ASR failed:", 0) == 0) return;
+    if (IsOperationalAsrError(text)) return;
     g_volcRecognitionHistory.push_back(text);
     int maxHistory = g_config.volcContextHistory;
     if (maxHistory < 1) maxHistory = 5;
@@ -439,6 +566,7 @@ void StartRecordingSession() {
             g_volcThread.join();
         }
         g_volcSession.forceAbort = false;
+        g_volcSession.lastError.clear();
 
         g_streamingVadReady = false;
         g_volcVadState = 0;
@@ -472,18 +600,24 @@ void StartRecordingSession() {
         g_volcThread = std::thread([vcfg, config]() {
             ULONGLONG tTotal0 = GetTickCount64();
 
-            if (!volc_asr::OpenSession(g_volcSession, vcfg)) {
-                int retryDelays[] = {500, 1000, 2000};
-                for (int i = 0; i < 3; i++) {
-                    if (g_volcSession.forceAbort.load()) break;
-                    PostMessageW(g_mainWindow, kHudUpdateMessage, 0,
-                                 reinterpret_cast<LPARAM>(new std::wstring(
-                                     L"Reconnecting... (" + std::to_wstring(i + 1) + L"/3)")));
-                    VolcDebugLog("Volc thread: attempt %d failed, retrying in %dms...", i + 1, retryDelays[i]);
-                    Sleep(retryDelays[i]);
-                    volc_asr::RebuildConnection(g_volcSession);
-                    if (volc_asr::OpenSession(g_volcSession, vcfg)) goto openSessionOk;
-                }
+            bool sessionOpened = volc_asr::OpenSession(g_volcSession, vcfg);
+            int openAttempts = 0;
+            const int retryDelays[] = {500, 1000, 2000, 3000};
+            while (!sessionOpened && !g_volcSession.forceAbort.load()) {
+                if (!g_volcSession.lastError.empty()) break;
+                if (!g_volcStreaming.load() && openAttempts >= 3) break;
+                const int delayMs = retryDelays[(std::min)(openAttempts, 3)];
+                PostMessageW(g_mainWindow, kHudUpdateMessage, 0,
+                             reinterpret_cast<LPARAM>(new std::wstring(
+                                 L"Reconnecting... Volcano Engine")));
+                VolcDebugLog("Volc thread: attempt %d failed, retrying in %dms...",
+                             openAttempts + 1, delayMs);
+                Sleep(delayMs);
+                volc_asr::RebuildConnection(g_volcSession);
+                sessionOpened = volc_asr::OpenSession(g_volcSession, vcfg);
+                openAttempts++;
+            }
+            if (!sessionOpened) {
                 g_volcSession.connected = false;
                 std::wstring errMsg = L"VolcEngine connect failed";
                 if (!g_volcSession.lastError.empty()) {
@@ -496,21 +630,62 @@ void StartRecordingSession() {
                 VolcDebugLog("VolcEngine connect failed: %ls", errMsg.c_str());
                 return;
             }
-            openSessionOk:
+            if (openAttempts > 0) {
+                VolcDebugLog("Volc thread: OpenSession recovered after %d retries", openAttempts);
+            }
             g_volcSession.connected = true;
             volc_asr::g_volcKeepAlive = true;
 
-            constexpr size_t kChunkBytes = 6400;
             constexpr DWORD kKeepaliveMs = 3500;
             bool asyncMode = (vcfg.mode == L"bigmodel_async");
             bool nostreamMode = (vcfg.mode == L"bigmodel_nostream");
             std::vector<BYTE> chunk;
-            chunk.reserve(kChunkBytes);
+            chunk.reserve(kVolcRetryChunkBytes);
+            std::vector<BYTE> replayPcm;
+            replayPcm.reserve(32000);
+            bool replayAvailable = true;
+            bool replayLimitLogged = false;
             ULONGLONG lastSendTick = GetTickCount64();
 
-            auto sendChunk = [&](std::vector<BYTE>& c) -> std::wstring {
+            auto appendReplay = [&](const std::vector<BYTE>& c) {
+                if (c.empty()) return;
+                if (replayAvailable && replayPcm.size() + c.size() <= kVolcMaxReplayBytes) {
+                    replayPcm.insert(replayPcm.end(), c.begin(), c.end());
+                } else {
+                    if (!replayLimitLogged) {
+                        VolcDebugLog("Volc replay: disabled, buffer limit exceeded (current=%zu, add=%zu, limit=%zu)",
+                                     replayPcm.size(), c.size(), kVolcMaxReplayBytes);
+                        replayLimitLogged = true;
+                    }
+                    replayAvailable = false;
+                }
                 g_volcSentBytes += c.size();
+            };
+
+            auto sendChunk = [&](std::vector<BYTE>& c, bool recordReplay) -> std::wstring {
+                if (recordReplay && !c.empty()) {
+                    appendReplay(c);
+                }
                 return volc_asr::SendAudio(g_volcSession, c, false, asyncMode, nostreamMode);
+            };
+
+            auto bufferUntilStop = [&]() {
+                VolcDebugLog("Volc thread: connection lost while recording, buffering until stop");
+                PostMessageW(g_mainWindow, kHudUpdateMessage, 0,
+                             reinterpret_cast<LPARAM>(new std::wstring(
+                                 L"Reconnecting... Volcano Engine")));
+                size_t bufferedBytes = 0;
+                while (g_volcStreaming.load() && !g_volcSession.forceAbort.load()) {
+                    std::vector<BYTE> buffered;
+                    EnterCriticalSection(&g_volcAudioCs);
+                    buffered.swap(g_volcPendingAudio);
+                    LeaveCriticalSection(&g_volcAudioCs);
+                    bufferedBytes += buffered.size();
+                    appendReplay(buffered);
+                    Sleep(20);
+                }
+                VolcDebugLog("Volc thread: buffered %zu bytes after connection loss (replay=%zu, available=%d)",
+                             bufferedBytes, replayPcm.size(), replayAvailable ? 1 : 0);
             };
 
             std::wstring lastPartial;
@@ -545,7 +720,8 @@ void StartRecordingSession() {
                             if (!g_volcSession.connected) break;
                         }
                     }
-                    while (g_volcSession.hWebSocket && !g_volcSession.forceAbort.load()) {
+                    while (g_volcSession.hWebSocket && !g_volcSession.forceAbort.load()
+                           && g_volcSession.connected.load()) {
                         std::wstring partial = volc_asr::DrainReceiveBuffer(g_volcSession.hWebSocket, &g_volcSession);
                         if (!partial.empty()) {
                             asyncPartial = partial;
@@ -562,8 +738,8 @@ void StartRecordingSession() {
                 if (g_volcSession.forceAbort.load()) break;
                 bool hasData = false;
                 EnterCriticalSection(&g_volcAudioCs);
-                while (!g_volcPendingAudio.empty() && chunk.size() < kChunkBytes) {
-                    size_t take = (std::min)(kChunkBytes - chunk.size(), g_volcPendingAudio.size());
+                while (!g_volcPendingAudio.empty() && chunk.size() < kVolcRetryChunkBytes) {
+                    size_t take = (std::min)(static_cast<size_t>(kVolcRetryChunkBytes) - chunk.size(), g_volcPendingAudio.size());
                     chunk.insert(chunk.end(), g_volcPendingAudio.begin(), g_volcPendingAudio.begin() + take);
                     g_volcPendingAudio.erase(g_volcPendingAudio.begin(), g_volcPendingAudio.begin() + take);
                     hasData = true;
@@ -571,11 +747,14 @@ void StartRecordingSession() {
                 bool streaming = g_volcStreaming.load();
                 LeaveCriticalSection(&g_volcAudioCs);
 
-                if (hasData && chunk.size() >= kChunkBytes) {
-                    std::wstring partial = sendChunk(chunk);
+                if (hasData && chunk.size() >= kVolcRetryChunkBytes) {
+                    std::wstring partial = sendChunk(chunk, true);
                     chunk.clear();
                     lastSendTick = GetTickCount64();
-                    if (!g_volcSession.hWebSocket) break;
+                    if (!g_volcSession.hWebSocket || !g_volcSession.connected.load()) {
+                        if (g_volcStreaming.load()) bufferUntilStop();
+                        break;
+                    }
                     if (!asyncMode && !partial.empty() && partial != lastPartial) {
                         lastPartial = partial;
                         PostMessageW(g_mainWindow, kHudUpdateMessage, 0,
@@ -586,8 +765,8 @@ void StartRecordingSession() {
                 } else {
                     DWORD idleMs = static_cast<DWORD>(GetTickCount64() - lastSendTick);
                     if (idleMs >= kKeepaliveMs && g_volcSession.connected && g_volcSession.hWebSocket) {
-                        std::vector<BYTE> keepalive(kChunkBytes, 0);
-                        sendChunk(keepalive);
+                        std::vector<BYTE> keepalive(kVolcRetryChunkBytes, 0);
+                        sendChunk(keepalive, false);
                         lastSendTick = GetTickCount64();
                         VolcDebugLog("Volc thread: keepalive sent (%ums idle)", idleMs);
                     }
@@ -600,7 +779,7 @@ void StartRecordingSession() {
             }
 
             if (!g_volcSession.forceAbort.load() && !chunk.empty()) {
-                std::wstring partial = sendChunk(chunk);
+                std::wstring partial = sendChunk(chunk, true);
                 if (!asyncMode && !partial.empty()) lastPartial = partial;
             }
 
@@ -611,7 +790,7 @@ void StartRecordingSession() {
                 LeaveCriticalSection(&g_volcAudioCs);
                 if (!remaining.empty()) {
                     VolcDebugLog("Volc thread: flushing %zu remaining bytes from pending buffer", remaining.size());
-                    std::wstring partial = sendChunk(remaining);
+                    std::wstring partial = sendChunk(remaining, true);
                     if (!asyncMode && !partial.empty()) lastPartial = partial;
                 }
             }
@@ -653,6 +832,7 @@ void StartRecordingSession() {
                 if (!lastResult.empty()) lastPartial = lastResult;
             }
 
+            bool originalServerClosed = false;
             if (asyncMode || nostreamMode) {
                 asyncDrainDone = true;
                 if (!drainFinalDone && !g_volcSession.forceAbort.load()) {
@@ -668,8 +848,8 @@ void StartRecordingSession() {
                                  asyncPartial.empty() ? "" : " NOT",
                                  GetTickCount64() - waitStart);
                 }
-                bool serverClosed = !g_volcSession.connected;
-                g_volcSession.forceAbort = !serverClosed;
+                originalServerClosed = !g_volcSession.connected;
+                g_volcSession.forceAbort = !originalServerClosed;
                 if (g_volcSession.hWebSocket) {
                     WinHttpCloseHandle(g_volcSession.hWebSocket);
                     g_volcSession.hWebSocket = nullptr;
@@ -699,17 +879,48 @@ void StartRecordingSession() {
                 if (finalText.empty()) finalText = lastPartial;
             }
 
-            if (finalText.empty()) finalText = L"No speech detected";
-            if (g_volcSession.forceAbort.load() && finalText == L"No speech detected") {
-                finalText = L"VolcEngine timeout";
+            bool retryAttempted = false;
+            bool retryClosedWithoutText = false;
+            const bool shortClosedWithoutText = (asyncMode || nostreamMode)
+                                             && finalText.empty()
+                                             && originalServerClosed
+                                             && replayPcm.size() <= kVolcShortNoTextRetrySkipBytes;
+            if ((asyncMode || nostreamMode) && finalText.empty()
+                && replayAvailable && !replayPcm.empty()
+                && !shortClosedWithoutText) {
+                retryAttempted = true;
+                VolcDebugLog("Volc retry: final text empty, replay available (bytes=%zu, forceAbort=%d)",
+                             replayPcm.size(), g_volcSession.forceAbort.load() ? 1 : 0);
+                PostMessageW(g_mainWindow, kHudUpdateMessage, 0,
+                             reinterpret_cast<LPARAM>(new std::wstring(L"Retrying... Volcano Engine")));
+                DWORD retryTimeout = ComputeVolcFinalizeTimeoutMs(g_recordingMs, replayPcm.size());
+                VolcRetryResult retryResult = RetryVolcRecognitionOnce(vcfg, replayPcm, retryTimeout);
+                if (!retryResult.text.empty()) {
+                    finalText = retryResult.text;
+                } else if (retryResult.closedWithoutText) {
+                    retryClosedWithoutText = true;
+                    finalText = L"No speech detected";
+                }
+            } else if ((asyncMode || nostreamMode) && finalText.empty()) {
+                if (shortClosedWithoutText) {
+                    VolcDebugLog("Volc retry: skipped (server closed without text, short audio %.0fms)",
+                                 replayPcm.size() / 32.0);
+                } else {
+                    VolcDebugLog("Volc retry: skipped (replayAvailable=%d, replayBytes=%zu)",
+                                 replayAvailable ? 1 : 0, replayPcm.size());
+                }
+            }
+
+            if (finalText.empty()) finalText = retryAttempted ? L"ASR failed: VolcEngine timeout" : L"No speech detected";
+            if (g_volcSession.forceAbort.load() && finalText == L"No speech detected" && !retryClosedWithoutText) {
+                finalText = L"ASR failed: VolcEngine timeout";
             }
 
             bool needLlm = (config.postprocess == L"llm")
                          && !config.llmEndpoint.empty()
                          && !config.llmApiKey.empty()
                          && !finalText.empty()
-                         && finalText.rfind(L"VolcEngine error", 0) != 0
-                         && finalText.rfind(L"VolcEngine timeout", 0) != 0;
+                         && !IsOperationalAsrError(finalText);
 
             if (needLlm) {
                 g_lastRawAsrText = finalText;
@@ -724,7 +935,7 @@ void StartRecordingSession() {
             VolcDebugLog("=== TOTAL session: %llums ===", GetTickCount64() - tTotal0);
             g_cloudApiMs = static_cast<double>(GetTickCount64() - tTotal0) - g_recordingMs;
         });
-        SetTimer(g_mainWindow, kVolcWatchdogTimer, 18000, nullptr);
+        SetTimer(g_mainWindow, kVolcWatchdogTimer, kVolcRecordingWatchdogMs, nullptr);
         return;
     }
 
@@ -766,14 +977,18 @@ void StopRecordingSession() {
         g_volcStreaming.store(false);
         g_streamingVadReady = false;
         const std::vector<BYTE> pcm = StopAudioCapture();
+        g_lastPcmBytes = pcm.size();
         if (pcm.size() < 8000) {
             ShowHud(L"Too short");
             SetTimer(g_hudWindow, kHudHideTimer, 1200, nullptr);
             return;
         }
-        if (g_volcSession.connected.load()) {
-            ShowHud(L"Recognizing... Volcano Engine");
-        }
+        const DWORD finalizeTimeout = ComputeVolcFinalizeTimeoutMs(g_recordingMs, pcm.size());
+        KillTimer(g_mainWindow, kVolcWatchdogTimer);
+        SetTimer(g_mainWindow, kVolcWatchdogTimer, finalizeTimeout, nullptr);
+        VolcDebugLog("Volc watchdog: finalize timeout reset to %ums (recording=%.0fms, pcm=%zu)",
+                     finalizeTimeout, g_recordingMs, pcm.size());
+        ShowHud(L"Recognizing... Volcano Engine");
         return;
     }
 
@@ -880,19 +1095,19 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         KillTimer(g_mainWindow, kVolcWatchdogTimer);
         std::unique_ptr<std::wstring> result(reinterpret_cast<std::wstring*>(lParam));
         const std::wstring text = result ? *result : L"ASR failed";
-        if (wParam == 1 && !text.empty() && text.rfind(L"ASR failed:", 0) != 0) {
+        const bool isError = IsOperationalAsrError(text);
+        if (wParam == 1 && !text.empty() && !isError) {
             g_hudIsRefining = true;
             ShowHud(L"Refining...");
         } else {
             g_hudIsRefining = false;
             ShowHud(text.empty() ? L"(empty result)" : text);
             if (g_hudWindow) {
-                const bool isError = text.rfind(L"ASR failed:", 0) == 0;
                 const bool isNoSpeech = (text == L"No speech detected");
                 UINT hideMs = isError ? 2200 : (isNoSpeech ? 1500 : 200);
                 SetTimer(g_hudWindow, kHudHideTimer, hideMs, nullptr);
             }
-            if (!text.empty() && text != L"No speech detected" && text.rfind(L"ASR failed:", 0) != 0) {
+            if (!text.empty() && text != L"No speech detected" && !isError) {
                 VolcDebugLog("PasteTextImeAware: starting (text=%u chars)", (unsigned)text.size());
                 HiResTimer tPaste;
                 PasteTextImeAware(text);
@@ -938,6 +1153,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
                     DebugPrintTextLine(L"OK", text);
                 }
+            } else if (isError) {
+                VolcDebugLog("PasteTextImeAware: skipped operational error '%ls'", text.c_str());
             }
         }
         return 0;
@@ -990,7 +1207,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (wParam == kVolcWatchdogTimer) {
             KillTimer(hwnd, kVolcWatchdogTimer);
             if (g_recording) {
-                SetTimer(hwnd, kVolcWatchdogTimer, 18000, nullptr);
+                SetTimer(hwnd, kVolcWatchdogTimer, kVolcRecordingWatchdogMs, nullptr);
                 return 0;
             }
             if (g_volcThread.joinable()) {

@@ -2,6 +2,26 @@
 
 > 🇨🇳 [中文版](doc/CHANGELOG_zh.md)
 
+## v0.8.7 (2026-06-06)
+
+### Added
+
+- **Volcengine retry recognition on empty result**: When async/nostream mode returns empty final text and replay PCM is available, automatically opens a new session and re-sends the full PCM for a second recognition attempt. Retry OpenSession allows up to 3 total attempts with `RebuildConnection` + progressive delays (500ms, 1000ms)
+- **Connection-loss audio buffering**: When WebSocket disconnects during recording (`bufferUntilStop`), continues buffering incoming audio from the capture thread until recording stops. Buffered audio is appended to `replayPcm` for the retry attempt, preventing audio data loss
+- **Adaptive finalize timeout**: `ComputeVolcFinalizeTimeoutMs()` calculates timeout based on recording duration and PCM size (`audioMs * 0.8 + 6000ms`, clamped to 8–30s), replacing the hardcoded 18s. Watchdog timer is reset with this value when recording stops
+- **`IsOperationalAsrError()` unified error classification**: Consolidates scattered `rfind(L"ASR failed:", 0)` / `rfind(L"VolcEngine error", 0)` checks into a single function, also matching `VolcEngine timeout`, `VolcEngine connect failed`, and `[VolcEngine error:` prefixes. Used consistently for history filtering, LLM gate, and HUD error display
+- **`CloseVolcSessionHandles()` helper**: Safely closes WebSocket, hConnect, hSession in order and resets `connected` flag. Used by retry path and connection cleanup
+- **Volcengine failure diagnostics logs**: Added explicit logs for adaptive finalize timeout, retry trigger/skip reasons, replay buffer limit, connection-loss buffering, retry success/failure, server close without text, and skipped paste for operational errors
+
+### Changed
+
+- **Initial connection retry logic refactored**: Replaced `goto openSessionOk` with a clean while loop. Added `lastError` early-exit (no point retrying if server rejected credentials). Non-streaming mode limits to 3 retries; streaming mode allows more. Progressive delays: 500/1000/2000/3000ms
+- **`lastError` cleared on new recording session**: `g_volcSession.lastError.clear()` added to `StartRecordingSession()` so stale errors from previous sessions don't prevent retries
+- **Watchdog timeout dynamically adjusted on recording stop**: `StopRecordingSession()` now kills and resets the watchdog timer with the adaptive finalize timeout instead of keeping the 18s recording-phase value
+- **HUD reconnect message simplified**: Changed from "Reconnecting... (1/3)" to "Reconnecting... Volcano Engine" for cleaner display
+- **No-text close handling clarified**: If the server closes normally without text, retry now reports `No speech detected` instead of `ASR failed: VolcEngine timeout`. Short audio (≤3s) with close-without-text skips automatic retry to avoid duplicate cloud calls
+- **Post-close drain noise removed**: drainThread no longer calls `DrainReceiveBuffer()` after `ReceiveResult` has observed a close frame and marked the session disconnected, avoiding misleading WinHTTP 4317 logs
+
 ## v0.8.6 (2026-05-22)
 
 ### Added

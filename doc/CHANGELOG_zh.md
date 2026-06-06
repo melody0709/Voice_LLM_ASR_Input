@@ -2,6 +2,26 @@
 
 > 🇬🇧 [English](../CHANGELOG.md)
 
+## v0.8.7 (2026-06-06)
+
+### 新增
+
+- **火山引擎空结果重试识别**：async/nostream 模式返回空文本且 replay PCM 可用时，自动新建会话重发全量 PCM 进行二次识别。重试 OpenSession 支持最多 3 次总尝试，带 `RebuildConnection` + 递增延迟（500ms、1000ms）
+- **断连音频缓冲**：录音期间 WebSocket 断开时（`bufferUntilStop`），继续从采集线程缓冲音频直到录音停止。缓冲音频追加到 `replayPcm` 用于重试，避免音频数据丢失
+- **自适应 finalize 超时**：`ComputeVolcFinalizeTimeoutMs()` 根据录音时长和 PCM 大小计算超时（`audioMs * 0.8 + 6000ms`，限制 8–30s），替代硬编码 18s。录音停止时 watchdog 定时器用此值重设
+- **`IsOperationalAsrError()` 统一错误分类**：将散落的 `rfind(L"ASR failed:", 0)` / `rfind(L"VolcEngine error", 0)` 检查收拢为单一函数，同时匹配 `VolcEngine timeout`、`VolcEngine connect failed`、`[VolcEngine error:` 前缀。统一用于历史过滤、LLM 门控和 HUD 错误显示
+- **`CloseVolcSessionHandles()` 辅助函数**：按序安全关闭 WebSocket、hConnect、hSession 并重置 `connected` 标志。用于重试路径和连接清理
+- **火山引擎故障诊断日志**：新增自适应 finalize 超时、重试触发/跳过原因、replay buffer 上限、断连缓冲、重试成功/失败、服务端 close 但无文本、运行错误跳过粘贴等关键日志
+
+### 变更
+
+- **初始连接重试逻辑重构**：`goto openSessionOk` 替换为清晰的 while 循环。新增 `lastError` 提前退出（服务器拒绝凭据时无需重试）。非流式模式限制 3 次重试；流式模式允许更多。递增延迟：500/1000/2000/3000ms
+- **新录音会话清除 `lastError`**：`StartRecordingSession()` 新增 `g_volcSession.lastError.clear()`，避免上次会话的残留错误阻止重试
+- **录音停止时动态调整 watchdog 超时**：`StopRecordingSession()` 现在用自适应 finalize 超时重设 watchdog 定时器，而非沿用 18s 录音阶段值
+- **HUD 重连提示简化**：从 "Reconnecting... (1/3)" 改为 "Reconnecting... Volcano Engine"，显示更简洁
+- **无文本 close 处理明确化**：服务端正常 close 但无文本时，重试后显示 `No speech detected`，不再误报 `ASR failed: VolcEngine timeout`。短音频（≤3s）遇到 close 但无文本时跳过自动重试，避免重复云端调用
+- **移除 close 后 drain 噪音日志**：drainThread 在 `ReceiveResult` 收到 close frame 并标记连接断开后，不再继续调用 `DrainReceiveBuffer()`，避免误导性的 WinHTTP 4317 日志
+
 ## v0.8.6 (2026-05-22)
 
 ### 新增
