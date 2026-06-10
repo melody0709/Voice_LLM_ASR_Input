@@ -18,10 +18,10 @@ set "ONNX_LIB=%~dp0third_party\onnxruntime"
 set "KNF_INCLUDE=%~dp0third_party\kaldi_native_fbank\include"
 set "KNF_LIB=%~dp0third_party\kaldi_native_fbank\lib"
 
-rc /nologo /fo build\app.res src\resources.rc
+rc /nologo /fo build\app.res src\app\resources.rc
 if errorlevel 1 exit /b 1
 
-cl /nologo /O2 /EHsc /MT /std:c++17 /utf-8 /DUNICODE /D_UNICODE /Isrc /I"%SHERPA_INCLUDE%" /I"%ONNX_INCLUDE%" /I"%KNF_INCLUDE%" /Fobuild\ /Fe:build\VoxType.exe src\main.cpp src\engine.cpp src\hud.cpp src\hotkey.cpp src\settings.cpp src\wasapi_capture.cpp build\app.res user32.lib gdi32.lib shell32.lib ole32.lib comctl32.lib d2d1.lib dwrite.lib shlwapi.lib winmm.lib winhttp.lib crypt32.lib mmdevapi.lib imm32.lib delayimp.lib "%SHERPA_LIB%\sherpa-onnx-cxx-api.lib" "%ONNX_LIB%\onnxruntime.lib" "%KNF_LIB%\kaldi-native-fbank-core.lib" /link /DELAYLOAD:sherpa-onnx-cxx-api.dll /DELAYLOAD:onnxruntime.dll /DELAYLOAD:kaldi-native-fbank-core.dll
+cl /nologo /O2 /EHsc /MT /std:c++17 /utf-8 /DUNICODE /D_UNICODE /Isrc\app /Isrc\asr /Isrc\audio /Isrc\ui /Isrc\core /I"%SHERPA_INCLUDE%" /I"%ONNX_INCLUDE%" /I"%KNF_INCLUDE%" /Fobuild\ /Fe:build\VoxType.exe src\app\main.cpp src\audio\engine.cpp src\audio\batch_vad_trimmer.cpp src\audio\streaming_vad_trimmer.cpp src\audio\vad_trim_core.cpp src\asr\asr_session.cpp src\asr\asr_result.cpp src\asr\asr_dispatcher.cpp src\asr\cloud_asr_common.cpp src\asr\cloud_http_common.cpp src\asr\qwen_asr.cpp src\asr\qwen_streaming_session.cpp src\asr\volcengine_streaming_session.cpp src\ui\hud.cpp src\ui\hotkey.cpp src\ui\settings.cpp src\audio\wasapi_capture.cpp build\app.res user32.lib gdi32.lib shell32.lib ole32.lib comctl32.lib d2d1.lib dwrite.lib shlwapi.lib winmm.lib winhttp.lib crypt32.lib mmdevapi.lib imm32.lib delayimp.lib "%SHERPA_LIB%\sherpa-onnx-cxx-api.lib" "%ONNX_LIB%\onnxruntime.lib" "%KNF_LIB%\kaldi-native-fbank-core.lib" /link /DELAYLOAD:sherpa-onnx-cxx-api.dll /DELAYLOAD:onnxruntime.dll /DELAYLOAD:kaldi-native-fbank-core.dll
 if errorlevel 1 exit /b 1
 
 copy /y "%~dp0dll\sherpa-onnx-cxx-api.dll" build\ >nul

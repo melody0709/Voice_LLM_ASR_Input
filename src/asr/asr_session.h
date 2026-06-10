@@ -1,0 +1,60 @@
+#pragma once
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
+#include "globals.h"
+
+#include <memory>
+#include <string>
+#include <vector>
+
+enum class AsrSessionBackend {
+    Local,
+    BaiduBatch,
+    QwenRealtimeBatch,
+};
+
+class AsrEngine;
+
+struct AsrSessionResult {
+    std::wstring text;
+    std::wstring providerName;
+    AsrSessionBackend backend = AsrSessionBackend::Local;
+    bool isStreaming = false;
+    double cloudApiMs = 0.0;
+    double vadMs = 0.0;
+    size_t pcmBytes = 0;
+    size_t vadTrimmedSamples = 0;
+    std::wstring vadModelName;
+};
+
+class IAsrSession {
+public:
+    virtual ~IAsrSession() = default;
+
+    virtual bool Start(std::wstring& error) = 0;
+    virtual bool EnqueuePcmChunk(const BYTE* data, size_t bytes) = 0;
+    virtual AsrSessionResult Finish() = 0;
+    virtual void Abort() = 0;
+    virtual const wchar_t* ProviderName() const = 0;
+    virtual bool IsStreaming() const = 0;
+};
+
+class BatchAsrSessionBase : public IAsrSession {
+public:
+    bool Start(std::wstring& error) override;
+    bool EnqueuePcmChunk(const BYTE* data, size_t bytes) override;
+    void Abort() override;
+    bool IsStreaming() const override;
+
+protected:
+    bool aborted_ = false;
+    std::vector<BYTE> pcm_;
+};
+
+std::unique_ptr<IAsrSession> CreateBatchAsrSession(
+    const Config& config,
+    AsrEngine& localEngine,
+    std::vector<float>&& localPreprocessedSamples);

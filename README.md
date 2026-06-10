@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./src/app.ico" width="64" alt="VoxType icon" />
+  <img src="./src/app/app.ico" width="64" alt="VoxType icon" />
 </p>
 
 <h1 align="center">VoxType</h1>
@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  Current version: <code>v0.8.7</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
+  Current version: <code>v0.9.1</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -27,11 +27,11 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 ## Highlights
 
 - **Press and Speak** — Default CapsLock long-press to record, release to auto-paste to current window; short press toggles Caps Lock normally
-- **100% Local** — C++ directly calls sherpa-onnx, no Python, no cloud API, all data stays on your machine
+- **Local-first** — C++ directly calls sherpa-onnx without Python; optional cloud ASR / LLM providers can be enabled explicitly
 - **Real-time HUD** — Bottom floating capsule window during recording, 5 volume bars responding to sound
 - **Dual VAD Options** — Silero VAD (lightweight) / FireRed VAD (high precision F1 97.57), intelligently skips silence
 - **LLM Correction (Optional)** — Supports DeepSeek / OpenRouter / SiliconFlow and other providers, one-click configuration
-- **Cloud ASR (Optional)** — Supports Volcano Engine (Doubao) and Baidu Cloud streaming ASR as alternative backends
+- **Cloud ASR (Optional)** — Supports Volcano Engine (Doubao), Baidu Cloud, and Qwen ASR (`qwen3-asr-flash-realtime`) as alternative backends
 
 ## Quick Start
 
@@ -67,7 +67,7 @@ Right-click the tray icon to open Settings, hold the hotkey to start recording, 
 <summary><strong>Settings Guide</strong></summary>
 
 **Recognition tab**
-- `ASR Backend` — Select between `Local (sherpa-onnx)`, `Volcano Engine`, and `Baidu Cloud`
+- `ASR Backend` — Select between `Local (sherpa-onnx)`, `Volcano Engine`, `Baidu Cloud`, and `Qwen ASR`
 - `ASR model` — Speech recognition model (only for Local backend):
   - `FireRedASR2 CTC` — Fast, suitable for daily input
   - `FireRedASR2 AED` — Better quality, more accurate for long sentences
@@ -100,7 +100,7 @@ Right-click the tray icon to open Settings, hold the hotkey to start recording, 
 - `Basic Fix` / `Deep Fix` — Preset buttons, one-click fill for different correction intensity System Prompts
 
 **Cloud ASR tab**
-- `Provider` — Select between `Volcano Engine (Doubao)` and `Baidu Cloud`, controls below update dynamically
+- `Provider` — Select between `Volcano Engine (Doubao)`, `Baidu Cloud`, and `Qwen ASR (DashScope)`, controls below update dynamically
 - **Baidu Cloud**: `API Key` / `Secret Key` (DPAPI encrypted) + `Language Model` (Mandarin/English/Cantonese/Sichuanese) + `Test Connection`
 - **Volcano Engine (Doubao)**: `API Key` (DPAPI encrypted) + `ASR Mode` + `Model Version` + `Language` + `Test Connection`
   - ASR Mode: `bigmodel_nostream` (recommended, highest accuracy) / `bigmodel_async` (best latency) / `bigmodel` (real-time partial)
@@ -108,7 +108,10 @@ Right-click the tray icon to open Settings, hold the hotkey to start recording, 
   - Hotwords ID/Name, Correct ID/Name — Reference hotword and correction tables from the self-learning platform
   - Use history as context — Sends recent recognition results as dialog context for improved accuracy
   - Read input field context — Reads current input field text as ASR context (UIA/MSAA/WM_GETTEXT layered fallback, input field priority, history fallback)
-- Cloud ASR includes built-in punctuation; VAD and local punct models are bypassed when using cloud backends
+- **Qwen ASR (DashScope)**: `API Key` (DPAPI encrypted) + `Base URL` + `Model` + `Language` + `Chunk ms` + `Test Connection`
+  - Default model: `qwen3-asr-flash-realtime`
+  - Turn detection is fixed to Manual for push-to-talk usage; Server VAD settings are intentionally hidden
+- Cloud ASR backends handle recognition remotely; when VAD is enabled, streaming cloud backends can use local VAD trim before upload. Local punctuation models are still bypassed for cloud backends
 
 </details>
 
@@ -147,19 +150,11 @@ Features:
 
 ```
 src/
-  main.cpp          — Entry point, recording session, LLM refine orchestration
-  engine.h / .cpp   — Config, ASR engine, audio capture, utility functions
-  hud.h / .cpp      — HUD window, Direct2D rendering, tray icon, UI resources
-  hotkey.h / .cpp   — Hotkey logic, CapsLock, keyboard hook, HotkeyEdit control
-  settings.h / .cpp — Settings window, controls, load/save, provider management
-  baidu_asr.h       — Baidu Cloud ASR module (header-only)
-  volcengine_asr.h  — Volcengine (豆包) ASR module (header-only, WebSocket)
-  firered_vad.h     — FireRed VAD module (header-only)
-  input_context.h   — Input field context reading module (header-only, UIA/MSAA/WM_GETTEXT)
-  llm_refine.h      — LLM correction module (header-only)
-  globals.h         — Shared constants, control IDs, extern global variables
-  utils.h           — Shared utility functions (WideToUtf8, Utf8ToWide, EscapeJson, Trim)
-  resources.rc / resource.h / app.ico / app.manifest
+  app/              — Entry point, globals, Win32 resources
+  asr/              — ASR clients, batch/streaming sessions, ASR result dispatch helpers
+  audio/            — Local ASR engine, audio capture, WASAPI, FireRed VAD, streaming VAD trim
+  ui/               — HUD, hotkey handling, Settings window
+  core/             — Shared utilities, LLM correction, input context reading
 dll/                — Runtime DLLs (sherpa-onnx, onnxruntime, etc.)
 third_party/        — Headers and import libraries
 models/             — Model files (not committed to git)
@@ -175,7 +170,7 @@ CHANGELOG.md        — Version change log
 <details>
 <summary><strong>Known Limitations</strong></summary>
 
-- Recognition after recording, true streaming partial not yet implemented
+- Local and Baidu results are finalized after recording; Qwen and Volcano Engine can show partial HUD during recording, with final text pasted after release
 - Text injection primarily via clipboard + Ctrl+V, admin privilege windows may block
 - Model files are large (~3GB), first load takes a few seconds
 
@@ -187,6 +182,8 @@ CHANGELOG.md        — Version change log
 See [CHANGELOG.md](CHANGELOG.md)
 
 **Recent Updates:**
+- **v0.9.1** — Cloud ASR architecture stabilization: Qwen/Volcengine streaming sessions, shared streaming/batch VAD trim core, Baidu same-PCM retry and token refresh retry, source tree reorganization, Volcengine flow parity review
+- **v0.9.0** — Qwen ASR (`qwen3-asr-flash-realtime`) backend, true streaming send with partial HUD, Manual turn detection by default, Qwen watchdog/replay retry, shared ASR session/dispatcher/result architecture
 - **v0.8.7** — Volcengine retry recognition: connection-loss audio buffering + full-PCM retry, adaptive finalize timeout, unified ASR error classification, no-text close handling
 - **v0.8.6** — Volcengine connection reuse optimization (fast consecutive recording latency reduced from ~1.8s to ~0.4s), 3s expiry detection + hSession connection pool cleanup, time-gated internal retry, progressive external retry
 - **v0.8.5** — Input field context (UIA/MSAA/WM_GETTEXT, read input text as ASR context), context logic refactor (input field priority, history fallback, remove window title), remove accelerate score, settings UI reorganize
@@ -224,3 +221,4 @@ See [CHANGELOG.md](CHANGELOG.md)
 - [onnxruntime](https://github.com/microsoft/onnxruntime) — ONNX inference engine
 - [Baidu Intelligent Cloud](https://ai.baidu.com/tech/speech/asr) — Baidu Cloud ASR API
 - [Volcengine Speech](https://www.volcengine.com/docs/6561/1354869) — Volcengine (豆包) streaming ASR API
+- [Alibaba Cloud Model Studio Qwen ASR](https://help.aliyun.com/zh/model-studio/qwen-asr-realtime-interaction-process) — Qwen ASR realtime API

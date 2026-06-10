@@ -2,6 +2,35 @@
 
 > 🇨🇳 [中文版](doc/CHANGELOG_zh.md)
 
+## v0.9.1 (2026-06-10)
+
+### Changed
+
+- **Cloud ASR architecture stabilized**: Moved Qwen and Volcengine streaming orchestration behind `IStreamingAsrSession`, with shared status/partial/final dispatch helpers.
+- **Shared VAD trim pipeline**: Added common streaming/batch VAD trim core so Qwen, Volcengine, and Baidu can reuse the same head/tail silence trimming behavior while preserving middle pauses.
+- **Volcengine refactor parity review**: Verified the Volcengine protocol layer is unchanged and the refactored outer flow preserves three modes, final drain, empty-final retry, watchdog timeout text, and prewarm/reuse lifecycle.
+- **Baidu retry hardening**: Added same-PCM retry for transient failures and token refresh retry for auth/token errors.
+- **Source tree organization**: Grouped source files under `src/app`, `src/asr`, `src/audio`, `src/ui`, and `src/core`, and refreshed architecture/review documentation.
+
+## v0.9.0 (2026-06-09)
+
+### Added
+
+- **Qwen ASR backend**: Added DashScope Qwen ASR realtime WebSocket support with default model `qwen3-asr-flash-realtime`
+- **True Qwen streaming send path**: Audio capture callbacks append 16k/16-bit/mono PCM into a non-blocking Qwen pending queue while recording; the Qwen worker sends configured chunks during the hotkey hold instead of waiting until recording ends
+- **Qwen partial HUD**: Dedicated receive drain thread parses `conversation.item.input_audio_transcription.text` (`text + stash`) and updates the HUD when partial results are enabled
+- **Qwen stability layer**: Added active-client abort, recording/finalize watchdog, connect hard timeout, replay PCM buffer, empty-final retry, timeout/failure retry, and connection-loss buffering until stop
+- **Shared ASR architecture modules**: Added `IAsrSession`, `BatchAsrSessionBase`, `AsrResultDispatcher`, ASR result normalization/error classification, and common cloud replay/finalize-timeout helpers
+- **Qwen Settings page**: Added Qwen API Key, Base URL, Model, Language, Chunk ms, and Test Connection controls
+
+### Changed
+
+- **Qwen turn detection fixed to Manual**: Product configuration now always uses Manual (`turn_detection: null`) for push-to-talk input. Server VAD controls and persisted `qwen_turn_detection` / `qwen_vad_*` fields were removed because Server VAD segments one hotkey hold into multiple items
+- **Cloud ASR configuration expanded**: ASR Backend and Cloud Provider selectors now include `Qwen ASR (DashScope)`
+- **Unified ASR final dispatch**: Local, Baidu, Qwen fallback, and cloud paths now share final result normalization, no-speech handling, LLM gating, and raw ASR tracking where applicable
+- **Build files updated**: `build.bat` and `CMakeLists.txt` now compile and link the new ASR architecture and Qwen modules (`winhttp` + `crypt32`)
+- **Documentation refreshed**: README, Chinese README, changelogs, and cloud ASR architecture notes now describe Qwen ASR, Manual turn detection, and the shared ASR layering
+
 ## v0.8.7 (2026-06-06)
 
 ### Added

@@ -4,10 +4,10 @@
 
 ## 当前基线
 
-- 当前版本：`v0.7.4`
+- 当前版本：`v0.9.0`
 - 已实现功能：
   - 本地 ASR：sherpa-onnx OfflineRecognizer + Punct，支持 FireRed CTC/AED、SenseVoice
-  - 云端 ASR：百度云、火山引擎（豆包）WebSocket 流式，含 nostream/async 多种模式
+  - 云端 ASR：百度云、火山引擎（豆包）WebSocket、Qwen ASR（DashScope `qwen3-asr-flash-realtime`）
   - 双 VAD：Silero（轻量）/ FireRed（高精度），Settings 可切换
   - LLM 纠错：DeepSeek / OpenRouter / SiliconFlow 等多 Provider，可自定义 Prompt 和 Extra Params
   - 录音：WASAPI Shared Mode（48kHz→16kHz 线性重采样）+ waveIn fallback
@@ -33,6 +33,8 @@
 - [x] v0.7.2：CODE_REVIEW 修复 13 项（线程安全、资源泄漏、SSL、工具函数去重等）
 - [x] v0.7.3：火山引擎流式 ASR 修复（round1: atomic/初始音频丢失/脏音频残留；round2: async 双线程竞争/SendAudio 失败处理/WASAPI Init 脏状态）
 - [x] v0.7.4：微信中文输入法粘贴修复（WM_CHAR 绕过 IME）、IMM32 输入法状态切换、Unicode SendInput fallback、Force Unicode Input 菜单
+- [x] v0.8.x：流式 VAD、火山引擎连接复用、输入框上下文、空结果 replay retry、自适应 finalize timeout
+- [x] v0.9.0：Qwen ASR 接入、边录边发 partial HUD、Manual turn detection 固定策略、统一 ASR session/dispatcher/result 架构
 
 ### Audio
 - [x] WASAPI Shared Mode 核心捕获（`wasapi_capture.h/cpp`）+ 线性插值重采样

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="../src/app.ico" width="64" alt="VoxType icon" />
+  <img src="../src/app/app.ico" width="64" alt="VoxType icon" />
 </p>
 
 <h1 align="center">VoxType</h1>
@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  当前版本：<code>v0.8.7</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
+  当前版本：<code>v0.9.1</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -27,11 +27,11 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 ## Highlights
 
 - **按住即说** — 默认 CapsLock 长按录音，松开自动粘贴到当前窗口；短按照常切换大小写
-- **100% 本地** — C++ 直接调用 sherpa-onnx，无需 Python、无需云端 API，所有数据不出本机
+- **本地优先** — C++ 直接调用 sherpa-onnx，无需 Python；云端 ASR / LLM 供应商均为显式可选
 - **实时 HUD** — 录音时底部显示悬浮胶囊窗，5 根音量条随声音跳动
 - **双 VAD 可选** — Silero VAD（轻量）/ FireRed VAD（高精度 F1 97.57），智能跳过静音
 - **LLM 纠错（可选）** — 支持 DeepSeek / OpenRouter / SiliconFlow 等多供应商，一键配置
-- **Cloud ASR（可选）** — 支持火山引擎（豆包）和百度智能云流式 ASR 作为替代后端
+- **Cloud ASR（可选）** — 支持火山引擎（豆包）、百度智能云和 Qwen ASR（`qwen3-asr-flash-realtime`）作为替代后端
 
 ## Quick Start
 
@@ -67,7 +67,7 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 <summary><strong>⚙️ Settings 说明</strong></summary>
 
 **Recognition tab**
-- `ASR Backend` — 选择 `Local (sherpa-onnx)` / `Volcano Engine` / `Baidu Cloud`
+- `ASR Backend` — 选择 `Local (sherpa-onnx)` / `Volcano Engine` / `Baidu Cloud` / `Qwen ASR`
 - `ASR model` — 语音识别模型（仅 Local 后端）：
   - `FireRedASR2 CTC` — 速度快，适合日常输入
   - `FireRedASR2 AED` — 质量更好，长句更准
@@ -100,7 +100,7 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 - `Basic Fix` / `Deep Fix` — 预设按钮，一键填入不同纠错力度的 System Prompt
 
 **Cloud ASR tab**
-- `Provider` — 选择 `Volcano Engine (Doubao)` 或 `Baidu Cloud`，下方控件动态切换
+- `Provider` — 选择 `Volcano Engine (Doubao)` / `Baidu Cloud` / `Qwen ASR (DashScope)`，下方控件动态切换
 - **Baidu Cloud**：`API Key` / `Secret Key`（DPAPI 加密）+ `Language Model`（普通话/英语/粤语/四川话）+ `Test Connection`
 - **Volcano Engine (Doubao)**：`API Key`（DPAPI 加密）+ `ASR Mode` + `Model Version` + `Language` + `Test Connection`
   - ASR Mode：`bigmodel_nostream`（推荐，准确率最高）/ `bigmodel_async`（最佳延迟）/ `bigmodel`（实时部分结果）
@@ -108,7 +108,10 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
   - Hotwords ID/Name、Correct ID/Name — 引用自学习平台热词词表和替换词词表
   - Use history as context — 将最近识别结果作为对话上下文发送，提升准确率
   - Read input field context — 读取当前输入框文本作为 ASR 上下文（UIA/MSAA/WM_GETTEXT 分层 Fallback，输入框优先、历史兜底）
-- 云端 ASR 自带标点；使用云端后端时 VAD 和本地标点模型不生效
+- **Qwen ASR (DashScope)**：`API Key`（DPAPI 加密）+ `Base URL` + `Model` + `Language` + `Chunk ms` + `Test Connection`
+  - 默认模型：`qwen3-asr-flash-realtime`
+  - Turn detection 固定为 Manual，匹配按住说话/松开上屏的输入法场景；Server VAD 设置已隐藏
+- 云端 ASR 由远端完成识别；启用 VAD 时，流式云端后端可先使用本地 VAD trim 再上传。本地标点模型在云端后端下仍不生效
 
 </details>
 
@@ -147,19 +150,11 @@ v0.2.0 起新增可选的云端 LLM 文本纠错。默认关闭，需手动启�
 
 ```
 src/
-  main.cpp          — 入口、录音会话编排、LLM 纠错调度
-  engine.h / .cpp   — 配置持久化、ASR 引擎、音频采集、工具函数
-  hud.h / .cpp      — HUD 窗口、Direct2D 渲染、托盘图标、UI 资源
-  hotkey.h / .cpp   — 热键逻辑、CapsLock、键盘 Hook、HotkeyEdit 控件
-  settings.h / .cpp — Settings 窗口、控件、加载/保存、Provider 管理
-  baidu_asr.h       — 百度智能云 ASR 模块（header-only）
-  volcengine_asr.h  — 火山引擎（豆包）ASR 模块（header-only, WebSocket）
-  firered_vad.h     — FireRed VAD 模块（header-only）
-  input_context.h   — 输入框上下文读取模块（header-only，UIA/MSAA/WM_GETTEXT）
-  llm_refine.h      — LLM 纠错模块（header-only）
-  globals.h         — 共享常量、控件 ID、extern 全局变量声明
-  utils.h           — 共享工具函数（WideToUtf8、Utf8ToWide、EscapeJson、Trim）
-  resources.rc / resource.h / app.ico / app.manifest
+  app/              — 程序入口、全局声明、Win32 资源
+  asr/              — ASR 客户端、批量/流式 session、ASR 结果分发辅助
+  audio/            — 本地 ASR 引擎、音频采集、WASAPI、FireRed VAD、流式 VAD trim
+  ui/               — HUD、热键、Settings 窗口
+  core/             — 共享工具、LLM 纠错、输入框上下文读取
 dll/                — 运行时 DLL（sherpa-onnx、onnxruntime 等）
 third_party/        — 头文件和导入库
 models/             — 模型文件（不提交 git）
@@ -175,7 +170,7 @@ CHANGELOG.md        — 版本变更记录
 <details>
 <summary><strong>⚠️ 已知限制</strong></summary>
 
-- 录音后才识别，尚未实现真正流式 partial
+- 本地和百度在录音结束后输出 final；Qwen 和火山引擎可在录音期间显示 partial HUD，最终文本仍在松开后上屏
 - 文本注入以剪贴板 + Ctrl+V 为主，管理员权限窗口可能拦截
 - 模型文件较大（约 3GB），首次加载需要几秒
 
@@ -187,6 +182,8 @@ CHANGELOG.md        — 版本变更记录
 详见 [CHANGELOG.md](CHANGELOG.md)
 
 **最近更新：**
+- **v0.9.1** — 云端 ASR 架构稳定版：Qwen/火山引擎 streaming session、共享 streaming/batch VAD trim core、百度同 PCM 重试和 token refresh retry、源码目录分类、火山引擎流程等价审查
+- **v0.9.0** — Qwen ASR（`qwen3-asr-flash-realtime`）后端、边录边发和 partial HUD、默认 Manual turn detection、Qwen watchdog/replay 重试、统一 ASR session/dispatcher/result 架构
 - **v0.8.7** — 火山引擎重试识别：断连音频缓冲 + 全量 PCM 重试、自适应 finalize 超时、统一 ASR 错误分类、无文本 close 处理
 - **v0.8.6** — 火山引擎连接复用优化（连续快速录音延迟从 ~1.8s 降到 ~0.4s）、3s 过期检测 + hSession 连接池清理、内部重试时间判断、外部递增重试策略
 - **v0.8.5** — 输入框上下文（UIA/MSAA/WM_GETTEXT 读取输入框文本作为 ASR 上下文）、上下文逻辑重构（输入框优先、历史兜底、去掉窗口标题）、移除加速首字参数、设置界面重组
@@ -224,3 +221,4 @@ CHANGELOG.md        — 版本变更记录
 - [onnxruntime](https://github.com/microsoft/onnxruntime) — ONNX 推理引擎
 - [百度智能云](https://ai.baidu.com/tech/speech/asr) — 百度云端 ASR API
 - [火山引擎语音技术](https://www.volcengine.com/docs/6561/1354869) — 火山引擎（豆包）流式 ASR API
+- [阿里云百炼 Qwen ASR](https://help.aliyun.com/zh/model-studio/qwen-asr-realtime-interaction-process) — Qwen ASR Realtime API

@@ -6,6 +6,7 @@
 #include "engine.h"
 #include "hotkey.h"
 #include "hud.h"
+#include "qwen_asr.h"
 
 #include <algorithm>
 #include <commctrl.h>
@@ -35,6 +36,58 @@ void UpdateUiScale(HWND hwnd) {
 }
 int S(int px) {
     return DipToPx(static_cast<float>(px), UiStyle::Scale);
+}
+
+struct QwenLanguageOption {
+    const wchar_t* label;
+    const wchar_t* code;
+};
+
+constexpr QwenLanguageOption kQwenLanguages[] = {
+    {L"Auto", L""},
+    {L"Chinese (zh)", L"zh"},
+    {L"Cantonese (yue)", L"yue"},
+    {L"English (en)", L"en"},
+    {L"Japanese (ja)", L"ja"},
+    {L"German (de)", L"de"},
+    {L"Korean (ko)", L"ko"},
+    {L"Russian (ru)", L"ru"},
+    {L"French (fr)", L"fr"},
+    {L"Portuguese (pt)", L"pt"},
+    {L"Arabic (ar)", L"ar"},
+    {L"Italian (it)", L"it"},
+    {L"Spanish (es)", L"es"},
+    {L"Hindi (hi)", L"hi"},
+    {L"Indonesian (id)", L"id"},
+    {L"Thai (th)", L"th"},
+    {L"Turkish (tr)", L"tr"},
+    {L"Ukrainian (uk)", L"uk"},
+    {L"Vietnamese (vi)", L"vi"},
+    {L"Czech (cs)", L"cs"},
+    {L"Danish (da)", L"da"},
+    {L"Filipino (fil)", L"fil"},
+    {L"Finnish (fi)", L"fi"},
+    {L"Icelandic (is)", L"is"},
+    {L"Malay (ms)", L"ms"},
+    {L"Norwegian (no)", L"no"},
+    {L"Polish (pl)", L"pl"},
+    {L"Swedish (sv)", L"sv"},
+};
+
+int QwenLanguageIndexFromCode(const std::wstring& code) {
+    constexpr int count = static_cast<int>(sizeof(kQwenLanguages) / sizeof(kQwenLanguages[0]));
+    for (int i = 0; i < count; ++i) {
+        if (code == kQwenLanguages[i].code) return i;
+    }
+    return 0;
+}
+
+const wchar_t* QwenLanguageCodeFromIndex(int index) {
+    constexpr int count = static_cast<int>(sizeof(kQwenLanguages) / sizeof(kQwenLanguages[0]));
+    if (index >= 0 && index < count) {
+        return kQwenLanguages[index].code;
+    }
+    return L"";
 }
 }
 
@@ -234,6 +287,10 @@ void AddVolcengineControl(HWND hwnd) {
     if (hwnd) g_volcengineControls.push_back(hwnd);
 }
 
+void AddQwenControl(HWND hwnd) {
+    if (hwnd) g_qwenControls.push_back(hwnd);
+}
+
 void AddVadFireredControl(HWND hwnd) {
     if (hwnd) g_vadFireredControls.push_back(hwnd);
 }
@@ -251,6 +308,7 @@ void ShowCloudSubPage(HWND hwnd, int providerIdx) {
     g_cloudProviderIdx = providerIdx;
     for (HWND c : g_baiduControls) ShowWindow(c, providerIdx == 1 ? SW_SHOW : SW_HIDE);
     for (HWND c : g_volcengineControls) ShowWindow(c, providerIdx == 0 ? SW_SHOW : SW_HIDE);
+    for (HWND c : g_qwenControls) ShowWindow(c, providerIdx == 2 ? SW_SHOW : SW_HIDE);
 }
 
 void ShowSettingsPage(HWND hwnd, int page) {
@@ -274,6 +332,7 @@ void ShowSettingsPage(HWND hwnd, int page) {
     } else {
         for (HWND c : g_baiduControls) ShowWindow(c, SW_HIDE);
         for (HWND c : g_volcengineControls) ShowWindow(c, SW_HIDE);
+        for (HWND c : g_qwenControls) ShowWindow(c, SW_HIDE);
     }
     InvalidateRect(hwnd, nullptr, TRUE);
 }
@@ -487,15 +546,20 @@ void LoadSettingsControls(HWND hwnd) {
     ComboBox_AddString(backendCombo, L"Local (sherpa-onnx)");
     ComboBox_AddString(backendCombo, L"Volcano Engine");
     ComboBox_AddString(backendCombo, L"Baidu Cloud");
+    ComboBox_AddString(backendCombo, L"Qwen ASR");
     int backendIdx = 0;
     if (g_config.asrBackend == L"volcengine") backendIdx = 1;
     else if (g_config.asrBackend == L"baidu") backendIdx = 2;
+    else if (g_config.asrBackend == L"qwen") backendIdx = 3;
     ComboBox_SetCurSel(backendCombo, backendIdx);
 
     HWND cloudProviderCombo = GetDlgItem(hwnd, IDC_CLOUD_PROVIDER);
     ComboBox_AddString(cloudProviderCombo, L"Volcano Engine (Doubao)");
     ComboBox_AddString(cloudProviderCombo, L"Baidu Cloud");
-    int cloudIdx = (g_config.cloudProvider == L"baidu") ? 1 : 0;
+    ComboBox_AddString(cloudProviderCombo, L"Qwen ASR (DashScope)");
+    int cloudIdx = 0;
+    if (g_config.cloudProvider == L"baidu") cloudIdx = 1;
+    else if (g_config.cloudProvider == L"qwen") cloudIdx = 2;
     ComboBox_SetCurSel(cloudProviderCombo, cloudIdx);
     g_cloudProviderIdx = cloudIdx;
 
@@ -517,6 +581,12 @@ void LoadSettingsControls(HWND hwnd) {
     HWND volcKeyEdit = GetDlgItem(hwnd, IDC_VOLC_API_KEY);
     if (volcKeyEdit) SendMessageW(volcKeyEdit, EM_SETPASSWORDCHAR, L'\u25CF', 0);
 
+    g_qwenKeyVisible = false;
+    HWND showQwenBtn = GetDlgItem(hwnd, IDC_QWEN_SHOW_KEY);
+    if (showQwenBtn) SetWindowTextW(showQwenBtn, L"Show");
+    HWND qwenKeyEdit = GetDlgItem(hwnd, IDC_QWEN_API_KEY);
+    if (qwenKeyEdit) SendMessageW(qwenKeyEdit, EM_SETPASSWORDCHAR, L'\u25CF', 0);
+
     SetWindowTextW(GetDlgItem(hwnd, IDC_BAIDU_API_KEY), g_config.baiduApiKey.c_str());
     SetWindowTextW(GetDlgItem(hwnd, IDC_BAIDU_SECRET_KEY), g_config.baiduSecretKey.c_str());
 
@@ -532,6 +602,21 @@ void LoadSettingsControls(HWND hwnd) {
     ComboBox_SetCurSel(devPidCombo, devPidIdx);
 
     SetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_API_KEY), g_config.volcApiKey.c_str());
+    SetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_API_KEY), g_config.qwenApiKey.c_str());
+    SetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_BASE_URL), g_config.qwenBaseUrl.c_str());
+    SetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_MODEL), g_config.qwenModel.c_str());
+
+    HWND qwenLangCombo = GetDlgItem(hwnd, IDC_QWEN_LANGUAGE);
+    for (const auto& lang : kQwenLanguages) {
+        ComboBox_AddString(qwenLangCombo, lang.label);
+    }
+    ComboBox_SetCurSel(qwenLangCombo, QwenLanguageIndexFromCode(g_config.qwenLanguage));
+
+    {
+        wchar_t buf[32] = {};
+        _itow_s(g_config.qwenChunkMs, buf, 10);
+        SetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_CHUNK_MS), buf);
+    }
 
     HWND volcModeCombo = GetDlgItem(hwnd, IDC_VOLC_MODE);
     ComboBox_AddString(volcModeCombo, L"bigmodel_nostream");
@@ -711,11 +796,14 @@ void SaveSettingsControls(HWND hwnd) {
         int sel = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_ASR_BACKEND));
         if (sel == 1) g_config.asrBackend = L"volcengine";
         else if (sel == 2) g_config.asrBackend = L"baidu";
+        else if (sel == 3) g_config.asrBackend = L"qwen";
         else g_config.asrBackend = L"local";
     }
     {
         int cloudIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_CLOUD_PROVIDER));
-        g_config.cloudProvider = (cloudIdx == 1) ? L"baidu" : L"volcengine";
+        if (cloudIdx == 1) g_config.cloudProvider = L"baidu";
+        else if (cloudIdx == 2) g_config.cloudProvider = L"qwen";
+        else g_config.cloudProvider = L"volcengine";
     }
     wchar_t baiduApiKey[256] = {};
     GetWindowTextW(GetDlgItem(hwnd, IDC_BAIDU_API_KEY), baiduApiKey, 256);
@@ -732,6 +820,26 @@ void SaveSettingsControls(HWND hwnd) {
     wchar_t volcApiKey[256] = {};
     GetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_API_KEY), volcApiKey, 256);
     g_config.volcApiKey = volcApiKey;
+
+    wchar_t qwenApiKey[512] = {};
+    GetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_API_KEY), qwenApiKey, 512);
+    g_config.qwenApiKey = qwenApiKey;
+    wchar_t qwenBaseUrl[512] = {};
+    GetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_BASE_URL), qwenBaseUrl, 512);
+    g_config.qwenBaseUrl = qwenBaseUrl[0] ? qwenBaseUrl : qwen_asr::kDefaultBaseUrl;
+    wchar_t qwenModel[256] = {};
+    GetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_MODEL), qwenModel, 256);
+    g_config.qwenModel = qwenModel[0] ? qwenModel : qwen_asr::kDefaultModel;
+    {
+        int langIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_QWEN_LANGUAGE));
+        g_config.qwenLanguage = QwenLanguageCodeFromIndex(langIdx);
+    }
+    {
+        wchar_t buf[32] = {};
+        GetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_CHUNK_MS), buf, 32);
+        g_config.qwenChunkMs = std::clamp(_wtoi(buf), 20, 1000);
+    }
+
     {
         int modeIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_VOLC_MODE));
         if (modeIdx == 1) g_config.volcMode = L"bigmodel_async";
@@ -1172,6 +1280,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         g_cloudAsrControls.clear();
         g_baiduControls.clear();
         g_volcengineControls.clear();
+        g_qwenControls.clear();
         g_vadFireredControls.clear();
         g_vadSileroControls.clear();
 
@@ -1414,6 +1523,41 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         AddBaiduControl(CreateCombo(hwnd, IDC_BAIDU_DEV_PID, S(UiStyle::InputLeft), S(UiStyle::RowInputY(3)), S(UiStyle::ComboW), S(UiStyle::ComboH)));
 
         AddBaiduControl(CreateButton(hwnd, IDC_BAIDU_TEST, S(500), S(UiStyle::RowInputY(0)), S(UiStyle::ActionBtnW), S(UiStyle::ActionBtnH), L"Test Connection"));
+
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(1)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"API Key");
+        AddQwenControl(control);
+        HWND qwenApiKey = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD,
+                                          S(UiStyle::InputLeft), S(UiStyle::RowInputY(1)), S(330), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_API_KEY)), g_instance, nullptr);
+        ApplyUiFont(qwenApiKey);
+        AddQwenControl(qwenApiKey);
+        AddQwenControl(CreateButton(hwnd, IDC_QWEN_SHOW_KEY, S(UiStyle::SmallBtnX), S(UiStyle::RowInputY(1)) - S(1), S(UiStyle::SmallBtnW), S(UiStyle::BtnH), L"Show"));
+
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(2)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Base URL");
+        AddQwenControl(control);
+        HWND qwenBaseUrl = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                                           S(UiStyle::InputLeft), S(UiStyle::RowInputY(2)), S(480), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_BASE_URL)), g_instance, nullptr);
+        ApplyUiFont(qwenBaseUrl);
+        AddQwenControl(qwenBaseUrl);
+
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(3)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Model");
+        AddQwenControl(control);
+        HWND qwenModel = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", qwen_asr::kDefaultModel, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                                         S(UiStyle::InputLeft), S(UiStyle::RowInputY(3)), S(330), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_MODEL)), g_instance, nullptr);
+        ApplyUiFont(qwenModel);
+        AddQwenControl(qwenModel);
+
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(4)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Language");
+        AddQwenControl(control);
+        AddQwenControl(CreateCombo(hwnd, IDC_QWEN_LANGUAGE, S(UiStyle::InputLeft), S(UiStyle::RowInputY(4)), S(UiStyle::ComboW), S(UiStyle::ComboH)));
+
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(5)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Chunk ms");
+        AddQwenControl(control);
+        HWND qwenChunkMs = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
+                                           S(UiStyle::InputLeft), S(UiStyle::RowInputY(5)), S(80), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_CHUNK_MS)), g_instance, nullptr);
+        ApplyUiFont(qwenChunkMs);
+        AddQwenControl(qwenChunkMs);
+
+        AddQwenControl(CreateButton(hwnd, IDC_QWEN_TEST, S(500), S(UiStyle::RowInputY(0)), S(UiStyle::ActionBtnW), S(UiStyle::ActionBtnH), L"Test Connection"));
 
         control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(1)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"API Key (X-Api-Key)");
         AddVolcengineControl(control);
@@ -1793,6 +1937,17 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             if (btn) SetWindowTextW(btn, g_volcKeyVisible ? L"Hide" : L"Show");
             return 0;
         }
+        case IDC_QWEN_SHOW_KEY: {
+            g_qwenKeyVisible = !g_qwenKeyVisible;
+            HWND keyEdit = GetDlgItem(hwnd, IDC_QWEN_API_KEY);
+            if (keyEdit) {
+                SendMessageW(keyEdit, EM_SETPASSWORDCHAR, g_qwenKeyVisible ? 0 : L'\u25CF', 0);
+                InvalidateRect(keyEdit, nullptr, TRUE);
+            }
+            HWND btn = GetDlgItem(hwnd, IDC_QWEN_SHOW_KEY);
+            if (btn) SetWindowTextW(btn, g_qwenKeyVisible ? L"Hide" : L"Show");
+            return 0;
+        }
         case IDC_BAIDU_TEST: {
             baidu_asr::BaiduConfig bcfg;
             wchar_t tmp[256] = {};
@@ -1849,6 +2004,33 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             SetStatus(hwnd, L"Testing Volcano Engine ASR connection...");
             std::thread([hwnd, vcfg]() {
                 volc_asr::TestResult result = volc_asr::TestConnection(vcfg);
+                PostMessageW(hwnd, WM_APP + 10, result.ok ? 0 : 1,
+                    reinterpret_cast<LPARAM>(new std::wstring(result.message)));
+            }).detach();
+            return 0;
+        }
+        case IDC_QWEN_TEST: {
+            qwen_asr::QwenConfig qcfg;
+            wchar_t tmp[512] = {};
+            GetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_API_KEY), tmp, 512);
+            qcfg.apiKey = tmp;
+            GetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_BASE_URL), tmp, 512);
+            qcfg.baseUrl = tmp[0] ? tmp : qwen_asr::kDefaultBaseUrl;
+            wchar_t model[256] = {};
+            GetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_MODEL), model, 256);
+            qcfg.model = model[0] ? model : qwen_asr::kDefaultModel;
+            int langIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_QWEN_LANGUAGE));
+            qcfg.language = QwenLanguageCodeFromIndex(langIdx);
+            qcfg.turnDetection = L"manual";
+            {
+                wchar_t buf[32] = {};
+                GetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_CHUNK_MS), buf, 32);
+                qcfg.chunkMs = std::clamp(_wtoi(buf), 20, 1000);
+            }
+
+            SetStatus(hwnd, L"Testing Qwen ASR connection...");
+            std::thread([hwnd, qcfg]() {
+                qwen_asr::TestResult result = qwen_asr::TestConnection(qcfg);
                 PostMessageW(hwnd, WM_APP + 10, result.ok ? 0 : 1,
                     reinterpret_cast<LPARAM>(new std::wstring(result.message)));
             }).detach();

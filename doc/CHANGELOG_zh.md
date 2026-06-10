@@ -2,6 +2,35 @@
 
 > 🇬🇧 [English](../CHANGELOG.md)
 
+## v0.9.1 (2026-06-10)
+
+### 变更
+
+- **云端 ASR 架构稳定**：Qwen 和火山引擎 streaming 编排已收进 `IStreamingAsrSession`，并共用 status、partial、final dispatch 外壳。
+- **共享 VAD trim 管线**：新增 streaming/batch 共用 VAD trim core，Qwen、火山引擎、百度可复用同一套头尾静音裁剪行为，同时保留中间停顿。
+- **火山引擎重构等价审查**：确认火山协议层未改写，重构后的外层流程保留三模式、final drain、empty-final retry、watchdog timeout 文案和 prewarm/reuse 生命周期。
+- **百度 retry 加固**：新增 transient 失败同 PCM 重试，以及 auth/token 错误后的 token refresh retry。
+- **源码目录分类**：源码已按 `src/app`、`src/asr`、`src/audio`、`src/ui`、`src/core` 分组，并同步刷新架构和审查文档。
+
+## v0.9.0 (2026-06-09)
+
+### 新增
+
+- **Qwen ASR 后端**：新增 DashScope Qwen ASR Realtime WebSocket 支持，默认模型为 `qwen3-asr-flash-realtime`
+- **Qwen 真实边录边发链路**：录音回调将 16k/16-bit/mono PCM 非阻塞追加到 Qwen pending queue；Qwen worker 在按住热键期间按配置 chunk 持续发送，不再等录音结束后才一次性发送
+- **Qwen partial HUD**：独立 receive drain thread 解析 `conversation.item.input_audio_transcription.text`（`text + stash`），开启 partial 后可在 HUD 中实时显示中间结果
+- **Qwen 稳定性层**：新增 active-client abort、录音/Finalize watchdog、连接 hard timeout、replay PCM buffer、空 final retry、timeout/failure retry，以及断连后继续缓冲到松手的 replay 机制
+- **统一 ASR 架构模块**：新增 `IAsrSession`、`BatchAsrSessionBase`、`AsrResultDispatcher`、ASR 结果归一化/错误分类，以及云端 replay/finalize-timeout 公共辅助
+- **Qwen Settings 子页**：新增 Qwen API Key、Base URL、Model、Language、Chunk ms 和 Test Connection 控件
+
+### 变更
+
+- **Qwen turn detection 固定 Manual**：产品配置现在始终使用 Manual（`turn_detection: null`），匹配按住说话/松开上屏场景。Server VAD 控件和持久化的 `qwen_turn_detection` / `qwen_vad_*` 字段已移除，因为 Server VAD 会把一次热键录音切成多个 item
+- **Cloud ASR 配置扩展**：ASR Backend 和 Cloud Provider 选择器加入 `Qwen ASR (DashScope)`
+- **统一 ASR final 分发**：本地、百度、Qwen fallback 和云端路径复用 final 结果归一化、no-speech 处理、LLM 门控和 raw ASR 记录策略
+- **构建文件同步**：`build.bat` 和 `CMakeLists.txt` 已加入新的 ASR 架构模块和 Qwen 模块，并同步链接 `winhttp` / `crypt32`
+- **文档刷新**：README、中文 README、更新日志和云端 ASR 架构文档已同步 Qwen ASR、Manual turn detection 和共享 ASR 分层
+
 ## v0.8.7 (2026-06-06)
 
 ### 新增

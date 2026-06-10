@@ -19,12 +19,12 @@ Windows 11  语音输入法工具：托盘常驻，按住快捷键录音松开�
 
 - 编辑文件优先用精确替换（SearchReplace / apply_patch），避免全文覆写。
 - C++ 新增依赖同步更新：`#pragma comment(lib)` + `build.bat` + `CMakeLists.txt`。
-- **版本号只改 `src/resource.h` 的 APP_VERSION_MAJOR/MINOR/PATCH/BUILD**，再同步 `README.md` 版本和 `CHANGELOG.md` 记录。`main.cpp`/`resources.rc` 用宏自动派生。
+- **版本号只改 `src/app/resource.h` 的 APP_VERSION_MAJOR/MINOR/PATCH/BUILD**，再同步 `README.md` 版本和 `CHANGELOG.md` 记录。`src/app/main.cpp` / `src/app/resources.rc` 用宏自动派生。
 - sherpa-onnx `cxx-api.h` 含非 ASCII 注释，编译需 `/utf-8`。
 - UI 修改后必须编译验证，Settings 检查裁切/重叠，HUD 检查高 DPI。
 - DPI 单位：DirectWrite/Direct2D 用 DIP，Win32 `SetWindowPos` 用物理像素，不能混用。
-- Settings 布局常量在 `globals.h` 的 `UiStyle` 命名空间，不要硬编码魔法数字。
-- 新增配置项同步三处：`globals.h` Config 字段 + `engine.cpp` LoadConfig/SaveConfig + `settings.cpp` UI 控件。
+- Settings 布局常量在 `src/app/globals.h` 的 `UiStyle` 命名空间，不要硬编码魔法数字。
+- 新增配置项同步三处：`src/app/globals.h` Config 字段 + `src/audio/engine.cpp` LoadConfig/SaveConfig + `src/ui/settings.cpp` UI 控件。
 - DLL 延迟加载：`onnxruntime.dll`、`sherpa-onnx-cxx-api.dll`、`kaldi-native-fbank-core.dll` 通过 `/DELAYLOAD` 延迟加载，纯云端模式空闲 ~12 MB。`TryLoadAsrDlls()` 用 SEH 安全检测。
 - 本地模式启动时 `PreloadAsrEngine()` 后台线程预加载模型，Save 后 Reload + 预加载。
 
@@ -35,7 +35,7 @@ Windows 11  语音输入法工具：托盘常驻，按住快捷键录音松开�
 - 不要在 Settings 打开时继续拦截录音快捷键。
 - 不要依赖固定窗口高度放底部按钮。
 - 不要为了美观牺牲控件可读性，高 DPI 优先留空间。
-- 不要混淆 `volcengine_asr.h` 的 `ExtractJsonStr`（无转义）和 `engine.cpp` 的 `ExtractJsonString`（支持转义）。
+- 不要混淆 `src/asr/volcengine_asr.h` 的 `ExtractJsonStr`（无转义）和 `src/audio/engine.cpp` 的 `ExtractJsonString`（支持转义）。
 - 不要在火山引擎 `bigmodel_nostream` 模式下对中间 chunk 调用 `ReceiveResult`——服务器返回空文本，浪费时间。
 - 不要在 Extra Params 和代码生成的 `corpus` 中同时写 `corpus`——代码已跳过 Extra Params 中的 `corpus` key，手动编辑 config 需注意。
 
@@ -52,4 +52,3 @@ Windows 11  语音输入法工具：托盘常驻，按住快捷键录音松开�
 - WASAPI 生命周期必须是 `Init → Start → Stop → Release`，`Stop()` 只停线程不清资源，没有 `Release()` 第二次录音会卡死。`Init()` 成功但 `Start()` 失败时也必须 `Release()`。
 - WASAPI 重采样相位更新必须用 `m_resamplePhase -= written / m_resampleRatio`（实际消耗的源样本数），不能用 `m_resamplePhase -= numFrames`（输入帧数），否则非整数采样率比会越界。
 - **微信粘贴**：微信（`Weixin.exe`）用自定义 Qt 控件，`GetFocus()` 返回 NULL 且 IME 拦截 Ctrl+V。必须用 `WM_CHAR` 逐字符发送，不能用剪贴板+Ctrl+V。其他应用用剪贴板+Ctrl+V+IMM32 切换。
-

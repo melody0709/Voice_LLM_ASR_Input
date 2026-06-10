@@ -11,10 +11,12 @@ flowchart LR
     User["User holds hotkey"] --> Frontend["VoxType.exe<br/>Win32 tray frontend"]
     Frontend --> Recorder["WASAPI recording<br/>48kHz→16kHz resample"]
     Recorder --> Engine["AsrEngine (C++)<br/>sherpa-onnx-cxx-api"]
+    Recorder --> Cloud["Cloud ASR worker<br/>Volcengine / Baidu / Qwen"]
     Engine --> VAD["VAD<br/>Silero / FireRed"]
     VAD --> ASR["sherpa-onnx ASR<br/>FireRed/SenseVoice"]
     ASR --> Punct["CT-Transformer punctuation"]
     Punct --> Frontend
+    Cloud --> Frontend
     Frontend --> Inject["Clipboard + Ctrl+V"]
 ```
 
@@ -29,29 +31,44 @@ Single process. Responsibilities:
 - Display Settings.
 - Listen for global hotkeys.
 - Capture microphone audio.
-- Call sherpa-onnx C++ API directly via `AsrEngine` for VAD, ASR, and punctuation.
+- Call sherpa-onnx C++ API directly via `AsrEngine` for local VAD, ASR, and punctuation.
+- Optionally route audio to cloud ASR backends: Baidu, Volcengine, or Qwen ASR.
 - Inject final text into the current application.
 
 `AsrEngine` internally caches `OfflineRecognizer`, `VoiceActivityDetector`, and `OfflinePunctuation`. The same model is not loaded repeatedly.
 
 ## Source Code Structure
 
-Since v0.6.0, the source code is organized into multiple modules:
+Since v0.6.0, the source code is organized into multiple modules. Current source files are grouped by area under `src/`:
+
+| Directory | Responsibility |
+|-----------|----------------|
+| `src/app/` | Application entry point, global declarations, Win32 resources |
+| `src/asr/` | ASR provider clients, batch/streaming sessions, ASR result dispatch helpers |
+| `src/audio/` | Local ASR engine, audio capture, WASAPI, FireRed VAD, streaming VAD trim |
+| `src/ui/` | HUD, hotkey handling, Settings window |
+| `src/core/` | Shared utilities, LLM refine, input context reading |
 
 | File | Responsibility |
 |------|---------------|
-| `src/globals.h` | Shared constants, control IDs, struct definitions, extern global variable declarations |
-| `src/engine.h` / `src/engine.cpp` | Backend: string/path utilities, JSON config persistence, audio capture, `AsrEngine` class, `PreloadAsrEngine()` |
-| `src/hud.h` / `src/hud.cpp` | HUD window, Direct2D/DirectWrite rendering, tray icon, UI resource creation/deletion |
-| `src/hotkey.h` / `src/hotkey.cpp` | Hotkey config, CapsLock long-press logic, `WH_KEYBOARD_LL` hook, `HotkeyEdit` custom control |
-| `src/settings.h` / `src/settings.cpp` | Settings window, tab UI, control creation, load/save, provider management, input dialog |
-| `src/main.cpp` | Entry point (`wWinMain`), main window procedure, recording session orchestration, LLM refine |
-| `src/llm_refine.h` | LLM correction module (header-only, `llm::` namespace) |
-| `src/baidu_asr.h` | Baidu Cloud ASR module (header-only) |
-| `src/volcengine_asr.h` | Volcengine (豆包) ASR module (header-only, WebSocket) |
-| `src/firered_vad.h` | FireRed VAD module (header-only) |
-| `src/input_context.h` | Input field context reading module (header-only, UIA/MSAA/WM_GETTEXT layered fallback) |
-| `src/utils.h` | Shared utility functions (WideToUtf8, Utf8ToWide, EscapeJson, Trim) |
+| `src/app/globals.h` | Shared constants, control IDs, struct definitions, extern global variable declarations |
+| `src/audio/engine.h` / `src/audio/engine.cpp` | Backend: string/path utilities, JSON config persistence, audio capture, `AsrEngine` class, `PreloadAsrEngine()` |
+| `src/audio/streaming_vad_trimmer.h` / `src/audio/streaming_vad_trimmer.cpp` | Provider-independent streaming PCM VAD trim for cloud ASR sessions |
+| `src/asr/asr_session.h` / `src/asr/asr_session.cpp` | Batch ASR session abstraction for local, Baidu, and Qwen fallback paths |
+| `src/asr/asr_result.h` / `src/asr/asr_result.cpp` | ASR text normalization, error classification, backend display/debug names |
+| `src/asr/asr_dispatcher.h` / `src/asr/asr_dispatcher.cpp` | Final ASR result dispatch, LLM gate, raw ASR tracking |
+| `src/asr/cloud_asr_common.h` / `src/asr/cloud_asr_common.cpp` | Cloud replay buffer, adaptive finalize timeout, empty-final retry helpers |
+| `src/ui/hud.h` / `src/ui/hud.cpp` | HUD window, Direct2D/DirectWrite rendering, tray icon, UI resource creation/deletion |
+| `src/ui/hotkey.h` / `src/ui/hotkey.cpp` | Hotkey config, CapsLock long-press logic, `WH_KEYBOARD_LL` hook, `HotkeyEdit` custom control |
+| `src/ui/settings.h` / `src/ui/settings.cpp` | Settings window, tab UI, control creation, load/save, provider management, input dialog |
+| `src/app/main.cpp` | Entry point (`wWinMain`), main window procedure, recording session orchestration, LLM refine |
+| `src/core/llm_refine.h` | LLM correction module (header-only, `llm::` namespace) |
+| `src/asr/baidu_asr.h` | Baidu Cloud ASR module (header-only) |
+| `src/asr/volcengine_asr.h` | Volcengine (豆包) ASR module (header-only, WebSocket) |
+| `src/asr/qwen_asr.h` / `src/asr/qwen_asr.cpp` | Qwen ASR realtime WebSocket client |
+| `src/audio/firered_vad.h` | FireRed VAD module (header-only) |
+| `src/core/input_context.h` | Input field context reading module (header-only, UIA/MSAA/WM_GETTEXT layered fallback) |
+| `src/core/utils.h` | Shared utility functions (WideToUtf8, Utf8ToWide, EscapeJson, Trim) |
 
 Global variables are defined in `main.cpp` and accessed by other modules via `extern` declarations in `globals.h`.
 
@@ -84,7 +101,7 @@ Settings is a standard Win32 window with 4 tabs:
 - `Recognition`: ASR Backend, model, model directory, threads, VAD, VAD model, Punctuation, hotkey config.
 - `LLM`: Provider selection (Provider dropdown + [+] / [−]), API Base URL, API Key, Model, Test Connection, Debug log, Extra Params.
 - `LLM Prompt`: System Prompt editor (multi-line), Basic Fix / Deep Fix preset buttons.
-- `Cloud ASR`: Cloud provider selection, Baidu/Volcengine provider-specific fields.
+- `Cloud ASR`: Cloud provider selection and Baidu/Volcengine/Qwen provider-specific fields.
 
 When Settings is opened:
 
@@ -137,7 +154,7 @@ A borderless capsule HUD is displayed at the bottom center during recording. The
 - Win32 window size uses the current window DPI to convert DIP to physical pixels, avoiding text clipping on high DPI.
 - The recording callback calculates PCM RMS for each audio buffer, normalizes it, and drives the volume bars.
 - Volume bars use attack/release smoothing, redrawn via a ~33ms timer during recording.
-- Currently displays `Listening...`, `Recognizing...`, final text, or error status; real partial text is not yet connected.
+- Displays `Listening...`, `Recognizing...`, final text, or error status. Volcengine and Qwen ASR can post partial text to the HUD from their receive/drain threads.
 
 ### VAD
 
@@ -147,7 +164,7 @@ When `Enable VAD` is turned on, voice detection is performed before ASR. The VAD
 
 **FireRed VAD**: An open-source DFSMN streaming VAD from the Xiaohongshu team, with higher accuracy (F1 97.57 vs 95.95, false alarm rate 2.69% vs 9.41%).
 
-- `src/firered_vad.h` header-only module, uses `kaldi_native_fbank` for 80-dimensional fbank feature extraction + `onnxruntime` for model loading
+- `src/audio/firered_vad.h` header-only module, uses `kaldi_native_fbank` for 80-dimensional fbank feature extraction + `onnxruntime` for model loading
 - Model: `models/fireredvad_stream_vad_with_cache.onnx` (2.2MB)
 - CMVN parameters: `models/cmvn.ark` (hardcoded in code)
 - Streaming inference, updates DFSMN cache `[8, 1, 128, 19]` per frame
@@ -160,11 +177,11 @@ Current strategy (shared by both VADs):
 
 ### ASR Engine
 
-`AsrEngine` class (in `src/engine.h` / `src/engine.cpp`) encapsulates the sherpa-onnx C++ API:
+`AsrEngine` class (in `src/audio/engine.h` / `src/audio/engine.cpp`) encapsulates the sherpa-onnx C++ API:
 
 - `OfflineRecognizer`: ASR recognition (FireRedASR2 CTC/AED, SenseVoice)
 - `VoiceActivityDetector`: Silero VAD
-- `firered_vad::FireRedVad`: FireRed VAD (`src/firered_vad.h`)
+- `firered_vad::FireRedVad`: FireRed VAD (`src/audio/firered_vad.h`)
 - `OfflinePunctuation`: CT-Transformer punctuation
 
 Models are cached after loading; the same configuration is not loaded repeatedly. When switching models or reloading, the cache is cleared and automatically reloaded on the next recognition.
@@ -174,6 +191,16 @@ Runtime DLL dependencies:
 - `sherpa-onnx-c-api.dll`
 - `onnxruntime.dll`
 - `kaldi-native-fbank-core.dll` (used by FireRed VAD)
+
+### Cloud ASR
+
+Cloud backends are optional. Recognition runs remotely, and local punctuation is bypassed:
+
+- **Baidu Cloud** uses a batch-style REST flow through `BaiduAsrSession`.
+- **Volcengine** keeps its proven WebSocket protocol implementation in `src/asr/volcengine_asr.h`; `main.cpp` only wraps orchestration, replay retry, watchdog, and HUD dispatch around it.
+- **Qwen ASR** uses DashScope `qwen3-asr-flash-realtime` through `src/asr/qwen_asr.h/.cpp`. The main recording path sends PCM chunks while recording, drains partial/final events on a separate thread, uses Manual turn detection (`turn_detection: null`), and sends `input_audio_buffer.commit` + `session.finish` after release.
+
+When `Enable VAD` is on, streaming cloud backends can run audio through `StreamingVadTrimmer` before upload. The trimmer emits provider-independent PCM bytes; each provider session re-chunks them for its own protocol. Common cloud behavior such as replay buffer, adaptive finalize timeout, empty final retry, and result classification is shared through `cloud_asr_common.*` and `asr_result.*`.
 
 ### Model Adaptation
 
@@ -229,7 +256,13 @@ Current structure is a flat JSON:
   "llm_provider": "DeepSeek",
   "llm_providers_json": "{\"DeepSeek\":{\"endpoint\":\"https://api.deepseek.com\",\"api_key\":\"<encrypted>\",\"model\":\"deepseek-v4-flash\"}}",
   "llm_prompt": "",
-  "enable_llm_debug": false
+  "enable_llm_debug": false,
+  "asr_backend": "qwen",
+  "cloud_provider": "qwen",
+  "qwen_base_url": "wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
+  "qwen_model": "qwen3-asr-flash-realtime",
+  "qwen_language": "",
+  "qwen_chunk_ms": 100
 }
 ```
 
@@ -237,12 +270,14 @@ Current structure is a flat JSON:
 - `llm_providers_json`: JSON string storing all providers' endpoint, api_key (DPAPI encrypted), and model.
 - `llm_prompt`: Custom System Prompt (leave empty to use built-in default).
 - `enable_llm_debug`: When enabled, records before/after ASR comparison to `log/llm_refine_YYYYMMDD.log`.
+- `asr_backend`: Active ASR backend (`local`, `baidu`, `volcengine`, or `qwen`).
+- `qwen_*`: Qwen ASR connection/model/language/chunk settings. Turn detection is fixed to Manual and is not persisted.
 
 ## Future Architecture Evolution
 
-### True Streaming
+### Streaming Evolution
 
-Current approach is "record then recognize". To approach the experience of the macOS reference project, it needs to be changed to:
+Qwen and Volcengine already support cloud partial HUD while recording. Local ASR and Baidu still use a record-then-finalize flow. The future direction is to make streaming capability a first-class session trait instead of keeping provider-specific orchestration in `main.cpp`:
 
 ```mermaid
 flowchart LR
@@ -255,13 +290,13 @@ flowchart LR
 
 Possible approaches:
 
-- Continue using offline models for simulated partial.
-- Switch to/add streaming ASR models.
-- Upgrade worker protocol to WebSocket or persistent binary stream.
+- Continue using offline models for simulated local partial.
+- Switch to/add streaming local ASR models.
+- Introduce a `StreamingAsrSession` interface for cloud providers so Qwen/Volcengine orchestration can move out of `main.cpp`.
 
 ### Conservative Correction
 
-Cloud LLM correction has been integrated since v0.2.0 (`src/llm_refine.h`). Disabled by default; requires enabling in Settings by setting Punctuation to `Auto punctuate + LLM` and configuring the provider API Key.
+Cloud LLM correction has been integrated since v0.2.0 (`src/core/llm_refine.h`). Disabled by default; requires enabling in Settings by setting Punctuation to `Auto punctuate + LLM` and configuring the provider API Key.
 
 Suggested future additions:
 

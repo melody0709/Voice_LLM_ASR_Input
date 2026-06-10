@@ -10,8 +10,10 @@
 #include <mmsystem.h>
 
 #include <atomic>
+#include <memory>
 #include <string>
 #include <vector>
+#include <thread>
 
 #include "sherpa-onnx/c-api/cxx-api.h"
 #include "firered_vad.h"
@@ -21,6 +23,9 @@
 #include "wasapi_capture.h"
 #include "input_context.h"
 #include "resource.h"
+
+class IStreamingAsrSession;
+class StreamingVadTrimmer;
 
 constexpr wchar_t kAppName[] = L"VoxType";
 constexpr wchar_t kMainClass[] = L"VoxType.Main";
@@ -37,7 +42,7 @@ constexpr UINT kTrayId = 1;
 constexpr UINT_PTR kHudHideTimer = 1;
 constexpr UINT_PTR kCapsLockLongPressTimer = 2;
 constexpr UINT_PTR kHudAnimationTimer = 3;
-constexpr UINT_PTR kVolcWatchdogTimer = 4;
+constexpr UINT_PTR kStreamingWatchdogTimer = 4;
 constexpr UINT kCapsLockLongPressMs = 300;
 constexpr int kHudMinWidth = 300;
 constexpr int kHudMinHeight = 56;
@@ -87,6 +92,8 @@ constexpr int RowLabelY(int row) { return FirstRowY + LabelYOffset + row * RowHe
 // Scale = DpiScaleForWindow * 96/144; S() converts design px to physical px.
 extern float Scale;
 }
+
+namespace qwen_asr { class RealtimeClient; }
 
 constexpr UINT ID_TRAY_VERSION = 1001;
 constexpr UINT ID_TRAY_SETTINGS = 1002;
@@ -157,6 +164,13 @@ constexpr int IDC_VAD_MIN_SILENCE = 2071;
 constexpr int IDC_VAD_MIN_SPEECH = 2072;
 constexpr int IDC_VAD_PAD_START = 2073;
 constexpr int IDC_VAD_SMOOTH_WINDOW = 2074;
+constexpr int IDC_QWEN_API_KEY = 2080;
+constexpr int IDC_QWEN_SHOW_KEY = 2081;
+constexpr int IDC_QWEN_BASE_URL = 2082;
+constexpr int IDC_QWEN_MODEL = 2083;
+constexpr int IDC_QWEN_LANGUAGE = 2084;
+constexpr int IDC_QWEN_TEST = 2085;
+constexpr int IDC_QWEN_CHUNK_MS = 2089;
 
 struct Config {
     int configVersion = 0;
@@ -204,6 +218,11 @@ struct Config {
     std::wstring volcHotwordsName;
     std::wstring volcCorrectTableId;
     std::wstring volcCorrectTableName;
+    std::wstring qwenApiKey;
+    std::wstring qwenBaseUrl = L"wss://dashscope.aliyuncs.com/api-ws/v1/realtime";
+    std::wstring qwenModel = L"qwen3-asr-flash-realtime";
+    std::wstring qwenLanguage;
+    int qwenChunkMs = 100;
     bool enableDebugMode = false;
     bool forceUnicodeInput = false;
     std::wstring audioBackend = L"wasapi";
@@ -294,6 +313,7 @@ extern std::vector<HWND> g_promptControls;
 extern std::vector<HWND> g_cloudAsrControls;
 extern std::vector<HWND> g_baiduControls;
 extern std::vector<HWND> g_volcengineControls;
+extern std::vector<HWND> g_qwenControls;
 extern std::vector<HWND> g_vadFireredControls;
 extern std::vector<HWND> g_vadSileroControls;
 extern bool g_hudIsRefining;
@@ -301,17 +321,11 @@ extern bool g_llmKeyVisible;
 extern bool g_baiduKeyVisible;
 extern bool g_baiduApiKeyVisible;
 extern bool g_volcKeyVisible;
+extern bool g_qwenKeyVisible;
+extern std::unique_ptr<IStreamingAsrSession> g_activeStreamingSession;
+extern std::unique_ptr<StreamingVadTrimmer> g_streamingVadTrimmer;
+extern CRITICAL_SECTION g_streamingSessionCs;
 extern volc_asr::VolcSession g_volcSession;
-extern std::atomic<bool> g_volcStreaming;
-extern std::thread g_volcThread;
-extern CRITICAL_SECTION g_volcAudioCs;
-extern std::vector<BYTE> g_volcPendingAudio;
-extern std::atomic<int> g_volcVadState;
-extern int g_volcVadSilentCount;
-extern std::deque<std::vector<BYTE>> g_volcVadPreBuffer;
-extern std::vector<std::vector<BYTE>> g_volcVadTailBuffer;
-extern std::atomic<bool> g_volcVadDoTrim;
-extern size_t g_volcSentBytes;
 namespace volc_asr { extern std::atomic<bool> g_volcKeepAlive; }
 extern AsrEngine g_asrEngine;
 extern int g_cloudProviderIdx;

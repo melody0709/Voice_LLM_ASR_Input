@@ -9,13 +9,24 @@ set(SHERPA_DIR "${CMAKE_SOURCE_DIR}/third_party/sherpa-onnx")
 set(KNF_DIR "${CMAKE_SOURCE_DIR}/third_party/kaldi_native_fbank")
 
 add_executable(VoxType WIN32
-    src/main.cpp
-    src/engine.cpp
-    src/hud.cpp
-    src/hotkey.cpp
-    src/settings.cpp
-    src/wasapi_capture.cpp
-    src/resources.rc
+    src/app/main.cpp
+    src/audio/engine.cpp
+    src/audio/batch_vad_trimmer.cpp
+    src/audio/streaming_vad_trimmer.cpp
+    src/audio/vad_trim_core.cpp
+    src/asr/asr_session.cpp
+    src/asr/asr_result.cpp
+    src/asr/asr_dispatcher.cpp
+    src/asr/cloud_asr_common.cpp
+    src/asr/cloud_http_common.cpp
+    src/asr/qwen_asr.cpp
+    src/asr/qwen_streaming_session.cpp
+    src/asr/volcengine_streaming_session.cpp
+    src/ui/hud.cpp
+    src/ui/hotkey.cpp
+    src/ui/settings.cpp
+    src/audio/wasapi_capture.cpp
+    src/app/resources.rc
 )
 
 add_compile_definitions(UNICODE _UNICODE)
@@ -26,7 +37,11 @@ set_target_properties(VoxType PROPERTIES
 )
 
 target_include_directories(VoxType PRIVATE
-    "${CMAKE_SOURCE_DIR}/src"
+    "${CMAKE_SOURCE_DIR}/src/app"
+    "${CMAKE_SOURCE_DIR}/src/asr"
+    "${CMAKE_SOURCE_DIR}/src/audio"
+    "${CMAKE_SOURCE_DIR}/src/ui"
+    "${CMAKE_SOURCE_DIR}/src/core"
     "${SHERPA_DIR}/include"
     "${CMAKE_SOURCE_DIR}/third_party/onnxruntime/include"
     "${KNF_DIR}/include"

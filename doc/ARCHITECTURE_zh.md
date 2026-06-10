@@ -11,10 +11,12 @@ flowchart LR
     User["用户长按快捷键"] --> Frontend["VoxType.exe<br/>Win32 托盘前端"]
     Frontend --> Recorder["WASAPI 录音<br/>48kHz→16kHz 重采样"]
     Recorder --> Engine["AsrEngine (C++)<br/>sherpa-onnx-cxx-api"]
+    Recorder --> Cloud["云端 ASR worker<br/>火山 / 百度 / Qwen"]
     Engine --> VAD["VAD<br/>Silero / FireRed"]
     VAD --> ASR["sherpa-onnx ASR<br/>FireRed/SenseVoice"]
     ASR --> Punct["CT-Transformer 标点"]
     Punct --> Frontend
+    Cloud --> Frontend
     Frontend --> Inject["剪贴板 + Ctrl+V"]
 ```
 
@@ -29,29 +31,44 @@ flowchart LR
 - 显示 Settings。
 - 监听全局快捷键。
 - 采集麦克风音频。
-- 通过 `AsrEngine` 直接调用 sherpa-onnx C++ API 完成 VAD、ASR、标点。
+- 通过 `AsrEngine` 直接调用 sherpa-onnx C++ API 完成本地 VAD、ASR、标点。
+- 可选将音频发送到云端 ASR 后端：百度、火山引擎或 Qwen ASR。
 - 将最终文本注入当前应用。
 
 `AsrEngine` 内部缓存 `OfflineRecognizer`、`VoiceActivityDetector`、`OfflinePunctuation`，同一模型不会重复加载。
 
 ## 源码结构
 
-自 v0.6.0 起，源码组织为多个模块：
+自 v0.6.0 起，源码组织为多个模块。当前源码按职责分组在 `src/` 下：
+
+| 目录 | 职责 |
+|------|------|
+| `src/app/` | 程序入口、全局声明、Win32 资源 |
+| `src/asr/` | ASR Provider 客户端、批量/流式 session、ASR 结果分发辅助 |
+| `src/audio/` | 本地 ASR 引擎、音频采集、WASAPI、FireRed VAD、流式 VAD trim |
+| `src/ui/` | HUD、热键、Settings 窗口 |
+| `src/core/` | 共享工具、LLM 纠错、输入框上下文读取 |
 
 | 文件 | 职责 |
 |------|------|
-| `src/globals.h` | 共享常量、控件 ID、结构体定义、extern 全局变量声明 |
-| `src/engine.h` / `src/engine.cpp` | 后端：字符串/路径工具、JSON 配置持久化、音频采集、`AsrEngine` 类、`PreloadAsrEngine()` |
-| `src/hud.h` / `src/hud.cpp` | HUD 窗口、Direct2D/DirectWrite 渲染、托盘图标、UI 资源创建/销毁 |
-| `src/hotkey.h` / `src/hotkey.cpp` | 热键配置、CapsLock 长按逻辑、`WH_KEYBOARD_LL` Hook、`HotkeyEdit` 自绘控件 |
-| `src/settings.h` / `src/settings.cpp` | Settings 窗口、tab UI、控件创建、加载/保存、Provider 管理、输入对话框 |
-| `src/main.cpp` | 入口（`wWinMain`）、主窗口过程、录音会话编排、LLM 纠错 |
-| `src/llm_refine.h` | LLM 纠错模块（header-only，`llm::` 命名空间） |
-| `src/baidu_asr.h` | 百度智能云 ASR 模块（header-only） |
-| `src/volcengine_asr.h` | 火山引擎（豆包）ASR 模块（header-only，WebSocket） |
-| `src/firered_vad.h` | FireRed VAD 模块（header-only） |
-| `src/input_context.h` | 输入框上下文读取模块（header-only，UIA/MSAA/WM_GETTEXT 分层 Fallback） |
-| `src/utils.h` | 共享工具函数（WideToUtf8、Utf8ToWide、EscapeJson、Trim） |
+| `src/app/globals.h` | 共享常量、控件 ID、结构体定义、extern 全局变量声明 |
+| `src/audio/engine.h` / `src/audio/engine.cpp` | 后端：字符串/路径工具、JSON 配置持久化、音频采集、`AsrEngine` 类、`PreloadAsrEngine()` |
+| `src/audio/streaming_vad_trimmer.h` / `src/audio/streaming_vad_trimmer.cpp` | 云端流式 ASR session 可复用的 provider-independent PCM VAD trim |
+| `src/asr/asr_session.h` / `src/asr/asr_session.cpp` | 本地、百度、Qwen fallback 路径的批量 ASR session 抽象 |
+| `src/asr/asr_result.h` / `src/asr/asr_result.cpp` | ASR 文本归一化、错误分类、后端显示/调试名 |
+| `src/asr/asr_dispatcher.h` / `src/asr/asr_dispatcher.cpp` | ASR final 结果分发、LLM 门控、raw ASR 记录 |
+| `src/asr/cloud_asr_common.h` / `src/asr/cloud_asr_common.cpp` | 云端 replay buffer、自适应 finalize timeout、空 final retry 辅助 |
+| `src/ui/hud.h` / `src/ui/hud.cpp` | HUD 窗口、Direct2D/DirectWrite 渲染、托盘图标、UI 资源创建/销毁 |
+| `src/ui/hotkey.h` / `src/ui/hotkey.cpp` | 热键配置、CapsLock 长按逻辑、`WH_KEYBOARD_LL` Hook、`HotkeyEdit` 自绘控件 |
+| `src/ui/settings.h` / `src/ui/settings.cpp` | Settings 窗口、tab UI、控件创建、加载/保存、Provider 管理、输入对话框 |
+| `src/app/main.cpp` | 入口（`wWinMain`）、主窗口过程、录音会话编排、LLM 纠错 |
+| `src/core/llm_refine.h` | LLM 纠错模块（header-only，`llm::` 命名空间） |
+| `src/asr/baidu_asr.h` | 百度智能云 ASR 模块（header-only） |
+| `src/asr/volcengine_asr.h` | 火山引擎（豆包）ASR 模块（header-only，WebSocket） |
+| `src/asr/qwen_asr.h` / `src/asr/qwen_asr.cpp` | Qwen ASR realtime WebSocket 客户端 |
+| `src/audio/firered_vad.h` | FireRed VAD 模块（header-only） |
+| `src/core/input_context.h` | 输入框上下文读取模块（header-only，UIA/MSAA/WM_GETTEXT 分层 Fallback） |
+| `src/core/utils.h` | 共享工具函数（WideToUtf8、Utf8ToWide、EscapeJson、Trim） |
 
 全局变量在 `main.cpp` 中定义，其他模块通过 `globals.h` 的 `extern` 声明引用。
 
@@ -84,7 +101,7 @@ Settings 是普通 Win32 窗口，目前分 4 个 tab：
 - `Recognition`: ASR Backend、模型、模型目录、线程、VAD、VAD 模型、Punctuation、快捷键配置。
 - `LLM`: 供应商选择（Provider dropdown + [+] / [−]）、API Base URL、API Key、Model、Test Connection、Debug log、Extra Params。
 - `LLM Prompt`: System Prompt 编辑（多行）、Basic Fix / Deep Fix 预设按钮。
-- `Cloud ASR`: 云端供应商选择、百度/火山引擎专属字段。
+- `Cloud ASR`: 云端供应商选择、百度/火山引擎/Qwen 专属字段。
 
 打开 Settings 时：
 
@@ -137,7 +154,7 @@ Settings 是普通 Win32 窗口，目前分 4 个 tab：
 - Win32 窗口尺寸使用当前窗口 DPI 将 DIP 转为物理像素，避免高 DPI 下文本裁切。
 - 录音回调计算每个音频 buffer 的 PCM RMS，归一化后驱动音量条。
 - 音量条使用 attack/release 平滑，录音期间通过约 33ms 定时器重绘。
-- 目前显示 `Listening...`、`Recognizing...`、最终文本或错误状态；真实 partial 文本尚未接入。
+- 显示 `Listening...`、`Recognizing...`、最终文本或错误状态。火山引擎和 Qwen ASR 可以从 receive/drain 线程向 HUD 投递 partial 文本。
 
 ### VAD
 
@@ -147,7 +164,7 @@ Settings 是普通 Win32 窗口，目前分 4 个 tab：
 
 **FireRed VAD**：小红书团队开源的 DFSMN 流式 VAD，准确率更高（F1 97.57 vs 95.95，误报率 2.69% vs 9.41%）。
 
-- `src/firered_vad.h` header-only 模块，使用 `kaldi_native_fbank` 提取 80 维 fbank 特征 + `onnxruntime` 加载模型
+- `src/audio/firered_vad.h` header-only 模块，使用 `kaldi_native_fbank` 提取 80 维 fbank 特征 + `onnxruntime` 加载模型
 - 模型：`models/fireredvad_stream_vad_with_cache.onnx`（2.2MB）
 - CMVN 参数：`models/cmvn.ark`（硬编码进代码）
 - 流式推理，每帧更新 DFSMN 缓存 `[8, 1, 128, 19]`
@@ -160,11 +177,11 @@ Settings 是普通 Win32 窗口，目前分 4 个 tab：
 
 ### ASR 引擎
 
-`AsrEngine` 类（`src/engine.h` / `src/engine.cpp`）封装 sherpa-onnx C++ API：
+`AsrEngine` 类（`src/audio/engine.h` / `src/audio/engine.cpp`）封装 sherpa-onnx C++ API：
 
 - `OfflineRecognizer`：ASR 识别（FireRedASR2 CTC/AED、SenseVoice）
 - `VoiceActivityDetector`：Silero VAD
-- `firered_vad::FireRedVad`：FireRed VAD（`src/firered_vad.h`）
+- `firered_vad::FireRedVad`：FireRed VAD（`src/audio/firered_vad.h`）
 - `OfflinePunctuation`：CT-Transformer 标点
 
 模型加载后缓存，同一配置不会重复加载。切换模型或 Reload 时清除缓存，下次识别自动重新加载。
@@ -174,6 +191,16 @@ Settings 是普通 Win32 窗口，目前分 4 个 tab：
 - `sherpa-onnx-c-api.dll`
 - `onnxruntime.dll`
 - `kaldi-native-fbank-core.dll`（FireRed VAD 使用）
+
+### 云端 ASR
+
+云端后端是可选能力，识别本身在远端完成，本地标点会被绕过：
+
+- **百度智能云** 通过 `BaiduAsrSession` 走 batch-style REST 流程。
+- **火山引擎** 保留已验证的 WebSocket 协议实现于 `src/asr/volcengine_asr.h`；`main.cpp` 只在外围编排 replay retry、watchdog 和 HUD 分发。
+- **Qwen ASR** 通过 `src/asr/qwen_asr.h/.cpp` 接入 DashScope `qwen3-asr-flash-realtime`。主录音链路在录音期间持续发送 PCM chunk，独立线程接收 partial/final 事件；产品层固定 Manual turn detection（`turn_detection: null`），松开后发送 `input_audio_buffer.commit` + `session.finish`。
+
+开启 `Enable VAD` 时，流式云端后端可先通过 `StreamingVadTrimmer` 做本地 VAD trim 再上传。trimmer 输出 provider-independent PCM bytes，各 provider session 再按自己的协议重新切 chunk。云端 replay buffer、自适应 finalize timeout、空 final retry 和结果分类等公共策略由 `cloud_asr_common.*` 和 `asr_result.*` 复用。
 
 ### 模型适配
 
@@ -229,7 +256,13 @@ models/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8/model.
   "llm_provider": "DeepSeek",
   "llm_providers_json": "{\"DeepSeek\":{\"endpoint\":\"https://api.deepseek.com\",\"api_key\":\"<encrypted>\",\"model\":\"deepseek-v4-flash\"}}",
   "llm_prompt": "",
-  "enable_llm_debug": false
+  "enable_llm_debug": false,
+  "asr_backend": "qwen",
+  "cloud_provider": "qwen",
+  "qwen_base_url": "wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
+  "qwen_model": "qwen3-asr-flash-realtime",
+  "qwen_language": "",
+  "qwen_chunk_ms": 100
 }
 ```
 
@@ -237,12 +270,14 @@ models/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8/model.
 - `llm_providers_json`：JSON 字符串，存储所有供应商的 endpoint、api_key（DPAPI 加密）、model。
 - `llm_prompt`：自定义 System Prompt（留空使用内置默认）。
 - `enable_llm_debug`：开启后记录 ASR 前后对比到 `log/llm_refine_YYYYMMDD.log`。
+- `asr_backend`：当前 ASR 后端（`local`、`baidu`、`volcengine` 或 `qwen`）。
+- `qwen_*`：Qwen ASR 连接、模型、语言和 chunk 配置。Turn detection 固定 Manual，不再持久化。
 
 ## 后续架构演进
 
-### 真实流式
+### 流式演进
 
-当前是“录完再识别”。要接近 macOS 参考项目的体验，需要改为：
+Qwen 和火山引擎已经支持录音期间的云端 partial HUD。本地 ASR 和百度仍是录完后 finalize。后续方向是把 streaming 能力变成明确的 session trait，减少 `main.cpp` 中的 provider-specific orchestration：
 
 ```mermaid
 flowchart LR
@@ -255,13 +290,13 @@ flowchart LR
 
 可能路线：
 
-- 继续用 offline 模型做模拟 partial。
-- 更换/新增 streaming ASR 模型。
-- worker 协议升级为 WebSocket 或长连接二进制流。
+- 继续用 offline 模型做本地模拟 partial。
+- 更换/新增 streaming 本地 ASR 模型。
+- 引入 `StreamingAsrSession` 接口，把 Qwen/火山的编排逻辑继续从 `main.cpp` 往外迁移。
 
 ### 保守纠错
 
-v0.2.0 起已接入云端 LLM 纠错（`src/llm_refine.h`）。默认关闭，需在 Settings 中将 Punctuation 设为 `Auto punctuate + LLM` 并配置供应商 API Key。
+v0.2.0 起已接入云端 LLM 纠错（`src/core/llm_refine.h`）。默认关闭，需在 Settings 中将 Punctuation 设为 `Auto punctuate + LLM` 并配置供应商 API Key。
 
 建议后续补充：
 

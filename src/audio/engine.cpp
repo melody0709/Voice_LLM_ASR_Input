@@ -3,6 +3,8 @@
 #endif
 
 #include "engine.h"
+#include "asr_streaming_session.h"
+#include "streaming_vad_trimmer.h"
 #include "utils.h"
 
 #include <algorithm>
@@ -21,7 +23,7 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "winmm.lib")
 
-static constexpr int kCurrentConfigVersion = 2;
+static constexpr int kCurrentConfigVersion = 4;
 
 bool EqualsIgnoreCase(std::wstring a, std::wstring b) {
     std::transform(a.begin(), a.end(), a.begin(), [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
@@ -375,6 +377,14 @@ void LoadConfig() {
     g_config.volcHotwordsName = Utf8ToWide(ExtractJsonString(json, "volc_hotwords_name", ""));
     g_config.volcCorrectTableId = Utf8ToWide(ExtractJsonString(json, "volc_correct_table_id", ""));
     g_config.volcCorrectTableName = Utf8ToWide(ExtractJsonString(json, "volc_correct_table_name", ""));
+    g_config.qwenApiKey = llm::DecryptString(Utf8ToWide(ExtractJsonString(json, "qwen_api_key", "")));
+    g_config.qwenBaseUrl = Utf8ToWide(ExtractJsonString(json, "qwen_base_url", WideToUtf8(g_config.qwenBaseUrl)));
+    g_config.qwenModel = Utf8ToWide(ExtractJsonString(json, "qwen_model", WideToUtf8(g_config.qwenModel)));
+    g_config.qwenLanguage = Utf8ToWide(ExtractJsonString(json, "qwen_language", ""));
+    g_config.qwenChunkMs = ExtractJsonInt(json, "qwen_chunk_ms", g_config.qwenChunkMs);
+    if (g_config.qwenBaseUrl.empty()) g_config.qwenBaseUrl = L"wss://dashscope.aliyuncs.com/api-ws/v1/realtime";
+    if (g_config.qwenModel.empty()) g_config.qwenModel = L"qwen3-asr-flash-realtime";
+    g_config.qwenChunkMs = std::clamp(g_config.qwenChunkMs, 20, 1000);
     g_config.audioBackend = Utf8ToWide(ExtractJsonString(json, "audio_backend", WideToUtf8(g_config.audioBackend)));
     g_config.audioDeviceId = Utf8ToWide(ExtractJsonString(json, "audio_device_id", ""));
     g_config.configVersion = ExtractJsonInt(json, "config_version", 0);
@@ -465,6 +475,11 @@ void SaveConfig() {
          << "  \"volc_hotwords_name\": \"" << EscapeJson(g_config.volcHotwordsName) << "\",\n"
          << "  \"volc_correct_table_id\": \"" << EscapeJson(g_config.volcCorrectTableId) << "\",\n"
          << "  \"volc_correct_table_name\": \"" << EscapeJson(g_config.volcCorrectTableName) << "\",\n"
+         << "  \"qwen_api_key\": \"" << EscapeJson(llm::EncryptString(g_config.qwenApiKey)) << "\",\n"
+         << "  \"qwen_base_url\": \"" << EscapeJson(g_config.qwenBaseUrl) << "\",\n"
+         << "  \"qwen_model\": \"" << EscapeJson(g_config.qwenModel) << "\",\n"
+         << "  \"qwen_language\": \"" << EscapeJson(g_config.qwenLanguage) << "\",\n"
+         << "  \"qwen_chunk_ms\": " << g_config.qwenChunkMs << ",\n"
          << "  \"audio_backend\": \"" << EscapeJson(g_config.audioBackend) << "\",\n"
          << "  \"audio_device_id\": \"" << EscapeJson(g_config.audioDeviceId) << "\"\n"
          << "}\n";
@@ -510,11 +525,25 @@ void CALLBACK WaveInProc(HWAVEIN waveIn, UINT msg, DWORD_PTR, DWORD_PTR param1, 
         g_audioData.insert(g_audioData.end(), begin, begin + header->dwBytesRecorded);
         LeaveCriticalSection(&g_audioLock);
 
-        if (g_volcStreaming.load()) {
-            EnterCriticalSection(&g_volcAudioCs);
-            g_volcPendingAudio.insert(g_volcPendingAudio.end(), begin, begin + header->dwBytesRecorded);
-            LeaveCriticalSection(&g_volcAudioCs);
+        std::vector<std::vector<BYTE>> streamingOutputs;
+        const bool useStreamingVadTrim = g_streamingVadTrimmer && g_streamingVadTrimmer->IsActive();
+        if (useStreamingVadTrim) {
+            g_streamingVadTrimmer->ProcessPcm16(begin, header->dwBytesRecorded, streamingOutputs);
         }
+
+        EnterCriticalSection(&g_streamingSessionCs);
+        if (g_activeStreamingSession && g_activeStreamingSession->IsRunning()) {
+            if (useStreamingVadTrim) {
+                for (const auto& chunk : streamingOutputs) {
+                    if (!chunk.empty()) {
+                        g_activeStreamingSession->EnqueuePcmChunk(chunk.data(), chunk.size());
+                    }
+                }
+            } else {
+                g_activeStreamingSession->EnqueuePcmChunk(begin, header->dwBytesRecorded);
+            }
+        }
+        LeaveCriticalSection(&g_streamingSessionCs);
     }
 
     if (g_captureActive) {

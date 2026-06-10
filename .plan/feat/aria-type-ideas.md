@@ -1,6 +1,6 @@
 # 从 AriaType 得到的改进灵感
 
-> 基于 AriaType (https://github.com/joe223/AriaType) v0.5.2 源码分析。
+> 基于 AriaType (https://github.com/joe223/AriaType)  源码分析。
 > AriaType 是 Rust/Tauri 写的桌面语音输入工具，macOS 优先，功能定位与 VoxType 高度重合。
 > 本报告已对照源码验证，修正了初版中不准确的描述。
 >
