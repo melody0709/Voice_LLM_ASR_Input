@@ -6,6 +6,7 @@
 #include "engine.h"
 #include "hotkey.h"
 #include "hud.h"
+#include "mimo_asr.h"
 #include "qwen_asr.h"
 
 #include <algorithm>
@@ -88,6 +89,33 @@ const wchar_t* QwenLanguageCodeFromIndex(int index) {
         return kQwenLanguages[index].code;
     }
     return L"";
+}
+
+struct MimoLanguageOption {
+    const wchar_t* label;
+    const wchar_t* code;
+};
+
+constexpr MimoLanguageOption kMimoLanguages[] = {
+    {L"Auto", L"auto"},
+    {L"Chinese (zh)", L"zh"},
+    {L"English (en)", L"en"},
+};
+
+int MimoLanguageIndexFromCode(const std::wstring& code) {
+    constexpr int count = static_cast<int>(sizeof(kMimoLanguages) / sizeof(kMimoLanguages[0]));
+    for (int i = 0; i < count; ++i) {
+        if (code == kMimoLanguages[i].code) return i;
+    }
+    return 0;
+}
+
+const wchar_t* MimoLanguageCodeFromIndex(int index) {
+    constexpr int count = static_cast<int>(sizeof(kMimoLanguages) / sizeof(kMimoLanguages[0]));
+    if (index >= 0 && index < count) {
+        return kMimoLanguages[index].code;
+    }
+    return mimo_asr::kDefaultLanguage;
 }
 }
 
@@ -291,6 +319,10 @@ void AddQwenControl(HWND hwnd) {
     if (hwnd) g_qwenControls.push_back(hwnd);
 }
 
+void AddMimoControl(HWND hwnd) {
+    if (hwnd) g_mimoControls.push_back(hwnd);
+}
+
 void AddVadFireredControl(HWND hwnd) {
     if (hwnd) g_vadFireredControls.push_back(hwnd);
 }
@@ -309,6 +341,7 @@ void ShowCloudSubPage(HWND hwnd, int providerIdx) {
     for (HWND c : g_baiduControls) ShowWindow(c, providerIdx == 1 ? SW_SHOW : SW_HIDE);
     for (HWND c : g_volcengineControls) ShowWindow(c, providerIdx == 0 ? SW_SHOW : SW_HIDE);
     for (HWND c : g_qwenControls) ShowWindow(c, providerIdx == 2 ? SW_SHOW : SW_HIDE);
+    for (HWND c : g_mimoControls) ShowWindow(c, providerIdx == 3 ? SW_SHOW : SW_HIDE);
 }
 
 void ShowSettingsPage(HWND hwnd, int page) {
@@ -333,6 +366,7 @@ void ShowSettingsPage(HWND hwnd, int page) {
         for (HWND c : g_baiduControls) ShowWindow(c, SW_HIDE);
         for (HWND c : g_volcengineControls) ShowWindow(c, SW_HIDE);
         for (HWND c : g_qwenControls) ShowWindow(c, SW_HIDE);
+        for (HWND c : g_mimoControls) ShowWindow(c, SW_HIDE);
     }
     InvalidateRect(hwnd, nullptr, TRUE);
 }
@@ -547,19 +581,23 @@ void LoadSettingsControls(HWND hwnd) {
     ComboBox_AddString(backendCombo, L"Volcano Engine");
     ComboBox_AddString(backendCombo, L"Baidu Cloud");
     ComboBox_AddString(backendCombo, L"Qwen ASR");
+    ComboBox_AddString(backendCombo, L"MiMo ASR");
     int backendIdx = 0;
     if (g_config.asrBackend == L"volcengine") backendIdx = 1;
     else if (g_config.asrBackend == L"baidu") backendIdx = 2;
     else if (g_config.asrBackend == L"qwen") backendIdx = 3;
+    else if (g_config.asrBackend == L"mimo") backendIdx = 4;
     ComboBox_SetCurSel(backendCombo, backendIdx);
 
     HWND cloudProviderCombo = GetDlgItem(hwnd, IDC_CLOUD_PROVIDER);
     ComboBox_AddString(cloudProviderCombo, L"Volcano Engine (Doubao)");
     ComboBox_AddString(cloudProviderCombo, L"Baidu Cloud");
     ComboBox_AddString(cloudProviderCombo, L"Qwen ASR (DashScope)");
+    ComboBox_AddString(cloudProviderCombo, L"MiMo ASR (Xiaomi)");
     int cloudIdx = 0;
     if (g_config.cloudProvider == L"baidu") cloudIdx = 1;
     else if (g_config.cloudProvider == L"qwen") cloudIdx = 2;
+    else if (g_config.cloudProvider == L"mimo") cloudIdx = 3;
     ComboBox_SetCurSel(cloudProviderCombo, cloudIdx);
     g_cloudProviderIdx = cloudIdx;
 
@@ -587,6 +625,12 @@ void LoadSettingsControls(HWND hwnd) {
     HWND qwenKeyEdit = GetDlgItem(hwnd, IDC_QWEN_API_KEY);
     if (qwenKeyEdit) SendMessageW(qwenKeyEdit, EM_SETPASSWORDCHAR, L'\u25CF', 0);
 
+    g_mimoKeyVisible = false;
+    HWND showMimoBtn = GetDlgItem(hwnd, IDC_MIMO_SHOW_KEY);
+    if (showMimoBtn) SetWindowTextW(showMimoBtn, L"Show");
+    HWND mimoKeyEdit = GetDlgItem(hwnd, IDC_MIMO_API_KEY);
+    if (mimoKeyEdit) SendMessageW(mimoKeyEdit, EM_SETPASSWORDCHAR, L'\u25CF', 0);
+
     SetWindowTextW(GetDlgItem(hwnd, IDC_BAIDU_API_KEY), g_config.baiduApiKey.c_str());
     SetWindowTextW(GetDlgItem(hwnd, IDC_BAIDU_SECRET_KEY), g_config.baiduSecretKey.c_str());
 
@@ -605,12 +649,21 @@ void LoadSettingsControls(HWND hwnd) {
     SetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_API_KEY), g_config.qwenApiKey.c_str());
     SetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_BASE_URL), g_config.qwenBaseUrl.c_str());
     SetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_MODEL), g_config.qwenModel.c_str());
+    SetWindowTextW(GetDlgItem(hwnd, IDC_MIMO_API_KEY), g_config.mimoApiKey.c_str());
+    SetWindowTextW(GetDlgItem(hwnd, IDC_MIMO_BASE_URL), g_config.mimoBaseUrl.c_str());
+    SetWindowTextW(GetDlgItem(hwnd, IDC_MIMO_MODEL), g_config.mimoModel.c_str());
 
     HWND qwenLangCombo = GetDlgItem(hwnd, IDC_QWEN_LANGUAGE);
     for (const auto& lang : kQwenLanguages) {
         ComboBox_AddString(qwenLangCombo, lang.label);
     }
     ComboBox_SetCurSel(qwenLangCombo, QwenLanguageIndexFromCode(g_config.qwenLanguage));
+
+    HWND mimoLangCombo = GetDlgItem(hwnd, IDC_MIMO_LANGUAGE);
+    for (const auto& lang : kMimoLanguages) {
+        ComboBox_AddString(mimoLangCombo, lang.label);
+    }
+    ComboBox_SetCurSel(mimoLangCombo, MimoLanguageIndexFromCode(g_config.mimoLanguage));
 
     {
         wchar_t buf[32] = {};
@@ -797,12 +850,14 @@ void SaveSettingsControls(HWND hwnd) {
         if (sel == 1) g_config.asrBackend = L"volcengine";
         else if (sel == 2) g_config.asrBackend = L"baidu";
         else if (sel == 3) g_config.asrBackend = L"qwen";
+        else if (sel == 4) g_config.asrBackend = L"mimo";
         else g_config.asrBackend = L"local";
     }
     {
         int cloudIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_CLOUD_PROVIDER));
         if (cloudIdx == 1) g_config.cloudProvider = L"baidu";
         else if (cloudIdx == 2) g_config.cloudProvider = L"qwen";
+        else if (cloudIdx == 3) g_config.cloudProvider = L"mimo";
         else g_config.cloudProvider = L"volcengine";
     }
     wchar_t baiduApiKey[256] = {};
@@ -838,6 +893,20 @@ void SaveSettingsControls(HWND hwnd) {
         wchar_t buf[32] = {};
         GetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_CHUNK_MS), buf, 32);
         g_config.qwenChunkMs = std::clamp(_wtoi(buf), 20, 1000);
+    }
+
+    wchar_t mimoApiKey[512] = {};
+    GetWindowTextW(GetDlgItem(hwnd, IDC_MIMO_API_KEY), mimoApiKey, 512);
+    g_config.mimoApiKey = mimoApiKey;
+    wchar_t mimoBaseUrl[512] = {};
+    GetWindowTextW(GetDlgItem(hwnd, IDC_MIMO_BASE_URL), mimoBaseUrl, 512);
+    g_config.mimoBaseUrl = mimoBaseUrl[0] ? mimoBaseUrl : mimo_asr::kDefaultBaseUrl;
+    wchar_t mimoModel[256] = {};
+    GetWindowTextW(GetDlgItem(hwnd, IDC_MIMO_MODEL), mimoModel, 256);
+    g_config.mimoModel = mimoModel[0] ? mimoModel : mimo_asr::kDefaultModel;
+    {
+        int langIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_MIMO_LANGUAGE));
+        g_config.mimoLanguage = MimoLanguageCodeFromIndex(langIdx);
     }
 
     {
@@ -1281,6 +1350,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         g_baiduControls.clear();
         g_volcengineControls.clear();
         g_qwenControls.clear();
+        g_mimoControls.clear();
         g_vadFireredControls.clear();
         g_vadSileroControls.clear();
 
@@ -1558,6 +1628,34 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         AddQwenControl(qwenChunkMs);
 
         AddQwenControl(CreateButton(hwnd, IDC_QWEN_TEST, S(500), S(UiStyle::RowInputY(0)), S(UiStyle::ActionBtnW), S(UiStyle::ActionBtnH), L"Test Connection"));
+
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(1)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"API Key");
+        AddMimoControl(control);
+        HWND mimoApiKey = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD,
+                                          S(UiStyle::InputLeft), S(UiStyle::RowInputY(1)), S(330), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_MIMO_API_KEY)), g_instance, nullptr);
+        ApplyUiFont(mimoApiKey);
+        AddMimoControl(mimoApiKey);
+        AddMimoControl(CreateButton(hwnd, IDC_MIMO_SHOW_KEY, S(UiStyle::SmallBtnX), S(UiStyle::RowInputY(1)) - S(1), S(UiStyle::SmallBtnW), S(UiStyle::BtnH), L"Show"));
+
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(2)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Base URL");
+        AddMimoControl(control);
+        HWND mimoBaseUrl = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", mimo_asr::kDefaultBaseUrl, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                                           S(UiStyle::InputLeft), S(UiStyle::RowInputY(2)), S(480), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_MIMO_BASE_URL)), g_instance, nullptr);
+        ApplyUiFont(mimoBaseUrl);
+        AddMimoControl(mimoBaseUrl);
+
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(3)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Model");
+        AddMimoControl(control);
+        HWND mimoModel = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", mimo_asr::kDefaultModel, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                                         S(UiStyle::InputLeft), S(UiStyle::RowInputY(3)), S(330), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_MIMO_MODEL)), g_instance, nullptr);
+        ApplyUiFont(mimoModel);
+        AddMimoControl(mimoModel);
+
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(4)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Language");
+        AddMimoControl(control);
+        AddMimoControl(CreateCombo(hwnd, IDC_MIMO_LANGUAGE, S(UiStyle::InputLeft), S(UiStyle::RowInputY(4)), S(UiStyle::ComboW), S(UiStyle::ComboH)));
+
+        AddMimoControl(CreateButton(hwnd, IDC_MIMO_TEST, S(500), S(UiStyle::RowInputY(0)), S(UiStyle::ActionBtnW), S(UiStyle::ActionBtnH), L"Test Connection"));
 
         control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(1)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"API Key (X-Api-Key)");
         AddVolcengineControl(control);
@@ -1948,6 +2046,17 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             if (btn) SetWindowTextW(btn, g_qwenKeyVisible ? L"Hide" : L"Show");
             return 0;
         }
+        case IDC_MIMO_SHOW_KEY: {
+            g_mimoKeyVisible = !g_mimoKeyVisible;
+            HWND keyEdit = GetDlgItem(hwnd, IDC_MIMO_API_KEY);
+            if (keyEdit) {
+                SendMessageW(keyEdit, EM_SETPASSWORDCHAR, g_mimoKeyVisible ? 0 : L'\u25CF', 0);
+                InvalidateRect(keyEdit, nullptr, TRUE);
+            }
+            HWND btn = GetDlgItem(hwnd, IDC_MIMO_SHOW_KEY);
+            if (btn) SetWindowTextW(btn, g_mimoKeyVisible ? L"Hide" : L"Show");
+            return 0;
+        }
         case IDC_BAIDU_TEST: {
             baidu_asr::BaiduConfig bcfg;
             wchar_t tmp[256] = {};
@@ -2031,6 +2140,27 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             SetStatus(hwnd, L"Testing Qwen ASR connection...");
             std::thread([hwnd, qcfg]() {
                 qwen_asr::TestResult result = qwen_asr::TestConnection(qcfg);
+                PostMessageW(hwnd, WM_APP + 10, result.ok ? 0 : 1,
+                    reinterpret_cast<LPARAM>(new std::wstring(result.message)));
+            }).detach();
+            return 0;
+        }
+        case IDC_MIMO_TEST: {
+            mimo_asr::MimoConfig mcfg;
+            wchar_t tmp[512] = {};
+            GetWindowTextW(GetDlgItem(hwnd, IDC_MIMO_API_KEY), tmp, 512);
+            mcfg.apiKey = tmp;
+            GetWindowTextW(GetDlgItem(hwnd, IDC_MIMO_BASE_URL), tmp, 512);
+            mcfg.baseUrl = tmp[0] ? tmp : mimo_asr::kDefaultBaseUrl;
+            wchar_t model[256] = {};
+            GetWindowTextW(GetDlgItem(hwnd, IDC_MIMO_MODEL), model, 256);
+            mcfg.model = model[0] ? model : mimo_asr::kDefaultModel;
+            int langIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_MIMO_LANGUAGE));
+            mcfg.language = MimoLanguageCodeFromIndex(langIdx);
+
+            SetStatus(hwnd, L"Testing MiMo ASR connection...");
+            std::thread([hwnd, mcfg]() {
+                mimo_asr::TestResult result = mimo_asr::TestConnection(mcfg);
                 PostMessageW(hwnd, WM_APP + 10, result.ok ? 0 : 1,
                     reinterpret_cast<LPARAM>(new std::wstring(result.message)));
             }).detach();

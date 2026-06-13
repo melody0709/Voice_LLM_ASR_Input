@@ -86,13 +86,10 @@ public:
     void Abort() override {
         abort_.store(true);
         streaming_.store(false);
-        if (auto* client = activeClient_.load()) {
-            client->Abort();
-        }
+        AbortActiveClient();
         if (worker_.joinable() && worker_.get_id() != std::this_thread::get_id()) {
             worker_.join();
         }
-        activeClient_.store(nullptr);
         running_.store(false);
     }
 
@@ -110,6 +107,25 @@ public:
     }
 
 private:
+    void SetActiveClient(qwen_asr::RealtimeClient* client) {
+        std::lock_guard<std::mutex> lock(activeClientMutex_);
+        activeClient_ = client;
+    }
+
+    void ClearActiveClient(qwen_asr::RealtimeClient* expected = nullptr) {
+        std::lock_guard<std::mutex> lock(activeClientMutex_);
+        if (!expected || activeClient_ == expected) {
+            activeClient_ = nullptr;
+        }
+    }
+
+    void AbortActiveClient() {
+        std::lock_guard<std::mutex> lock(activeClientMutex_);
+        if (activeClient_) {
+            activeClient_->Abort();
+        }
+    }
+
     void WaitForRecordingStop() {
         while (streaming_.load() && !abort_.load()) {
             Sleep(20);
@@ -128,11 +144,11 @@ private:
                 Sleep(retryDelays[(std::min)(attempt - 1, 1)]);
             }
             qwen_asr::RealtimeClient client(retryCfg);
-            activeClient_.store(&client);
+            SetActiveClient(&client);
             std::wstring error;
             if (!client.Connect(error)) {
                 client.Close();
-                activeClient_.store(nullptr);
+                ClearActiveClient(&client);
                 result.error = QwenErrorText(error);
                 result.transportError = true;
                 continue;
@@ -150,22 +166,30 @@ private:
             if (!sendOk || abort_.load()) {
                 client.Abort();
                 client.Close();
-                activeClient_.store(nullptr);
+                ClearActiveClient(&client);
                 result.error = QwenErrorText(error);
                 result.transportError = true;
                 continue;
             }
 
             std::wstring text;
+            if (abort_.load()) {
+                client.Abort();
+                client.Close();
+                ClearActiveClient(&client);
+                result.error = L"Qwen ASR error: aborted";
+                result.transportError = true;
+                return result;
+            }
             if (!client.Finish(finalTimeoutMs, text, error)) {
                 client.Close();
-                activeClient_.store(nullptr);
+                ClearActiveClient(&client);
                 result.error = QwenErrorText(error);
                 result.transportError = true;
                 continue;
             }
             client.Close();
-            activeClient_.store(nullptr);
+            ClearActiveClient(&client);
             result.text = text;
             result.transportError = false;
             return result;
@@ -180,7 +204,7 @@ private:
         const ULONGLONG tTotal0 = GetTickCount64();
         auto markStopped = [this]() {
             running_.store(false);
-            activeClient_.store(nullptr);
+            ClearActiveClient();
         };
 
         if (qcfg_.apiKey.empty()) {
@@ -198,13 +222,13 @@ private:
         constexpr int kMaxConnectAttempts = 2;
         for (int attempt = 0; attempt < kMaxConnectAttempts && !abort_.load(); ++attempt) {
             client = std::make_unique<qwen_asr::RealtimeClient>(qcfg_);
-            activeClient_.store(client.get());
+            SetActiveClient(client.get());
             if (client->Connect(error)) {
                 connected = true;
                 break;
             }
             client->Close();
-            activeClient_.store(nullptr);
+            ClearActiveClient(client.get());
             if (attempt + 1 < kMaxConnectAttempts && !abort_.load()) {
                 NotifyStatus(L"Reconnecting... Qwen ASR");
                 Sleep(500);
@@ -390,15 +414,15 @@ private:
 
         stopDrain(failed || abort_.load() || !drainSessionFinished.load());
         client->Close();
-        activeClient_.store(nullptr);
+        ClearActiveClient(client.get());
         if (abort_.load()) {
             markStopped();
             return;
         }
 
-        const bool shouldRetryEmptyFinal = !failed && finalText.empty() &&
+        const bool shouldRetryEmptyFinal = !failed && !abort_.load() && finalText.empty() &&
             replayBuffer.Available() && replayBuffer.Size() >= kQwenEmptyRetryMinBytes;
-        const bool shouldRetryFailure = failed && retryWithReplay &&
+        const bool shouldRetryFailure = failed && !abort_.load() && retryWithReplay &&
             replayBuffer.Available() && !replayBuffer.Empty();
         if (shouldRetryEmptyFinal || shouldRetryFailure) {
             NotifyStatus(L"Retrying... Qwen ASR");
@@ -431,7 +455,8 @@ private:
     std::atomic<bool> abort_{false};
     std::atomic<bool> running_{false};
     std::thread worker_;
-    std::atomic<qwen_asr::RealtimeClient*> activeClient_{nullptr};
+    std::mutex activeClientMutex_;
+    qwen_asr::RealtimeClient* activeClient_ = nullptr;
     std::atomic<double> recordingMs_{0.0};
     std::atomic<size_t> capturedPcmBytes_{0};
 };

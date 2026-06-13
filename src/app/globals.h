@@ -44,10 +44,12 @@ constexpr UINT_PTR kCapsLockLongPressTimer = 2;
 constexpr UINT_PTR kHudAnimationTimer = 3;
 constexpr UINT_PTR kStreamingWatchdogTimer = 4;
 constexpr UINT kCapsLockLongPressMs = 300;
-constexpr int kHudMinWidth = 300;
-constexpr int kHudMinHeight = 56;
-constexpr int kHudScreenMarginX = 80;
-constexpr int kHudScreenMarginY = 96;
+// HUD layout constants — all in DIP; convert to physical pixels via DipToPx().
+constexpr float kHudMinWidthDip = 300.0f;
+constexpr float kHudMinHeightDip = 56.0f;
+constexpr float kHudScreenMarginXDip = 80.0f;
+constexpr float kHudScreenMarginYDip = 96.0f;
+constexpr float kHudBottomMarginDip = 32.0f;
 constexpr float kHudLeftPad = 22.0f;
 constexpr float kHudWaveWidth = 52.0f;
 constexpr float kHudGap = 14.0f;
@@ -171,6 +173,12 @@ constexpr int IDC_QWEN_MODEL = 2083;
 constexpr int IDC_QWEN_LANGUAGE = 2084;
 constexpr int IDC_QWEN_TEST = 2085;
 constexpr int IDC_QWEN_CHUNK_MS = 2089;
+constexpr int IDC_MIMO_API_KEY = 2090;
+constexpr int IDC_MIMO_SHOW_KEY = 2091;
+constexpr int IDC_MIMO_BASE_URL = 2092;
+constexpr int IDC_MIMO_MODEL = 2093;
+constexpr int IDC_MIMO_LANGUAGE = 2094;
+constexpr int IDC_MIMO_TEST = 2095;
 
 struct Config {
     int configVersion = 0;
@@ -223,6 +231,10 @@ struct Config {
     std::wstring qwenModel = L"qwen3-asr-flash-realtime";
     std::wstring qwenLanguage;
     int qwenChunkMs = 100;
+    std::wstring mimoApiKey;
+    std::wstring mimoBaseUrl = L"https://token-plan-ams.xiaomimimo.com/v1";
+    std::wstring mimoModel = L"mimo-v2.5-asr";
+    std::wstring mimoLanguage = L"auto";
     bool enableDebugMode = false;
     bool forceUnicodeInput = false;
     std::wstring audioBackend = L"wasapi";
@@ -246,8 +258,8 @@ struct HotkeyEditState {
 };
 
 struct HudSize {
-    float widthDip = static_cast<float>(kHudMinWidth);
-    float heightDip = static_cast<float>(kHudMinHeight);
+    float widthDip = kHudMinWidthDip;
+    float heightDip = kHudMinHeightDip;
 };
 
 struct VolcMapping {
@@ -314,6 +326,7 @@ extern std::vector<HWND> g_cloudAsrControls;
 extern std::vector<HWND> g_baiduControls;
 extern std::vector<HWND> g_volcengineControls;
 extern std::vector<HWND> g_qwenControls;
+extern std::vector<HWND> g_mimoControls;
 extern std::vector<HWND> g_vadFireredControls;
 extern std::vector<HWND> g_vadSileroControls;
 extern bool g_hudIsRefining;
@@ -322,6 +335,7 @@ extern bool g_baiduKeyVisible;
 extern bool g_baiduApiKeyVisible;
 extern bool g_volcKeyVisible;
 extern bool g_qwenKeyVisible;
+extern bool g_mimoKeyVisible;
 extern std::unique_ptr<IStreamingAsrSession> g_activeStreamingSession;
 extern std::unique_ptr<StreamingVadTrimmer> g_streamingVadTrimmer;
 extern CRITICAL_SECTION g_streamingSessionCs;

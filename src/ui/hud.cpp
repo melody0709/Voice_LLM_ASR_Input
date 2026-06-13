@@ -7,9 +7,21 @@
 
 #include <algorithm>
 #include <cmath>
+#include <ShellScalingApi.h>  // GetDpiForMonitor, MDT_EFFECTIVE_DPI
 
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dwrite.lib")
+#pragma comment(lib, "shcore.lib")
+
+// Return DPI scale for a specific monitor (not tied to a window).
+static float DpiScaleForMonitor(HMONITOR monitor) {
+    UINT dpiX = 96, dpiY = 96;
+    if (monitor) {
+        // GetDpiForMonitor is Win8.1+, always available on Win11.
+        GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY);
+    }
+    return static_cast<float>(dpiX) / 96.0f;
+}
 
 void AddTrayIcon(HWND hwnd) {
     NOTIFYICONDATAW nid = {};
@@ -56,8 +68,8 @@ HudSize IdealHudSize(const std::wstring& text, const RECT& workArea, float scale
     const float textX = kHudLeftPad + kHudWaveWidth + kHudGap;
     const float workWidthDip = static_cast<float>(std::max(1L, workArea.right - workArea.left)) / scale;
     const float workHeightDip = static_cast<float>(std::max(1L, workArea.bottom - workArea.top)) / scale;
-    const float maxWidthDip = std::max(static_cast<float>(kHudMinWidth), workWidthDip - static_cast<float>(kHudScreenMarginX));
-    const float maxHeightDip = std::max(static_cast<float>(kHudMinHeight), workHeightDip - static_cast<float>(kHudScreenMarginY));
+    const float maxWidthDip = std::max(kHudMinWidthDip, workWidthDip - kHudScreenMarginXDip);
+    const float maxHeightDip = std::max(kHudMinHeightDip, workHeightDip - kHudScreenMarginYDip);
     const float maxTextWidth = maxWidthDip - textX - kHudRightPad;
     const DWRITE_TEXT_METRICS singleLineMetrics =
         MeasureHudText(text, 4096.0f, DWRITE_WORD_WRAPPING_NO_WRAP);
@@ -66,18 +78,18 @@ HudSize IdealHudSize(const std::wstring& text, const RECT& workArea, float scale
 
     if (singleLineWidthDip <= maxWidthDip) {
         return {
-            std::clamp(singleLineWidthDip, static_cast<float>(kHudMinWidth), maxWidthDip),
-            static_cast<float>(kHudMinHeight),
+            std::clamp(singleLineWidthDip, kHudMinWidthDip, maxWidthDip),
+            kHudMinHeightDip,
         };
     }
 
     const DWRITE_TEXT_METRICS metrics = MeasureHudText(text, maxTextWidth, DWRITE_WORD_WRAPPING_WRAP);
 
-    const float measuredWidthDip = std::max(static_cast<float>(kHudMinWidth), maxWidthDip);
+    const float measuredWidthDip = std::max(kHudMinWidthDip, maxWidthDip);
     const float measuredHeightDip = metrics.height + 30.0f;
     return {
-        std::clamp(measuredWidthDip, static_cast<float>(kHudMinWidth), maxWidthDip),
-        std::clamp(measuredHeightDip, static_cast<float>(kHudMinHeight), maxHeightDip),
+        std::clamp(measuredWidthDip, kHudMinWidthDip, maxWidthDip),
+        std::clamp(measuredHeightDip, kHudMinHeightDip, maxHeightDip),
     };
 }
 
@@ -98,12 +110,13 @@ void PositionHud(HWND hwnd) {
     HMONITOR monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
     MONITORINFO mi = { sizeof(mi) };
     GetMonitorInfoW(monitor, &mi);
-    const float scale = DpiScaleForWindow(hwnd);
+    const float scale = DpiScaleForMonitor(monitor);
     const HudSize hud = IdealHudSize(g_hudText, mi.rcWork, scale);
     const int width = DipToPx(hud.widthDip, scale);
     const int height = DipToPx(hud.heightDip, scale);
+    const int bottomMargin = DipToPx(kHudBottomMarginDip, scale);
     const int x = mi.rcWork.left + ((mi.rcWork.right - mi.rcWork.left) - width) / 2;
-    const int y = mi.rcWork.bottom - height - 48;
+    const int y = mi.rcWork.bottom - height - bottomMargin;
 
     if (width != s_lastWidth || height != s_lastHeight) {
         HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, height, height);
@@ -121,6 +134,14 @@ void PositionHud(HWND hwnd) {
 void ShowHud(const std::wstring& text) {
     g_hudText = text;
     if (!g_hudWindow) {
+        // Compute initial size from the cursor's current monitor DPI.
+        POINT pt;
+        GetCursorPos(&pt);
+        HMONITOR monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        const float scale = DpiScaleForMonitor(monitor);
+        const int initW = DipToPx(kHudMinWidthDip, scale);
+        const int initH = DipToPx(kHudMinHeightDip, scale);
+
         g_hudWindow = CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
             kHudClass,
@@ -128,8 +149,8 @@ void ShowHud(const std::wstring& text) {
             WS_POPUP,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            kHudMinWidth,
-            kHudMinHeight,
+            initW,
+            initH,
             nullptr,
             nullptr,
             g_instance,
@@ -225,18 +246,29 @@ bool EnsureHudRenderTarget(HWND hwnd) {
         static_cast<UINT32>(std::max(1L, rc.right - rc.left)),
         static_cast<UINT32>(std::max(1L, rc.bottom - rc.top)));
 
+    // Sync render target DPI with the window's current DPI so D2D DIP
+    // coordinates match the physical pixel layout.
+    const float dpiScale = DpiScaleForWindow(hwnd);
+    const float dpi = dpiScale * 96.0f;
+
     if (!g_hudRenderTarget) {
         const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
             D2D1_RENDER_TARGET_TYPE_DEFAULT,
-            D2D1::PixelFormat(DXGI_FORMAT_UNKNOWN, D2D1_ALPHA_MODE_IGNORE));
+            D2D1::PixelFormat(DXGI_FORMAT_UNKNOWN, D2D1_ALPHA_MODE_IGNORE),
+            dpi,
+            dpi);
         const D2D1_HWND_RENDER_TARGET_PROPERTIES hwndProps =
             D2D1::HwndRenderTargetProperties(hwnd, size, D2D1_PRESENT_OPTIONS_NONE);
         if (FAILED(g_d2dFactory->CreateHwndRenderTarget(props, hwndProps, &g_hudRenderTarget))) {
             return false;
         }
-    } else if (g_hudRenderTarget->GetPixelSize().width != size.width ||
-               g_hudRenderTarget->GetPixelSize().height != size.height) {
-        g_hudRenderTarget->Resize(size);
+    } else {
+        if (g_hudRenderTarget->GetPixelSize().width != size.width ||
+            g_hudRenderTarget->GetPixelSize().height != size.height) {
+            g_hudRenderTarget->Resize(size);
+        }
+        // Keep DPI in sync — critical when the window moves between monitors.
+        g_hudRenderTarget->SetDpi(dpi, dpi);
     }
 
     if (!g_hudBrush && g_hudRenderTarget) {
@@ -380,6 +412,13 @@ LRESULT CALLBACK HudWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return 0;
     case WM_ERASEBKGND:
         return 1;
+    case WM_DPICHANGED: {
+        // Window DPI changed (e.g. moved to a different-DPI monitor).
+        // Re-apply our own layout logic (PositionHud uses monitor DPI directly).
+        PositionHud(hwnd);
+        InvalidateRect(hwnd, nullptr, TRUE);
+        return 0;
+    }
     case WM_SIZE:
         if (g_hudRenderTarget) {
             const UINT width = LOWORD(lParam);

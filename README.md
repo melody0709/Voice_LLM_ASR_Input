@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  Current version: <code>v0.9.1</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
+  Current version: <code>v0.9.2</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -31,7 +31,7 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 - **Real-time HUD** — Bottom floating capsule window during recording, 5 volume bars responding to sound
 - **Dual VAD Options** — Silero VAD (lightweight) / FireRed VAD (high precision F1 97.57), intelligently skips silence
 - **LLM Correction (Optional)** — Supports DeepSeek / OpenRouter / SiliconFlow and other providers, one-click configuration
-- **Cloud ASR (Optional)** — Supports Volcano Engine (Doubao), Baidu Cloud, and Qwen ASR (`qwen3-asr-flash-realtime`) as alternative backends
+- **Cloud ASR (Optional)** — Supports Volcano Engine (Doubao), Baidu Cloud, Qwen ASR (`qwen3-asr-flash-realtime`), and Xiaomi MiMo ASR (`mimo-v2.5-asr`) as alternative backends
 
 ## Quick Start
 
@@ -67,7 +67,7 @@ Right-click the tray icon to open Settings, hold the hotkey to start recording, 
 <summary><strong>Settings Guide</strong></summary>
 
 **Recognition tab**
-- `ASR Backend` — Select between `Local (sherpa-onnx)`, `Volcano Engine`, `Baidu Cloud`, and `Qwen ASR`
+- `ASR Backend` — Select between `Local (sherpa-onnx)`, `Volcano Engine`, `Baidu Cloud`, `Qwen ASR`, and `MiMo ASR`
 - `ASR model` — Speech recognition model (only for Local backend):
   - `FireRedASR2 CTC` — Fast, suitable for daily input
   - `FireRedASR2 AED` — Better quality, more accurate for long sentences
@@ -100,7 +100,7 @@ Right-click the tray icon to open Settings, hold the hotkey to start recording, 
 - `Basic Fix` / `Deep Fix` — Preset buttons, one-click fill for different correction intensity System Prompts
 
 **Cloud ASR tab**
-- `Provider` — Select between `Volcano Engine (Doubao)`, `Baidu Cloud`, and `Qwen ASR (DashScope)`, controls below update dynamically
+- `Provider` — Select between `Volcano Engine (Doubao)`, `Baidu Cloud`, `Qwen ASR (DashScope)`, and `MiMo ASR (Xiaomi)`, controls below update dynamically
 - **Baidu Cloud**: `API Key` / `Secret Key` (DPAPI encrypted) + `Language Model` (Mandarin/English/Cantonese/Sichuanese) + `Test Connection`
 - **Volcano Engine (Doubao)**: `API Key` (DPAPI encrypted) + `ASR Mode` + `Model Version` + `Language` + `Test Connection`
   - ASR Mode: `bigmodel_nostream` (recommended, highest accuracy) / `bigmodel_async` (best latency) / `bigmodel` (real-time partial)
@@ -111,7 +111,10 @@ Right-click the tray icon to open Settings, hold the hotkey to start recording, 
 - **Qwen ASR (DashScope)**: `API Key` (DPAPI encrypted) + `Base URL` + `Model` + `Language` + `Chunk ms` + `Test Connection`
   - Default model: `qwen3-asr-flash-realtime`
   - Turn detection is fixed to Manual for push-to-talk usage; Server VAD settings are intentionally hidden
-- Cloud ASR backends handle recognition remotely; when VAD is enabled, streaming cloud backends can use local VAD trim before upload. Local punctuation models are still bypassed for cloud backends
+- **MiMo ASR (Xiaomi)**: `API Key` (DPAPI encrypted) + `Base URL` + `Model` + `Language` + `Test Connection`
+  - Default Base URL: `https://token-plan-ams.xiaomimimo.com/v1`
+  - Default model: `mimo-v2.5-asr`; audio is uploaded as WAV via `/chat/completions`
+- Cloud ASR backends handle recognition remotely; when VAD is enabled, streaming cloud backends use local streaming VAD trim and batch cloud backends use batch VAD trim before upload. Local punctuation models are still bypassed for cloud backends
 
 </details>
 
@@ -170,7 +173,7 @@ CHANGELOG.md        — Version change log
 <details>
 <summary><strong>Known Limitations</strong></summary>
 
-- Local and Baidu results are finalized after recording; Qwen and Volcano Engine can show partial HUD during recording, with final text pasted after release
+- Local, Baidu, and MiMo results are finalized after recording; Qwen and Volcano Engine can show partial HUD during recording, with final text pasted after release
 - Text injection primarily via clipboard + Ctrl+V, admin privilege windows may block
 - Model files are large (~3GB), first load takes a few seconds
 
@@ -182,7 +185,8 @@ CHANGELOG.md        — Version change log
 See [CHANGELOG.md](CHANGELOG.md)
 
 **Recent Updates:**
-- **v0.9.1** — Cloud ASR architecture stabilization: Qwen/Volcengine streaming sessions, shared streaming/batch VAD trim core, Baidu same-PCM retry and token refresh retry, source tree reorganization, Volcengine flow parity review
+- **v0.9.2** — HUD DPI-aware rendering, Volcengine/Qwen WebSocket double-close and data-race fixes, Qwen activeClient UAF fix, retry abort checks
+- **v0.9.1** — Cloud ASR architecture stabilization, Xiaomi MiMo ASR (`mimo-v2.5-asr`) backend, Qwen/Volcengine streaming sessions, shared streaming/batch VAD trim core, Baidu same-PCM retry and token refresh retry, source tree reorganization
 - **v0.9.0** — Qwen ASR (`qwen3-asr-flash-realtime`) backend, true streaming send with partial HUD, Manual turn detection by default, Qwen watchdog/replay retry, shared ASR session/dispatcher/result architecture
 - **v0.8.7** — Volcengine retry recognition: connection-loss audio buffering + full-PCM retry, adaptive finalize timeout, unified ASR error classification, no-text close handling
 - **v0.8.6** — Volcengine connection reuse optimization (fast consecutive recording latency reduced from ~1.8s to ~0.4s), 3s expiry detection + hSession connection pool cleanup, time-gated internal retry, progressive external retry
@@ -222,3 +226,4 @@ See [CHANGELOG.md](CHANGELOG.md)
 - [Baidu Intelligent Cloud](https://ai.baidu.com/tech/speech/asr) — Baidu Cloud ASR API
 - [Volcengine Speech](https://www.volcengine.com/docs/6561/1354869) — Volcengine (豆包) streaming ASR API
 - [Alibaba Cloud Model Studio Qwen ASR](https://help.aliyun.com/zh/model-studio/qwen-asr-realtime-interaction-process) — Qwen ASR realtime API
+- [Xiaomi MiMo](https://platform.xiaomimimo.com/docs/zh-CN/usage-guide/Speech-Recognition) — MiMo ASR API

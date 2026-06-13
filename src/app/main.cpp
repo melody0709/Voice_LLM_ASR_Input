@@ -89,6 +89,7 @@ std::vector<HWND> g_cloudAsrControls;
 std::vector<HWND> g_baiduControls;
 std::vector<HWND> g_volcengineControls;
 std::vector<HWND> g_qwenControls;
+std::vector<HWND> g_mimoControls;
 std::vector<HWND> g_vadFireredControls;
 std::vector<HWND> g_vadSileroControls;
 bool g_hudIsRefining = false;
@@ -97,6 +98,7 @@ bool g_baiduKeyVisible = false;
 bool g_baiduApiKeyVisible = false;
 bool g_volcKeyVisible = false;
 bool g_qwenKeyVisible = false;
+bool g_mimoKeyVisible = false;
 std::unique_ptr<IStreamingAsrSession> g_activeStreamingSession;
 std::unique_ptr<StreamingVadTrimmer> g_streamingVadTrimmer;
 CRITICAL_SECTION g_streamingSessionCs;
@@ -224,7 +226,8 @@ static void DebugPrintCloudVadTrim() {
         return;
     }
 
-    if (g_config.asrBackend == L"baidu" && g_vadMs > 0 && g_vadTrimmedSamples > 0) {
+    if ((g_config.asrBackend == L"baidu" || g_config.asrBackend == L"mimo") &&
+        g_vadMs > 0 && g_vadTrimmedSamples > 0) {
         size_t rawBytes = g_lastPcmBytes > 0 ? g_lastPcmBytes
             : static_cast<size_t>(g_recordingMs * 32.0);
         DebugPrintVadTrimLine(rawBytes, g_vadTrimmedSamples);
@@ -281,7 +284,8 @@ void RecognizeAsync(const std::vector<BYTE>& pcm) {
     const Config config = g_config;
 
     std::vector<float> localStreamingVadSamples;
-    if (config.asrBackend != L"baidu" && config.asrBackend != L"volcengine" && config.asrBackend != L"qwen") {
+    if (config.asrBackend != L"baidu" && config.asrBackend != L"volcengine" &&
+        config.asrBackend != L"qwen" && config.asrBackend != L"mimo") {
         localStreamingVadSamples = std::move(g_streamingVadSamples);
         g_streamingVadSamples.clear();
     }
@@ -301,7 +305,8 @@ void RecognizeAsync(const std::vector<BYTE>& pcm) {
 
         g_lastPcmBytes = result.pcmBytes;
         if (result.backend == AsrSessionBackend::BaiduBatch ||
-            result.backend == AsrSessionBackend::QwenRealtimeBatch) {
+            result.backend == AsrSessionBackend::QwenRealtimeBatch ||
+            result.backend == AsrSessionBackend::MimoBatch) {
             g_cloudApiMs = result.cloudApiMs;
         }
         if (config.enableDebugMode && result.vadTrimmedSamples > 0) {
@@ -475,7 +480,8 @@ void StartRecordingSession() {
     g_streamingVadReady = false;
     g_streamingVadSamples.clear();
     if (g_config.asrBackend != L"baidu" && g_config.asrBackend != L"volcengine" &&
-        g_config.asrBackend != L"qwen" && g_config.enableVad) {
+        g_config.asrBackend != L"qwen" && g_config.asrBackend != L"mimo" &&
+        g_config.enableVad) {
         const int threads = ResolveThreads(g_config.threads);
         g_asrEngine.Lock();
         bool ok = g_asrEngine.EnsureVadForConfig(g_config, threads);

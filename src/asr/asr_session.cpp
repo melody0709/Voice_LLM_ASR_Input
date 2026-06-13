@@ -5,9 +5,11 @@
 #include "batch_vad_trimmer.h"
 #include "cloud_asr_common.h"
 #include "engine.h"
+#include "mimo_asr.h"
 #include "qwen_asr.h"
 
 #include <cstdint>
+#include <cstdio>
 #include <utility>
 
 namespace {
@@ -161,6 +163,66 @@ private:
     Config config_;
 };
 
+class MimoAsrSession final : public BatchAsrSessionBase {
+public:
+    MimoAsrSession(Config config, AsrEngine& engine)
+        : config_(std::move(config)),
+          engine_(engine) {}
+
+    AsrSessionResult Finish() override {
+        AsrSessionResult result;
+        result.backend = AsrSessionBackend::MimoBatch;
+        result.providerName = AsrBackendDisplayName(config_);
+        result.pcmBytes = pcm_.size();
+
+        if (aborted_) {
+            result.text = L"MiMo ASR error: aborted";
+            return result;
+        }
+
+        if (config_.mimoApiKey.empty()) {
+            result.text = L"MiMo ASR error: missing API key";
+            return result;
+        }
+
+        std::vector<BYTE> uploadPcm = pcm_;
+        if (config_.enableVad) {
+            BatchVadTrimResult vad = TrimBatchPcm16WithVad(config_, engine_, pcm_);
+            if (vad.active) {
+                result.vadMs = vad.elapsedMs;
+                result.vadModelName = vad.modelName;
+                if (!vad.detectedSpeech || vad.pcm.empty()) {
+                    result.text = L"";
+                    return result;
+                }
+                result.vadTrimmedSamples = vad.pcm.size() / sizeof(int16_t);
+                uploadPcm = std::move(vad.pcm);
+            } else if (config_.enableDebugMode && !vad.error.empty()) {
+                printf("[MiMo diag] VAD trim disabled: %ls\n", vad.error.c_str());
+            }
+        }
+
+        mimo_asr::MimoConfig mcfg;
+        mcfg.apiKey = config_.mimoApiKey;
+        mcfg.baseUrl = config_.mimoBaseUrl;
+        mcfg.model = config_.mimoModel;
+        mcfg.language = config_.mimoLanguage;
+
+        HiResTimer timer;
+        result.text = NormalizeAsrText(mimo_asr::Recognize(uploadPcm, mcfg));
+        result.cloudApiMs = timer.ElapsedMs();
+        return result;
+    }
+
+    const wchar_t* ProviderName() const override {
+        return L"MiMo ASR";
+    }
+
+private:
+    Config config_;
+    AsrEngine& engine_;
+};
+
 } // namespace
 
 bool BatchAsrSessionBase::Start(std::wstring& error) {
@@ -194,6 +256,9 @@ std::unique_ptr<IAsrSession> CreateBatchAsrSession(
     }
     if (config.asrBackend == L"qwen") {
         return std::make_unique<QwenAsrSession>(config);
+    }
+    if (config.asrBackend == L"mimo") {
+        return std::make_unique<MimoAsrSession>(config, localEngine);
     }
 
     return std::make_unique<LocalAsrSession>(

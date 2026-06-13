@@ -2,12 +2,24 @@
 
 > 🇨🇳 [中文版](doc/CHANGELOG_zh.md)
 
+## v0.9.2 (2026-06-13)
+
+### Fixed
+
+- **HUD DPI-aware rendering**: HUD constants renamed to `*Dip` suffix with `float` type for clear DIP semantics. `PositionHud()` now uses `GetDpiForMonitor()` instead of `DpiScaleForWindow()` to correctly size on the target monitor. Bottom margin converted from hardcoded `48px` to `DipToPx(kHudBottomMarginDip, scale)`. `CreateWindowExW` initial size uses monitor DPI. `WM_DPICHANGED` handler added to re-layout on DPI change. D2D render target DPI synced via `SetDpi()` on creation and before each draw.
+- **Volcengine WebSocket double-close race**: Added `AtomicTakeWebSocket()` using `InterlockedExchangePointer` to atomically take ownership of `g_volcSession.hWebSocket`. All close sites (Abort, VAD no-speech, async drain) now use this function, ensuring only one thread closes the handle.
+- **Volcengine `asyncPartial` data race**: Added `std::mutex asyncMutex` to protect `asyncPartial` reads/writes across worker and drainThread. Comparison and assignment are now in the same `lock_guard` scope.
+- **Qwen `activeClient_` UAF and handle double-close**: Replaced `std::atomic<RealtimeClient*>` with mutex-protected `SetActiveClient/ClearActiveClient/AbortActiveClient` helpers, ensuring the UI thread's `Abort()` call never races with worker's client destruction. `QwenConnection::hWebSocket` changed to `std::atomic<HINTERNET>` with `TakeWebSocket()` for single-owner close. `connected` changed to `std::atomic<bool>`.
+- **Retry path abort check**: Both Qwen and Volcengine retry conditions now check `abort_.load()` before entering potentially long-blocking retry attempts. Qwen `RetryRecognitionOnce` also checks `abort_` before `client.Finish()`.
+- **`mimo_asr.cpp/.h` missing from git**: Added previously untracked files to version control.
+
 ## v0.9.1 (2026-06-10)
 
 ### Changed
 
+- **MiMo ASR backend**: Added Xiaomi MiMo ASR (`mimo-v2.5-asr`) as a batch cloud backend. PCM is wrapped as WAV and sent to the OpenAI-compatible `/chat/completions` endpoint, with default Token Plan Base URL `https://token-plan-ams.xiaomimimo.com/v1`.
 - **Cloud ASR architecture stabilized**: Moved Qwen and Volcengine streaming orchestration behind `IStreamingAsrSession`, with shared status/partial/final dispatch helpers.
-- **Shared VAD trim pipeline**: Added common streaming/batch VAD trim core so Qwen, Volcengine, and Baidu can reuse the same head/tail silence trimming behavior while preserving middle pauses.
+- **Shared VAD trim pipeline**: Added common streaming/batch VAD trim core so Qwen, Volcengine, Baidu, and MiMo can reuse the same head/tail silence trimming behavior while preserving middle pauses.
 - **Volcengine refactor parity review**: Verified the Volcengine protocol layer is unchanged and the refactored outer flow preserves three modes, final drain, empty-final retry, watchdog timeout text, and prewarm/reuse lifecycle.
 - **Baidu retry hardening**: Added same-PCM retry for transient failures and token refresh retry for auth/token errors.
 - **Source tree organization**: Grouped source files under `src/app`, `src/asr`, `src/audio`, `src/ui`, and `src/core`, and refreshed architecture/review documentation.

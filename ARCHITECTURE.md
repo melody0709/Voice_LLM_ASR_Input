@@ -11,7 +11,7 @@ flowchart LR
     User["User holds hotkey"] --> Frontend["VoxType.exe<br/>Win32 tray frontend"]
     Frontend --> Recorder["WASAPI recording<br/>48kHz→16kHz resample"]
     Recorder --> Engine["AsrEngine (C++)<br/>sherpa-onnx-cxx-api"]
-    Recorder --> Cloud["Cloud ASR worker<br/>Volcengine / Baidu / Qwen"]
+    Recorder --> Cloud["Cloud ASR worker<br/>Volcengine / Baidu / Qwen / MiMo"]
     Engine --> VAD["VAD<br/>Silero / FireRed"]
     VAD --> ASR["sherpa-onnx ASR<br/>FireRed/SenseVoice"]
     ASR --> Punct["CT-Transformer punctuation"]
@@ -32,7 +32,7 @@ Single process. Responsibilities:
 - Listen for global hotkeys.
 - Capture microphone audio.
 - Call sherpa-onnx C++ API directly via `AsrEngine` for local VAD, ASR, and punctuation.
-- Optionally route audio to cloud ASR backends: Baidu, Volcengine, or Qwen ASR.
+- Optionally route audio to cloud ASR backends: Baidu, Volcengine, Qwen ASR, or MiMo ASR.
 - Inject final text into the current application.
 
 `AsrEngine` internally caches `OfflineRecognizer`, `VoiceActivityDetector`, and `OfflinePunctuation`. The same model is not loaded repeatedly.
@@ -54,7 +54,7 @@ Since v0.6.0, the source code is organized into multiple modules. Current source
 | `src/app/globals.h` | Shared constants, control IDs, struct definitions, extern global variable declarations |
 | `src/audio/engine.h` / `src/audio/engine.cpp` | Backend: string/path utilities, JSON config persistence, audio capture, `AsrEngine` class, `PreloadAsrEngine()` |
 | `src/audio/streaming_vad_trimmer.h` / `src/audio/streaming_vad_trimmer.cpp` | Provider-independent streaming PCM VAD trim for cloud ASR sessions |
-| `src/asr/asr_session.h` / `src/asr/asr_session.cpp` | Batch ASR session abstraction for local, Baidu, and Qwen fallback paths |
+| `src/asr/asr_session.h` / `src/asr/asr_session.cpp` | Batch ASR session abstraction for local, Baidu, MiMo, and Qwen fallback paths |
 | `src/asr/asr_result.h` / `src/asr/asr_result.cpp` | ASR text normalization, error classification, backend display/debug names |
 | `src/asr/asr_dispatcher.h` / `src/asr/asr_dispatcher.cpp` | Final ASR result dispatch, LLM gate, raw ASR tracking |
 | `src/asr/cloud_asr_common.h` / `src/asr/cloud_asr_common.cpp` | Cloud replay buffer, adaptive finalize timeout, empty-final retry helpers |
@@ -66,6 +66,7 @@ Since v0.6.0, the source code is organized into multiple modules. Current source
 | `src/asr/baidu_asr.h` | Baidu Cloud ASR module (header-only) |
 | `src/asr/volcengine_asr.h` | Volcengine (豆包) ASR module (header-only, WebSocket) |
 | `src/asr/qwen_asr.h` / `src/asr/qwen_asr.cpp` | Qwen ASR realtime WebSocket client |
+| `src/asr/mimo_asr.h` / `src/asr/mimo_asr.cpp` | Xiaomi MiMo ASR batch client (`mimo-v2.5-asr`, WAV upload over `/chat/completions`) |
 | `src/audio/firered_vad.h` | FireRed VAD module (header-only) |
 | `src/core/input_context.h` | Input field context reading module (header-only, UIA/MSAA/WM_GETTEXT layered fallback) |
 | `src/core/utils.h` | Shared utility functions (WideToUtf8, Utf8ToWide, EscapeJson, Trim) |
@@ -101,7 +102,7 @@ Settings is a standard Win32 window with 4 tabs:
 - `Recognition`: ASR Backend, model, model directory, threads, VAD, VAD model, Punctuation, hotkey config.
 - `LLM`: Provider selection (Provider dropdown + [+] / [−]), API Base URL, API Key, Model, Test Connection, Debug log, Extra Params.
 - `LLM Prompt`: System Prompt editor (multi-line), Basic Fix / Deep Fix preset buttons.
-- `Cloud ASR`: Cloud provider selection and Baidu/Volcengine/Qwen provider-specific fields.
+- `Cloud ASR`: Cloud provider selection and Baidu/Volcengine/Qwen/MiMo provider-specific fields.
 
 When Settings is opened:
 
@@ -199,8 +200,9 @@ Cloud backends are optional. Recognition runs remotely, and local punctuation is
 - **Baidu Cloud** uses a batch-style REST flow through `BaiduAsrSession`.
 - **Volcengine** keeps its proven WebSocket protocol implementation in `src/asr/volcengine_asr.h`; `main.cpp` only wraps orchestration, replay retry, watchdog, and HUD dispatch around it.
 - **Qwen ASR** uses DashScope `qwen3-asr-flash-realtime` through `src/asr/qwen_asr.h/.cpp`. The main recording path sends PCM chunks while recording, drains partial/final events on a separate thread, uses Manual turn detection (`turn_detection: null`), and sends `input_audio_buffer.commit` + `session.finish` after release.
+- **MiMo ASR** uses Xiaomi MiMo `mimo-v2.5-asr` through `src/asr/mimo_asr.h/.cpp`. It is a batch cloud backend: captured 16k/16-bit/mono PCM is optionally VAD-trimmed, wrapped as WAV, base64 encoded as `data:audio/wav;base64,...`, and posted to `{baseUrl}/chat/completions`.
 
-When `Enable VAD` is on, streaming cloud backends can run audio through `StreamingVadTrimmer` before upload. The trimmer emits provider-independent PCM bytes; each provider session re-chunks them for its own protocol. Common cloud behavior such as replay buffer, adaptive finalize timeout, empty final retry, and result classification is shared through `cloud_asr_common.*` and `asr_result.*`.
+When `Enable VAD` is on, streaming cloud backends run audio through `StreamingVadTrimmer` before upload, while batch cloud backends use `BatchVadTrimmer` after recording and before the request. Both share `VadTrimCore`, trimming head/tail silence while preserving middle pauses. Common cloud behavior such as replay buffer, adaptive finalize timeout, empty final retry, and result classification is shared through `cloud_asr_common.*` and `asr_result.*` where applicable.
 
 ### Model Adaptation
 
@@ -257,12 +259,15 @@ Current structure is a flat JSON:
   "llm_providers_json": "{\"DeepSeek\":{\"endpoint\":\"https://api.deepseek.com\",\"api_key\":\"<encrypted>\",\"model\":\"deepseek-v4-flash\"}}",
   "llm_prompt": "",
   "enable_llm_debug": false,
-  "asr_backend": "qwen",
-  "cloud_provider": "qwen",
+  "asr_backend": "mimo",
+  "cloud_provider": "mimo",
   "qwen_base_url": "wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
   "qwen_model": "qwen3-asr-flash-realtime",
   "qwen_language": "",
-  "qwen_chunk_ms": 100
+  "qwen_chunk_ms": 100,
+  "mimo_base_url": "https://token-plan-ams.xiaomimimo.com/v1",
+  "mimo_model": "mimo-v2.5-asr",
+  "mimo_language": "auto"
 }
 ```
 
@@ -270,14 +275,15 @@ Current structure is a flat JSON:
 - `llm_providers_json`: JSON string storing all providers' endpoint, api_key (DPAPI encrypted), and model.
 - `llm_prompt`: Custom System Prompt (leave empty to use built-in default).
 - `enable_llm_debug`: When enabled, records before/after ASR comparison to `log/llm_refine_YYYYMMDD.log`.
-- `asr_backend`: Active ASR backend (`local`, `baidu`, `volcengine`, or `qwen`).
+- `asr_backend`: Active ASR backend (`local`, `baidu`, `volcengine`, `qwen`, or `mimo`).
 - `qwen_*`: Qwen ASR connection/model/language/chunk settings. Turn detection is fixed to Manual and is not persisted.
+- `mimo_*`: Xiaomi MiMo ASR API key, OpenAI-compatible Base URL, model, and language (`auto`, `zh`, `en`). The API key is DPAPI-encrypted in `mimo_api_key`.
 
 ## Future Architecture Evolution
 
 ### Streaming Evolution
 
-Qwen and Volcengine already support cloud partial HUD while recording. Local ASR and Baidu still use a record-then-finalize flow. The future direction is to make streaming capability a first-class session trait instead of keeping provider-specific orchestration in `main.cpp`:
+Qwen and Volcengine already support cloud partial HUD while recording. Local ASR, Baidu, and MiMo still use a record-then-finalize flow. The future direction is to make streaming capability a first-class session trait instead of keeping provider-specific orchestration in `main.cpp`:
 
 ```mermaid
 flowchart LR

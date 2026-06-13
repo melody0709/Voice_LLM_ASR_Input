@@ -3,7 +3,7 @@
 
 ## 项目概要
 
-Windows 11  语音输入法工具：托盘常驻，按住快捷键录音松开识别，本地 ASR（sherpa-onnx），可选云端 ASR（百度/火山引擎）和 LLM 纠错。
+Windows 11  语音输入法工具：托盘常驻，按住快捷键录音松开识别，本地 ASR（sherpa-onnx），可选云端 ASR（百度/火山引擎/Qwen）和 LLM 纠错。
 
 ## 构建
 
@@ -28,6 +28,16 @@ Windows 11  语音输入法工具：托盘常驻，按住快捷键录音松开�
 - DLL 延迟加载：`onnxruntime.dll`、`sherpa-onnx-cxx-api.dll`、`kaldi-native-fbank-core.dll` 通过 `/DELAYLOAD` 延迟加载，纯云端模式空闲 ~12 MB。`TryLoadAsrDlls()` 用 SEH 安全检测。
 - 本地模式启动时 `PreloadAsrEngine()` 后台线程预加载模型，Save 后 Reload + 预加载。
 
+## 新增云端 ASR 接入规则
+
+- 先判断新后端是 batch 还是 streaming，不要直接在 `src/app/main.cpp` 写大段 provider 逻辑。
+- Batch 后端优先走 `IAsrSession` / `BatchAsrSessionBase`；streaming 后端优先走 `IStreamingAsrSession` / `StreamingAsrSessionBase`。
+- 复用已有公共层：`asr_dispatcher` / `asr_result` / `cloud_http_common` / `cloud_asr_common` / `PendingPcmBuffer` / VAD trimmer。只有 provider 协议差异留在各自 client/session 内。
+- 音频回调只做轻量采集、可选 VAD trim、`EnqueuePcmChunk()`；不要在 WASAPI/waveIn 回调里做网络请求或 provider 协议逻辑。
+- Streaming 停止录音用 `StopInput()` 通知 session，不要让 `StopRecordingSession()` 同步等待云端 final。
+- 新 provider 如果有跨录音 session 的连接预热/复用句柄，先保留清晰生命周期，不要强行收进单次录音 session。
+- Settings 新增配置项仍必须同步三处：`src/app/globals.h` Config 字段 + `src/audio/engine.cpp` LoadConfig/SaveConfig + `src/ui/settings.cpp` UI 控件。
+
 ## 不要轻易做的事
 
 - 不要把 LLM 接成默认纠错，容易乱改用户意思。
@@ -38,6 +48,8 @@ Windows 11  语音输入法工具：托盘常驻，按住快捷键录音松开�
 - 不要混淆 `src/asr/volcengine_asr.h` 的 `ExtractJsonStr`（无转义）和 `src/audio/engine.cpp` 的 `ExtractJsonString`（支持转义）。
 - 不要在火山引擎 `bigmodel_nostream` 模式下对中间 chunk 调用 `ReceiveResult`——服务器返回空文本，浪费时间。
 - 不要在 Extra Params 和代码生成的 `corpus` 中同时写 `corpus`——代码已跳过 Extra Params 中的 `corpus` key，手动编辑 config 需注意。
+- 不要新增云端 ASR 时绕过 `IAsrSession` / `IStreamingAsrSession`，否则 `main.cpp` 会重新膨胀。
+- 不要把 Qwen / 火山 / 未来 streaming provider 的 send loop、drain thread、retry 强行做成一个复杂模板；公共层负责生命周期和通用策略，协议差异留在各自 session/client 内。
 
 ## 踩坑规则
 
@@ -46,9 +58,14 @@ Windows 11  语音输入法工具：托盘常驻，按住快捷键录音松开�
 - CapsLock 热键：短按必须补发 `CapsLock` 保持系统切换，长按录音结束后必须恢复原 Caps Lock 状态。
 - HUD 尺寸：DirectWrite 测量 DIP，`SetWindowPos` 用物理像素，高 DPI 需显式换算。
 - FireRedVAD：fbank 期望 int16 范围（-32768~32767），不是归一化 float，传入前必须乘 32768。
+- 公共 VAD trim 只裁剪头尾静音，不能裁掉中间停顿；`VadTrimCore::ProcessChunk()` 是追加输出语义，调用方要自己清空/使用局部 `outputs`。
+- Streaming VAD 的 no-speech 判断用 `StreamingVadTrimmer::DetectedSpeech()`，不要重新引入 provider 专属 `g_xxxVadState`。
 - `ExtractJsonStr` 处理 `\\"` 时不能只看前一个字符，必须统计连续反斜杠数量——偶数个后的 `"` 是结束符。
 - 火山引擎 WebSocket `connected` 必须用 `std::atomic<bool>`，不能用 `volatile bool`。
 - 火山引擎 `context` 字段值必须是 JSON 字符串（内部引号转义），不能是原始 JSON 对象。
+- 火山引擎 `volcengine_asr.h` 协议层可后续机械拆薄，但不要在无测试覆盖时重写 frame 编解码、三模式 send/drain、`PrewarmConnection()` / `CloseSession()` 行为。
+- 火山引擎 `g_volcSession` 仍保留全局是为了 `hSession/hConnect` 跨录音 session 复用；不要轻易改成单次录音 session 成员，否则 Settings 保存后的预热连接会失效。
+- 百度 ASR transient 失败应重发同一段 PCM；token/auth 错误应清 token 后刷新重试，避免用户必须重新说第二遍。
 - WASAPI 生命周期必须是 `Init → Start → Stop → Release`，`Stop()` 只停线程不清资源，没有 `Release()` 第二次录音会卡死。`Init()` 成功但 `Start()` 失败时也必须 `Release()`。
 - WASAPI 重采样相位更新必须用 `m_resamplePhase -= written / m_resampleRatio`（实际消耗的源样本数），不能用 `m_resamplePhase -= numFrames`（输入帧数），否则非整数采样率比会越界。
 - **微信粘贴**：微信（`Weixin.exe`）用自定义 Qt 控件，`GetFocus()` 返回 NULL 且 IME 拦截 Ctrl+V。必须用 `WM_CHAR` 逐字符发送，不能用剪贴板+Ctrl+V。其他应用用剪贴板+Ctrl+V+IMM32 切换。

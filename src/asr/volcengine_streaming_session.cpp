@@ -67,6 +67,16 @@ void CloseVolcSessionHandles(volc_asr::VolcSession& sess) {
     sess.connected = false;
 }
 
+// Atomically take ownership of g_volcSession.hWebSocket, setting it to nullptr.
+// Only the caller that gets a non-null return value may close the handle.
+// This prevents double-close when Abort() and the worker/drain threads race.
+static HINTERNET AtomicTakeWebSocket() {
+    return static_cast<HINTERNET>(
+        InterlockedExchangePointer(
+            reinterpret_cast<void* volatile*>(&g_volcSession.hWebSocket),
+            nullptr));
+}
+
 struct VolcRetryResult {
     std::wstring text;
     bool closedWithoutText = false;
@@ -116,10 +126,10 @@ public:
         abort_.store(true);
         streaming_.store(false);
         g_volcSession.forceAbort = true;
-        if (g_volcSession.hWebSocket) {
-            WinHttpCloseHandle(g_volcSession.hWebSocket);
-            g_volcSession.hWebSocket = nullptr;
-        }
+        // Atomically take and close the WebSocket handle to unblock any
+        // pending WinHTTP operations in the worker / drain threads.
+        HINTERNET ws = AtomicTakeWebSocket();
+        if (ws) WinHttpCloseHandle(ws);
         if (worker_.joinable() && worker_.get_id() != std::this_thread::get_id()) {
             worker_.join();
         }
@@ -374,6 +384,7 @@ private:
 
         std::wstring lastPartial;
         std::wstring asyncPartial;
+        std::mutex asyncMutex;  // protects asyncPartial across worker/drainThread
         std::atomic<bool> asyncDrainDone{false};
         std::atomic<bool> drainFinalDone{false};
         std::thread drainThread;
@@ -383,9 +394,16 @@ private:
                 VolcDebugLog("drainThread: started (async=%d nostream=%d)", asyncMode ? 1 : 0, nostreamMode ? 1 : 0);
                 while (!asyncDrainDone && g_volcSession.hWebSocket && !g_volcSession.forceAbort.load() && g_volcSession.connected) {
                     volc_asr::VolcResult vr = volc_asr::ReceiveResult(g_volcSession.hWebSocket, 200, &g_volcSession);
-                    if (!vr.text.empty() && vr.text != asyncPartial) {
-                        asyncPartial = vr.text;
-                        if (config_.enablePartial) {
+                    if (!vr.text.empty()) {
+                        bool changed = false;
+                        {
+                            std::lock_guard<std::mutex> lock(asyncMutex);
+                            if (vr.text != asyncPartial) {
+                                asyncPartial = vr.text;
+                                changed = true;
+                            }
+                        }
+                        if (changed && config_.enablePartial) {
                             NotifyPartial(vr.text, false);
                         }
                     }
@@ -397,7 +415,10 @@ private:
                            && (GetTickCount64() - drainStart < 5000)) {
                         volc_asr::VolcResult vr = volc_asr::ReceiveResult(g_volcSession.hWebSocket, 1000, &g_volcSession);
                         if (!vr.text.empty()) {
-                            asyncPartial = vr.text;
+                            {
+                                std::lock_guard<std::mutex> lock(asyncMutex);
+                                asyncPartial = vr.text;
+                            }
                             VolcDebugLog("drainThread: final drain got text (%u chars, %llums)",
                                          (unsigned)vr.text.size(), GetTickCount64() - drainStart);
                             break;
@@ -409,6 +430,7 @@ private:
                        && g_volcSession.connected.load()) {
                     std::wstring partial = volc_asr::DrainReceiveBuffer(g_volcSession.hWebSocket, &g_volcSession);
                     if (!partial.empty()) {
+                        std::lock_guard<std::mutex> lock(asyncMutex);
                         asyncPartial = partial;
                     } else {
                         break;
@@ -483,9 +505,9 @@ private:
             VolcDebugLog("Volc thread: no speech detected, forcing drainThread exit...");
             asyncDrainDone = true;
             g_volcSession.forceAbort = true;
-            if (g_volcSession.hWebSocket) {
-                WinHttpCloseHandle(g_volcSession.hWebSocket);
-                g_volcSession.hWebSocket = nullptr;
+            {
+                HINTERNET ws = AtomicTakeWebSocket();
+                if (ws) WinHttpCloseHandle(ws);
             }
             if (drainThread.joinable()) drainThread.join();
             if (volc_asr::g_volcKeepAlive) {
@@ -530,14 +552,14 @@ private:
                 }
                 VolcDebugLog("Volc thread: wait done, drainFinalDone=%d, asyncPartial%s empty (%llums)",
                              drainFinalDone.load() ? 1 : 0,
-                             asyncPartial.empty() ? "" : " NOT",
+                             [&]() { std::lock_guard<std::mutex> lock(asyncMutex); return asyncPartial.empty(); }() ? "" : " NOT",
                              GetTickCount64() - waitStart);
             }
             originalServerClosed = !g_volcSession.connected;
             g_volcSession.forceAbort = !originalServerClosed;
-            if (g_volcSession.hWebSocket) {
-                WinHttpCloseHandle(g_volcSession.hWebSocket);
-                g_volcSession.hWebSocket = nullptr;
+            {
+                HINTERNET ws = AtomicTakeWebSocket();
+                if (ws) WinHttpCloseHandle(ws);
             }
             if (drainThread.joinable()) drainThread.join();
             if (volc_asr::g_volcKeepAlive) {
@@ -575,7 +597,7 @@ private:
             originalServerClosed,
             replayBuffer.Size(),
             kVolcShortNoTextRetrySkipBytes);
-        if (ShouldRetryEmptyCloudFinal(streamingMode,
+        if (!abort_.load() && ShouldRetryEmptyCloudFinal(streamingMode,
                                         finalText.empty(),
                                         replayBuffer.Available(),
                                         replayBuffer.Empty(),

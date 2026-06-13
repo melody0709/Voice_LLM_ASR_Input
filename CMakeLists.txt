@@ -19,6 +19,7 @@ add_executable(VoxType WIN32
     src/asr/asr_dispatcher.cpp
     src/asr/cloud_asr_common.cpp
     src/asr/cloud_http_common.cpp
+    src/asr/mimo_asr.cpp
     src/asr/qwen_asr.cpp
     src/asr/qwen_streaming_session.cpp
     src/asr/volcengine_streaming_session.cpp

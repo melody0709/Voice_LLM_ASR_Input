@@ -23,6 +23,8 @@ bool IsOperationalAsrError(const std::wstring& text) {
         || StartsWith(text, L"Baidu ASR failed:")
         || StartsWith(text, L"Qwen ASR error:")
         || StartsWith(text, L"Qwen ASR failed:")
+        || StartsWith(text, L"MiMo ASR error:")
+        || StartsWith(text, L"MiMo ASR failed:")
         || StartsWith(text, L"VolcEngine timeout")
         || StartsWith(text, L"VolcEngine connect failed")
         || StartsWith(text, L"VolcEngine error")
@@ -47,6 +49,7 @@ std::wstring AsrBackendDisplayName(const Config& config) {
     if (config.asrBackend == L"baidu") return L"Baidu Cloud";
     if (config.asrBackend == L"volcengine") return L"Volcano Engine";
     if (config.asrBackend == L"qwen") return L"Qwen ASR";
+    if (config.asrBackend == L"mimo") return L"MiMo ASR";
     return ModelDisplayName(config.modelId);
 }
 
@@ -54,5 +57,6 @@ const char* AsrBackendDebugName(const std::wstring& asrBackend) {
     if (asrBackend == L"baidu") return "Baidu";
     if (asrBackend == L"volcengine") return "Volcengine";
     if (asrBackend == L"qwen") return "Qwen";
+    if (asrBackend == L"mimo") return "MiMo";
     return "Local";
 }

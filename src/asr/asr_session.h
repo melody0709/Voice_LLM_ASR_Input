@@ -14,6 +14,7 @@ enum class AsrSessionBackend {
     Local,
     BaiduBatch,
     QwenRealtimeBatch,
+    MimoBatch,
 };
 
 class AsrEngine;

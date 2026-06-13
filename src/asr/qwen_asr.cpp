@@ -50,17 +50,17 @@ struct ParsedUrl {
 struct QwenConnection {
     HINTERNET hSession = nullptr;
     HINTERNET hConnect = nullptr;
-    HINTERNET hWebSocket = nullptr;
+    std::atomic<HINTERNET> hWebSocket{nullptr};
 
     ~QwenConnection() {
         Close();
     }
 
     void Close() {
-        if (hWebSocket) {
-            WinHttpWebSocketClose(hWebSocket, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, nullptr, 0);
-            WinHttpCloseHandle(hWebSocket);
-            hWebSocket = nullptr;
+        HINTERNET ws = TakeWebSocket();
+        if (ws) {
+            WinHttpWebSocketClose(ws, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, nullptr, 0);
+            WinHttpCloseHandle(ws);
         }
         if (hConnect) {
             WinHttpCloseHandle(hConnect);
@@ -70,6 +70,18 @@ struct QwenConnection {
             WinHttpCloseHandle(hSession);
             hSession = nullptr;
         }
+    }
+
+    HINTERNET WebSocket() const {
+        return hWebSocket.load();
+    }
+
+    void SetWebSocket(HINTERNET ws) {
+        hWebSocket.store(ws);
+    }
+
+    HINTERNET TakeWebSocket() {
+        return hWebSocket.exchange(nullptr);
     }
 };
 
@@ -558,9 +570,9 @@ bool ConnectInternal(QwenConnection& conn, const QwenConfig& cfg, std::wstring& 
         return false;
     }
 
-    conn.hWebSocket = WinHttpWebSocketCompleteUpgrade(hReq, 0);
+    conn.SetWebSocket(WinHttpWebSocketCompleteUpgrade(hReq, 0));
     closeRequest();
-    if (!conn.hWebSocket) {
+    if (!conn.WebSocket()) {
         error = L"WinHttpWebSocketCompleteUpgrade failed (err=" + std::to_wstring(GetLastError()) + L")";
         return false;
     }
@@ -573,7 +585,7 @@ bool ConnectInternal(QwenConnection& conn, const QwenConfig& cfg, std::wstring& 
 struct RealtimeClient::Impl {
     QwenConfig cfg;
     QwenConnection conn;
-    bool connected = false;
+    std::atomic<bool> connected{false};
 
     explicit Impl(QwenConfig c) : cfg(std::move(c)) {}
 };
@@ -591,9 +603,14 @@ bool RealtimeClient::Connect(std::wstring& error) {
     if (!ConnectInternal(impl_->conn, impl_->cfg, error)) {
         return false;
     }
-    impl_->connected = true;
+    impl_->connected.store(true);
 
-    if (!SendTextMessage(impl_->conn.hWebSocket, BuildSessionUpdateMessage(impl_->cfg), error)) {
+    HINTERNET ws = impl_->conn.WebSocket();
+    if (!ws) {
+        error = L"WebSocket not connected";
+        return false;
+    }
+    if (!SendTextMessage(ws, BuildSessionUpdateMessage(impl_->cfg), error)) {
         Close();
         return false;
     }
@@ -608,7 +625,13 @@ bool RealtimeClient::Connect(std::wstring& error) {
         }
 
         std::string message;
-        if (!ParseReceiveMessage(impl_->conn.hWebSocket,
+        ws = impl_->conn.WebSocket();
+        if (!ws) {
+            error = L"WebSocket not connected";
+            Close();
+            return false;
+        }
+        if (!ParseReceiveMessage(ws,
                                  static_cast<DWORD>(std::min<ULONGLONG>(deadline - now, kReceiveSliceMs)),
                                  message,
                                  error)) {
@@ -636,23 +659,33 @@ bool RealtimeClient::Connect(std::wstring& error) {
 }
 
 bool RealtimeClient::SendAudioChunk(const BYTE* data, size_t bytes, std::wstring& error) {
-    if (!impl_ || !impl_->connected || !impl_->conn.hWebSocket) {
+    if (!impl_ || !impl_->connected.load()) {
         error = L"WebSocket not connected";
         return false;
     }
     if (bytes == 0) return true;
-    return SendBinaryChunk(impl_->conn.hWebSocket, data, static_cast<DWORD>(bytes), error);
+    HINTERNET ws = impl_->conn.WebSocket();
+    if (!ws) {
+        error = L"WebSocket not connected";
+        return false;
+    }
+    return SendBinaryChunk(ws, data, static_cast<DWORD>(bytes), error);
 }
 
 bool RealtimeClient::PollEvent(DWORD timeoutMs, RealtimeEvent& event, std::wstring& error) {
     event = {};
-    if (!impl_ || !impl_->conn.hWebSocket) {
+    if (!impl_) {
         error = L"WebSocket not connected";
         return false;
     }
 
     std::string message;
-    if (!ParseReceiveMessage(impl_->conn.hWebSocket, timeoutMs, message, error)) {
+    HINTERNET ws = impl_->conn.WebSocket();
+    if (!ws) {
+        error = L"WebSocket not connected";
+        return false;
+    }
+    if (!ParseReceiveMessage(ws, timeoutMs, message, error)) {
         if (error.empty()) return true; // timeout
         return false;
     }
@@ -680,18 +713,28 @@ bool RealtimeClient::PollEvent(DWORD timeoutMs, RealtimeEvent& event, std::wstri
 }
 
 bool RealtimeClient::SendFinish(std::wstring& error) {
-    if (!impl_ || !impl_->conn.hWebSocket) {
+    if (!impl_) {
+        error = L"WebSocket not connected";
+        return false;
+    }
+    HINTERNET ws = impl_->conn.WebSocket();
+    if (!ws) {
         error = L"WebSocket not connected";
         return false;
     }
 
     if (LowerCase(NormalizeTurnDetection(impl_->cfg.turnDetection)) != L"server_vad") {
-        if (!SendTextMessage(impl_->conn.hWebSocket, BuildSimpleEventMessage("input_audio_buffer.commit"), error)) {
+        if (!SendTextMessage(ws, BuildSimpleEventMessage("input_audio_buffer.commit"), error)) {
             return false;
         }
     }
 
-    if (!SendTextMessage(impl_->conn.hWebSocket,
+    ws = impl_->conn.WebSocket();
+    if (!ws) {
+        error = L"WebSocket not connected";
+        return false;
+    }
+    if (!SendTextMessage(ws,
                          BuildSimpleEventMessage("session.finish"),
                          error)) {
         return false;
@@ -735,17 +778,17 @@ bool RealtimeClient::Finish(DWORD finalTimeoutMs, std::wstring& finalText, std::
 
 void RealtimeClient::Abort() {
     if (!impl_) return;
-    if (impl_->conn.hWebSocket) {
-        WinHttpCloseHandle(impl_->conn.hWebSocket);
-        impl_->conn.hWebSocket = nullptr;
+    HINTERNET ws = impl_->conn.TakeWebSocket();
+    if (ws) {
+        WinHttpCloseHandle(ws);
     }
-    impl_->connected = false;
+    impl_->connected.store(false);
 }
 
 void RealtimeClient::Close() {
     if (!impl_) return;
     impl_->conn.Close();
-    impl_->connected = false;
+    impl_->connected.store(false);
 }
 
 size_t ChunkBytesForConfig(const QwenConfig& cfg) {

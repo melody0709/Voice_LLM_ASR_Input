@@ -23,7 +23,7 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "winmm.lib")
 
-static constexpr int kCurrentConfigVersion = 4;
+static constexpr int kCurrentConfigVersion = 5;
 
 bool EqualsIgnoreCase(std::wstring a, std::wstring b) {
     std::transform(a.begin(), a.end(), a.begin(), [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
@@ -146,6 +146,7 @@ std::wstring ModelDisplayName(const std::wstring& modelId) {
     if (modelId == L"sensevoice") return L"SenseVoiceSmall";
     if (modelId == L"baidu") return L"Baidu Cloud";
     if (modelId == L"volcengine") return L"Volcano Engine";
+    if (modelId == L"mimo") return L"MiMo ASR";
     return L"FireRedASR2 CTC";
 }
 
@@ -385,6 +386,13 @@ void LoadConfig() {
     if (g_config.qwenBaseUrl.empty()) g_config.qwenBaseUrl = L"wss://dashscope.aliyuncs.com/api-ws/v1/realtime";
     if (g_config.qwenModel.empty()) g_config.qwenModel = L"qwen3-asr-flash-realtime";
     g_config.qwenChunkMs = std::clamp(g_config.qwenChunkMs, 20, 1000);
+    g_config.mimoApiKey = llm::DecryptString(Utf8ToWide(ExtractJsonString(json, "mimo_api_key", "")));
+    g_config.mimoBaseUrl = Utf8ToWide(ExtractJsonString(json, "mimo_base_url", WideToUtf8(g_config.mimoBaseUrl)));
+    g_config.mimoModel = Utf8ToWide(ExtractJsonString(json, "mimo_model", WideToUtf8(g_config.mimoModel)));
+    g_config.mimoLanguage = Utf8ToWide(ExtractJsonString(json, "mimo_language", WideToUtf8(g_config.mimoLanguage)));
+    if (g_config.mimoBaseUrl.empty()) g_config.mimoBaseUrl = L"https://token-plan-ams.xiaomimimo.com/v1";
+    if (g_config.mimoModel.empty()) g_config.mimoModel = L"mimo-v2.5-asr";
+    if (g_config.mimoLanguage != L"zh" && g_config.mimoLanguage != L"en") g_config.mimoLanguage = L"auto";
     g_config.audioBackend = Utf8ToWide(ExtractJsonString(json, "audio_backend", WideToUtf8(g_config.audioBackend)));
     g_config.audioDeviceId = Utf8ToWide(ExtractJsonString(json, "audio_device_id", ""));
     g_config.configVersion = ExtractJsonInt(json, "config_version", 0);
@@ -480,6 +488,10 @@ void SaveConfig() {
          << "  \"qwen_model\": \"" << EscapeJson(g_config.qwenModel) << "\",\n"
          << "  \"qwen_language\": \"" << EscapeJson(g_config.qwenLanguage) << "\",\n"
          << "  \"qwen_chunk_ms\": " << g_config.qwenChunkMs << ",\n"
+         << "  \"mimo_api_key\": \"" << EscapeJson(llm::EncryptString(g_config.mimoApiKey)) << "\",\n"
+         << "  \"mimo_base_url\": \"" << EscapeJson(g_config.mimoBaseUrl) << "\",\n"
+         << "  \"mimo_model\": \"" << EscapeJson(g_config.mimoModel) << "\",\n"
+         << "  \"mimo_language\": \"" << EscapeJson(g_config.mimoLanguage) << "\",\n"
          << "  \"audio_backend\": \"" << EscapeJson(g_config.audioBackend) << "\",\n"
          << "  \"audio_device_id\": \"" << EscapeJson(g_config.audioDeviceId) << "\"\n"
          << "}\n";

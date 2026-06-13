@@ -2,12 +2,24 @@
 
 > 🇬🇧 [English](../CHANGELOG.md)
 
+## v0.9.2 (2026-06-13)
+
+### 修复
+
+- **HUD DPI 适配渲染**：HUD 常量重命名为 `*Dip` 后缀并改为 `float` 类型，明确 DIP 语义。`PositionHud()` 改用 `GetDpiForMonitor()` 取目标显示器 DPI，替代 `DpiScaleForWindow()`。底部偏移从硬编码 `48px` 改为 `DipToPx(kHudBottomMarginDip, scale)`。`CreateWindowExW` 初始尺寸按 monitor DPI 换算。新增 `WM_DPICHANGED` 处理以在 DPI 变化时重新布局。D2D render target DPI 在创建和每次绘制前通过 `SetDpi()` 同步。
+- **火山引擎 WebSocket 双关竞争**：新增 `AtomicTakeWebSocket()`，使用 `InterlockedExchangePointer` 原子取走 `g_volcSession.hWebSocket` 所有权。所有关闭点（Abort、VAD no-speech、async drain）统一使用此函数，确保只有一个线程关闭句柄。
+- **火山引擎 `asyncPartial` 数据竞争**：新增 `std::mutex asyncMutex` 保护 worker 和 drainThread 之间的 `asyncPartial` 读写。比较和赋值现在在同一个 `lock_guard` 作用域内。
+- **Qwen `activeClient_` UAF 及句柄双关**：将 `std::atomic<RealtimeClient*>` 替换为 mutex 保护的 `SetActiveClient/ClearActiveClient/AbortActiveClient` 辅助函数，确保 UI 线程的 `Abort()` 调用不会与 worker 的 client 销毁竞争。`QwenConnection::hWebSocket` 改为 `std::atomic<HINTERNET>` 并通过 `TakeWebSocket()` 实现单所有者关闭。`connected` 改为 `std::atomic<bool>`。
+- **重试路径 abort 检查**：Qwen 和火山引擎的重试条件在进入可能长时间阻塞的重试前检查 `abort_.load()`。Qwen `RetryRecognitionOnce` 在 `client.Finish()` 前也检查 `abort_`。
+- **`mimo_asr.cpp/.h` 未纳入版本控制**：将之前未跟踪的文件加入 git。
+
 ## v0.9.1 (2026-06-10)
 
 ### 变更
 
+- **MiMo ASR 后端**：新增小米 MiMo ASR（`mimo-v2.5-asr`）批量云端后端。PCM 会封装为 WAV 后发送到 OpenAI-compatible `/chat/completions` 接口，默认 Token Plan Base URL 为 `https://token-plan-ams.xiaomimimo.com/v1`。
 - **云端 ASR 架构稳定**：Qwen 和火山引擎 streaming 编排已收进 `IStreamingAsrSession`，并共用 status、partial、final dispatch 外壳。
-- **共享 VAD trim 管线**：新增 streaming/batch 共用 VAD trim core，Qwen、火山引擎、百度可复用同一套头尾静音裁剪行为，同时保留中间停顿。
+- **共享 VAD trim 管线**：新增 streaming/batch 共用 VAD trim core，Qwen、火山引擎、百度、MiMo 可复用同一套头尾静音裁剪行为，同时保留中间停顿。
 - **火山引擎重构等价审查**：确认火山协议层未改写，重构后的外层流程保留三模式、final drain、empty-final retry、watchdog timeout 文案和 prewarm/reuse 生命周期。
 - **百度 retry 加固**：新增 transient 失败同 PCM 重试，以及 auth/token 错误后的 token refresh retry。
 - **源码目录分类**：源码已按 `src/app`、`src/asr`、`src/audio`、`src/ui`、`src/core` 分组，并同步刷新架构和审查文档。
