@@ -13,7 +13,7 @@ OUTPUT_DIR = ROOT / "release"
 
 def get_version():
     """从 resource.h 读取版本号"""
-    res_path = ROOT / "src" / "resource.h"
+    res_path = ROOT / "src" / "app" / "resource.h"
     major = minor = patch = 0
     for line in res_path.read_text(encoding="utf-8").splitlines():
         if line.startswith("#define APP_VERSION_MAJOR"):
