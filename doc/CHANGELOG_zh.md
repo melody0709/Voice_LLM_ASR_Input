@@ -2,6 +2,23 @@
 
 > 🇬🇧 [English](../CHANGELOG.md)
 
+## v0.9.3 (2026-06-15)
+
+### 修复
+
+- **火山引擎快速录音丢头部音频（回归）**：云端 ASR 架构重构后，`StartRecordingSession` 改为先等待上一个 session 的 worker 线程 join，再启动 WASAPI 录音。如果旧 worker 卡在 3 秒的 `OpenSession` hard timeout 中，UI 线程阻塞 3 秒且 WASAPI 未启动，用户头几个字丢失。修复：将 `StartAudioCapture()` 移到 `AbortAndResetActiveStreamingSession()` 之前，并新增 `ReplayPreCapturedAudio()` 将积攒的头部音频补发给新 session。
+- **Streaming VAD 双重处理**：WASAPI 回调在检查 `g_activeStreamingSession` 之前无条件调用 `StreamingVadTrimmer::ProcessPcm16()`。当 session 为 null（join 等待窗口期）时，VAD trimmer 状态机被推进但音频未入队。后续 `ReplayPreCapturedAudio` 用新 trimmer 处理同一段音频会导致裁剪结果不一致。修复：将 `ProcessPcm16()` 移入 `g_activeStreamingSession` 检查内。
+- **火山引擎 3 秒连接过期销毁 TCP+TLS 连接池**：`EnsureConnection` 仅 3 秒不活跃就销毁 `hSession`，每次录音间隔超过 3 秒都要重新 DNS + TCP + TLS 握手。改为 300 秒（5 分钟），快速连续录音可复用连接池。
+- **火山引擎 NO_PROXY 绕过系统代理**：`WinHttpOpen` 使用 `WINHTTP_ACCESS_TYPE_NO_PROXY`，绕过系统/VPN 代理设置，代理用户可能无法连接。改为 `WINHTTP_ACCESS_TYPE_DEFAULT_PROXY`（无代理时行为完全一致）。
+- **火山引擎 2 秒 WinHTTP 超时过于激进**：`WinHttpSetTimeouts` 为 `2000, 2000, 2000, 2000`。改为 `3000, 3000, 5000, 5000`，给 DNS/TLS 更多时间。hard timeout watchdog（`kHardTimeoutMs = 3000`）不变，UI 阻塞上限仍为 3 秒。
+
+### 变更
+
+- **火山引擎 activeReq 快速取消**：`VolcSession` 新增 `std::atomic<HINTERNET> activeReq` 追踪 `OpenSessionImpl` 中的 `hReq`。`Abort()` 通过 `exchange(nullptr)` 立即关闭 `activeReq`，使 `WinHttpSendRequest` 瞬间返回 `ERROR_WINHTTP_OPERATION_CANCELLED`，消除连接超时时 3 秒的 UI 冻结。`OpenSessionImpl` 全部 7 个退出路径均使用 `activeReq.exchange(nullptr)` 防止双重关闭。
+- **火山引擎 g_volcSession 移入 static**：`g_volcSession` 和 `g_volcKeepAlive` 从全局作用域移入 `volcengine_streaming_session.cpp` 的 `static s_volcSession`。暴露 `VolcengineResetForNewSession()`、`VolcenginePrewarmConnection()`、`VolcengineClosePersistentConnection()`、`VolcengineForceAbortAndCloseAll()` 四个接口。`globals.h` 不再包含 `volcengine_asr.h`。
+- **Qwen/火山 Stop 逻辑去重**：`StopRecordingSession` 中 Qwen 和火山两个几乎相同的分支合并为 `(qwen || volcengine)` 单一分支，HUD 文案用 `AsrBackendDisplayName()` 统一生成。
+- **Qwen/火山启动顺序统一**：两个 streaming 后端统一为 `session->Start()` → `ReplayPreCapturedAudio()` → `g_activeStreamingSession = session` → `StartStreamingVadTrimmerForCloud()`。
+
 ## v0.9.2 (2026-06-13)
 
 ### 修复

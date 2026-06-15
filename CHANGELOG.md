@@ -2,6 +2,23 @@
 
 > 🇨🇳 [中文版](doc/CHANGELOG_zh.md)
 
+## v0.9.3 (2026-06-15)
+
+### Fixed
+
+- **Volcengine rapid recording head audio loss (regression)**: The cloud ASR architecture refactor changed `StartRecordingSession` to start WASAPI audio capture *after* waiting for the previous session's worker thread to join. If the previous worker was stuck in a 3-second `OpenSession` hard timeout, the UI thread blocked for 3 seconds with WASAPI not yet running, causing the user's first few words to be lost. Fixed by moving `StartAudioCapture()` before `AbortAndResetActiveStreamingSession()` and adding `ReplayPreCapturedAudio()` to flush the buffered head audio into the new session.
+- **Streaming VAD double-processing**: The WASAPI callback called `StreamingVadTrimmer::ProcessPcm16()` unconditionally before checking `g_activeStreamingSession`. When the session was null (during the join-wait window), the VAD trimmer state machine was advanced but no audio was enqueued. A subsequent `ReplayPreCapturedAudio` with a fresh trimmer would process the same audio again, causing inconsistent trim results. Fixed by moving `ProcessPcm16()` inside the `g_activeStreamingSession` check.
+- **Volcengine 3-second connection expiry destroying TCP+TLS pool**: `EnsureConnection` expired the `hSession` handle after only 3 seconds of inactivity, forcing a full DNS + TCP + TLS handshake for every recording after a short pause. Changed to 300 seconds (5 minutes) so keep-alive connections are reused across rapid recordings.
+- **Volcengine NO_PROXY bypassing system proxy**: `WinHttpOpen` used `WINHTTP_ACCESS_TYPE_NO_PROXY`, which bypassed system/VPN proxy settings and could fail for users behind a proxy. Changed to `WINHTTP_ACCESS_TYPE_DEFAULT_PROXY` (no-op when no proxy is configured).
+- **Volcengine 2-second WinHTTP timeouts too aggressive**: `WinHttpSetTimeouts` was `2000, 2000, 2000, 2000` for both session and request handles. Changed to `3000, 3000, 5000, 5000` to give DNS/TLS more time. The hard timeout watchdog (`kHardTimeoutMs = 3000`) is unchanged to cap UI blocking at 3 seconds.
+
+### Changed
+
+- **Volcengine activeReq fast cancel**: Added `std::atomic<HINTERNET> activeReq` to `VolcSession` that tracks the active `hReq` during `OpenSessionImpl`. `Abort()` now immediately closes `activeReq` via `exchange(nullptr)`, causing `WinHttpSendRequest` to return instantly with `ERROR_WINHTTP_OPERATION_CANCELLED`. This eliminates the 3-second UI freeze that occurred when aborting during a connection attempt. All 7 exit paths in `OpenSessionImpl` use `activeReq.exchange(nullptr)` to prevent double-close.
+- **Volcengine g_volcSession moved to static**: `g_volcSession` and `g_volcKeepAlive` moved from global scope into `volcengine_streaming_session.cpp` as `static s_volcSession`. Exposed via `VolcengineResetForNewSession()`, `VolcenginePrewarmConnection()`, `VolcengineClosePersistentConnection()`, and `VolcengineForceAbortAndCloseAll()`. `globals.h` no longer includes `volcengine_asr.h`.
+- **Qwen/Volcengine Stop logic deduplicated**: `StopRecordingSession` had two nearly identical branches for Qwen and Volcengine. Merged into a single `(qwen || volcengine)` branch with `AsrBackendDisplayName()` for HUD text.
+- **Qwen/Volcengine startup order unified**: Both streaming backends now follow the same order: `session->Start()` → `ReplayPreCapturedAudio()` → `g_activeStreamingSession = session` → `StartStreamingVadTrimmerForCloud()`.
+
 ## v0.9.2 (2026-06-13)
 
 ### Fixed

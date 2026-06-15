@@ -241,16 +241,14 @@ void WasapiCapture::CaptureThread() {
                     g_audioData.insert(g_audioData.end(), begin, begin + written * sizeof(int16_t));
                     LeaveCriticalSection(&g_audioLock);
 
-                    std::vector<std::vector<BYTE>> streamingOutputs;
                     const size_t bytesWritten = written * sizeof(int16_t);
-                    const bool useStreamingVadTrim = g_streamingVadTrimmer && g_streamingVadTrimmer->IsActive();
-                    if (useStreamingVadTrim) {
-                        g_streamingVadTrimmer->ProcessPcm16(begin, bytesWritten, streamingOutputs);
-                    }
 
                     EnterCriticalSection(&g_streamingSessionCs);
                     if (g_activeStreamingSession && g_activeStreamingSession->IsRunning()) {
+                        const bool useStreamingVadTrim = g_streamingVadTrimmer && g_streamingVadTrimmer->IsActive();
                         if (useStreamingVadTrim) {
+                            std::vector<std::vector<BYTE>> streamingOutputs;
+                            g_streamingVadTrimmer->ProcessPcm16(begin, bytesWritten, streamingOutputs);
                             for (const auto& chunk : streamingOutputs) {
                                 if (!chunk.empty()) {
                                     g_activeStreamingSession->EnqueuePcmChunk(chunk.data(), chunk.size());
@@ -262,7 +260,7 @@ void WasapiCapture::CaptureThread() {
                     }
                     LeaveCriticalSection(&g_streamingSessionCs);
 
-                    if (g_streamingVadReady && !useStreamingVadTrim) {
+                    if (g_streamingVadReady && !(g_activeStreamingSession && g_streamingVadTrimmer && g_streamingVadTrimmer->IsActive())) {
                         std::vector<float> floatBuf(written);
                         for (UINT32 i = 0; i < written; ++i)
                             floatBuf[i] = static_cast<float>(out[i]) / 32768.0f;

@@ -19,7 +19,6 @@
 #include "firered_vad.h"
 #include "llm_refine.h"
 #include "baidu_asr.h"
-#include "volcengine_asr.h"
 #include "wasapi_capture.h"
 #include "input_context.h"
 #include "resource.h"
@@ -339,8 +338,6 @@ extern bool g_mimoKeyVisible;
 extern std::unique_ptr<IStreamingAsrSession> g_activeStreamingSession;
 extern std::unique_ptr<StreamingVadTrimmer> g_streamingVadTrimmer;
 extern CRITICAL_SECTION g_streamingSessionCs;
-extern volc_asr::VolcSession g_volcSession;
-namespace volc_asr { extern std::atomic<bool> g_volcKeepAlive; }
 extern AsrEngine g_asrEngine;
 extern int g_cloudProviderIdx;
 extern HWND g_cloudAsrHintControl;

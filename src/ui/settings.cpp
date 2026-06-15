@@ -8,6 +8,7 @@
 #include "hud.h"
 #include "mimo_asr.h"
 #include "qwen_asr.h"
+#include "volcengine_asr.h"
 
 #include <algorithm>
 #include <commctrl.h>

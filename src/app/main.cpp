@@ -15,6 +15,7 @@
 #include "asr_dispatcher.h"
 #include "qwen_streaming_session.h"
 #include "volcengine_streaming_session.h"
+#include "volcengine_asr.h"
 #include "streaming_vad_trimmer.h"
 
 #include <fstream>
@@ -102,8 +103,6 @@ bool g_mimoKeyVisible = false;
 std::unique_ptr<IStreamingAsrSession> g_activeStreamingSession;
 std::unique_ptr<StreamingVadTrimmer> g_streamingVadTrimmer;
 CRITICAL_SECTION g_streamingSessionCs;
-volc_asr::VolcSession g_volcSession;
-namespace volc_asr { std::atomic<bool> g_volcKeepAlive{false}; }
 AsrEngine g_asrEngine;
 int g_cloudProviderIdx = 0;
 HWND g_cloudAsrHintControl = nullptr;
@@ -382,62 +381,25 @@ static bool StreamingVadTrimSawNoSpeech() {
            !g_streamingVadTrimmer->DetectedSpeech();
 }
 
+static void ReplayPreCapturedAudio(IStreamingAsrSession* session) {
+    if (!session) return;
+    std::vector<BYTE> preCaptured;
+    EnterCriticalSection(&g_audioLock);
+    preCaptured = g_audioData;
+    LeaveCriticalSection(&g_audioLock);
+    if (preCaptured.empty()) return;
+    session->EnqueuePcmChunk(preCaptured.data(), preCaptured.size());
+}
+
 void StartRecordingSession() {
     if (g_recording) return;
     if (g_hudWindow) KillTimer(g_hudWindow, kHudHideTimer);
 
-    AbortAndResetActiveStreamingSession();
-    ResetStreamingVadTrimmerState();
-
-    if (g_config.asrBackend == L"qwen") {
-        auto session = CreateQwenStreamingSession(g_config, g_mainWindow, RefineWithLlmAsync, &g_lastRawAsrText);
-        session->SetPartialCallback(QwenPartialHudCallback, nullptr);
-
-        std::wstring startError;
-        if (!session->Start(startError)) {
-            ShowHud(startError.empty() ? L"Qwen ASR error: session start failed" : startError);
-            if (g_hudWindow) SetTimer(g_hudWindow, kHudHideTimer, 1800, nullptr);
-            return;
-        }
-
-        EnterCriticalSection(&g_streamingSessionCs);
-        g_activeStreamingSession = std::move(session);
-        LeaveCriticalSection(&g_streamingSessionCs);
-
-        StartStreamingVadTrimmerForCloud(L"Qwen thread");
-    }
-
-    if (g_config.asrBackend == L"volcengine") {
-        ShowHud(L"Listening... Volcano Engine");
-
-        g_volcSession.forceAbort = false;
-        g_volcSession.lastError.clear();
-
-        StartStreamingVadTrimmerForCloud(L"Volc thread");
-
-        auto session = CreateVolcengineStreamingSession(g_config, g_mainWindow, RefineWithLlmAsync, &g_lastRawAsrText);
-        session->SetPartialCallback([](const std::wstring& text, bool isFinal, void* userData) {
-            (void)userData;
-            if (!isFinal) {
-                PostMessageW(g_mainWindow, kHudUpdateMessage, 0,
-                             reinterpret_cast<LPARAM>(new std::wstring(L"Listening... Volcano Engine\n" + text)));
-            }
-        }, nullptr);
-
-        std::wstring startError;
-        if (!session->Start(startError)) {
-            DispatchAsrFinalText(g_mainWindow, startError, g_config, RefineWithLlmAsync, &g_lastRawAsrText);
-            return;
-        }
-
-        EnterCriticalSection(&g_streamingSessionCs);
-        g_activeStreamingSession = std::move(session);
-        LeaveCriticalSection(&g_streamingSessionCs);
-    }
+    std::wstring name = AsrBackendDisplayName(g_config);
+    ShowHud(L"Listening... " + name);
 
     std::wstring error;
     if (!StartAudioCapture(error)) {
-        AbortAndResetActiveStreamingSession();
         ShowHud(error);
         if (g_hudWindow) SetTimer(g_hudWindow, kHudHideTimer, 1800, nullptr);
         return;
@@ -450,7 +412,30 @@ void StartRecordingSession() {
         s_wasapiNativeRate = g_wasapiCapture.GetNativeSampleRate();
     }
 
+    AbortAndResetActiveStreamingSession();
+    ResetStreamingVadTrimmerState();
+
     if (g_config.asrBackend == L"qwen") {
+        auto session = CreateQwenStreamingSession(g_config, g_mainWindow, RefineWithLlmAsync, &g_lastRawAsrText);
+        session->SetPartialCallback(QwenPartialHudCallback, nullptr);
+
+        std::wstring startError;
+        if (!session->Start(startError)) {
+            StopAudioCapture();
+            g_recording = false;
+            ShowHud(startError.empty() ? L"Qwen ASR error: session start failed" : startError);
+            if (g_hudWindow) SetTimer(g_hudWindow, kHudHideTimer, 1800, nullptr);
+            return;
+        }
+
+        ReplayPreCapturedAudio(session.get());
+
+        EnterCriticalSection(&g_streamingSessionCs);
+        g_activeStreamingSession = std::move(session);
+        LeaveCriticalSection(&g_streamingSessionCs);
+
+        StartStreamingVadTrimmerForCloud(L"Qwen thread");
+
         ShowHud(L"Listening... Qwen ASR");
         DWORD watchdogMs = 18000;
         EnterCriticalSection(&g_streamingSessionCs);
@@ -463,6 +448,33 @@ void StartRecordingSession() {
     }
 
     if (g_config.asrBackend == L"volcengine") {
+        VolcengineResetForNewSession();
+
+        auto session = CreateVolcengineStreamingSession(g_config, g_mainWindow, RefineWithLlmAsync, &g_lastRawAsrText);
+        session->SetPartialCallback([](const std::wstring& text, bool isFinal, void* userData) {
+            (void)userData;
+            if (!isFinal) {
+                PostMessageW(g_mainWindow, kHudUpdateMessage, 0,
+                             reinterpret_cast<LPARAM>(new std::wstring(L"Listening... Volcano Engine\n" + text)));
+            }
+        }, nullptr);
+
+        std::wstring startError;
+        if (!session->Start(startError)) {
+            StopAudioCapture();
+            g_recording = false;
+            DispatchAsrFinalText(g_mainWindow, startError, g_config, RefineWithLlmAsync, &g_lastRawAsrText);
+            return;
+        }
+
+        ReplayPreCapturedAudio(session.get());
+
+        EnterCriticalSection(&g_streamingSessionCs);
+        g_activeStreamingSession = std::move(session);
+        LeaveCriticalSection(&g_streamingSessionCs);
+
+        StartStreamingVadTrimmerForCloud(L"Volc thread");
+
         ShowHud(L"Listening... Volcano Engine");
         DWORD watchdogMs = 18000;
         EnterCriticalSection(&g_streamingSessionCs);
@@ -473,9 +485,6 @@ void StartRecordingSession() {
         SetTimer(g_mainWindow, kStreamingWatchdogTimer, watchdogMs, nullptr);
         return;
     }
-
-    std::wstring name = AsrBackendDisplayName(g_config);
-    ShowHud(L"Listening... " + name);
 
     g_streamingVadReady = false;
     g_streamingVadSamples.clear();
@@ -510,7 +519,7 @@ void StopRecordingSession() {
     g_vadTrimmedSamples = 0;
     g_lastRawAsrText.clear();
 
-    if (g_config.asrBackend == L"qwen" && HasActiveStreamingSession()) {
+    if ((g_config.asrBackend == L"qwen" || g_config.asrBackend == L"volcengine") && HasActiveStreamingSession()) {
         const std::vector<BYTE> pcm = StopAudioCapture();
         g_lastPcmBytes = pcm.size();
         if (pcm.size() < 8000) {
@@ -537,40 +546,11 @@ void StopRecordingSession() {
         LeaveCriticalSection(&g_streamingSessionCs);
         KillTimer(g_mainWindow, kStreamingWatchdogTimer);
         SetTimer(g_mainWindow, kStreamingWatchdogTimer, finalizeTimeout, nullptr);
-        ShowHud(L"Recognizing... Qwen ASR");
-        return;
-    }
-
-    if (g_config.asrBackend == L"volcengine" && HasActiveStreamingSession()) {
-        const std::vector<BYTE> pcm = StopAudioCapture();
-        g_lastPcmBytes = pcm.size();
-        if (pcm.size() < 8000) {
-            KillTimer(g_mainWindow, kStreamingWatchdogTimer);
-            AbortAndResetActiveStreamingSession();
-            ShowHud(L"Too short");
-            SetTimer(g_hudWindow, kHudHideTimer, 1200, nullptr);
-            return;
+        if (g_config.asrBackend == L"volcengine") {
+            VolcDebugLog("Volc watchdog: finalize timeout reset to %ums (recording=%.0fms, pcm=%zu)",
+                         finalizeTimeout, g_recordingMs, pcm.size());
         }
-        FinishStreamingVadTrimmer();
-        if (StreamingVadTrimSawNoSpeech()) {
-            KillTimer(g_mainWindow, kStreamingWatchdogTimer);
-            AbortAndResetActiveStreamingSession();
-            ShowHud(L"No speech detected");
-            SetTimer(g_hudWindow, kHudHideTimer, 1500, nullptr);
-            return;
-        }
-        DWORD finalizeTimeout = ComputeCloudAsrFinalizeTimeoutMs(g_recordingMs, pcm.size());
-        EnterCriticalSection(&g_streamingSessionCs);
-        if (g_activeStreamingSession) {
-            g_activeStreamingSession->StopInput(g_recordingMs, pcm.size());
-            finalizeTimeout = g_activeStreamingSession->CurrentWatchdogMs();
-        }
-        LeaveCriticalSection(&g_streamingSessionCs);
-        KillTimer(g_mainWindow, kStreamingWatchdogTimer);
-        SetTimer(g_mainWindow, kStreamingWatchdogTimer, finalizeTimeout, nullptr);
-        VolcDebugLog("Volc watchdog: finalize timeout reset to %ums (recording=%.0fms, pcm=%zu)",
-                     finalizeTimeout, g_recordingMs, pcm.size());
-        ShowHud(L"Recognizing... Volcano Engine");
+        ShowHud(L"Recognizing... " + AsrBackendDisplayName(g_config));
         return;
     }
 
@@ -832,17 +812,9 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     case WM_DESTROY:
         KillTimer(hwnd, kStreamingWatchdogTimer);
         AbortAndResetActiveStreamingSession();
-        g_volcSession.forceAbort = true;
+        VolcengineForceAbortAndCloseAll();
         g_captureActive = false;
         StopAudioCapture();
-        {
-            HINTERNET hWs = g_volcSession.hWebSocket;
-            if (hWs) { WinHttpCloseHandle(hWs); g_volcSession.hWebSocket = nullptr; }
-            HINTERNET hConn = g_volcSession.hConnect;
-            if (hConn) { WinHttpCloseHandle(hConn); g_volcSession.hConnect = nullptr; }
-            HINTERNET hSess = g_volcSession.hSession;
-            if (hSess) { WinHttpCloseHandle(hSess); g_volcSession.hSession = nullptr; }
-        }
         UninstallKeyboardHook();
         RemoveTrayIcon(hwnd);
         PostQuitMessage(0);
@@ -920,7 +892,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     if (g_config.asrBackend == L"volcengine" && !g_config.volcApiKey.empty()) {
         std::thread([]() {
-            volc_asr::PrewarmConnection(g_volcSession);
+            VolcenginePrewarmConnection();
         }).detach();
     }
 
@@ -970,7 +942,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         DispatchMessageW(&msg);
     }
 
-    volc_asr::ClosePersistentConnection(g_volcSession);
+    VolcengineClosePersistentConnection();
 
     if (mutex) {
         ReleaseMutex(mutex);

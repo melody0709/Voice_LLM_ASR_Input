@@ -537,15 +537,12 @@ void CALLBACK WaveInProc(HWAVEIN waveIn, UINT msg, DWORD_PTR, DWORD_PTR param1, 
         g_audioData.insert(g_audioData.end(), begin, begin + header->dwBytesRecorded);
         LeaveCriticalSection(&g_audioLock);
 
-        std::vector<std::vector<BYTE>> streamingOutputs;
-        const bool useStreamingVadTrim = g_streamingVadTrimmer && g_streamingVadTrimmer->IsActive();
-        if (useStreamingVadTrim) {
-            g_streamingVadTrimmer->ProcessPcm16(begin, header->dwBytesRecorded, streamingOutputs);
-        }
-
         EnterCriticalSection(&g_streamingSessionCs);
         if (g_activeStreamingSession && g_activeStreamingSession->IsRunning()) {
+            const bool useStreamingVadTrim = g_streamingVadTrimmer && g_streamingVadTrimmer->IsActive();
             if (useStreamingVadTrim) {
+                std::vector<std::vector<BYTE>> streamingOutputs;
+                g_streamingVadTrimmer->ProcessPcm16(begin, header->dwBytesRecorded, streamingOutputs);
                 for (const auto& chunk : streamingOutputs) {
                     if (!chunk.empty()) {
                         g_activeStreamingSession->EnqueuePcmChunk(chunk.data(), chunk.size());

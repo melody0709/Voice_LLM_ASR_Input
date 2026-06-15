@@ -119,6 +119,7 @@ struct VolcSession {
     HINTERNET hSession = nullptr;
     HINTERNET hConnect = nullptr;
     HINTERNET hWebSocket = nullptr;
+    std::atomic<HINTERNET> activeReq{nullptr};  // tracks hReq during OpenSessionImpl for fast Abort
     int sequence = 0;
     std::wstring partialText;
     std::wstring lastError;
@@ -384,7 +385,7 @@ inline void WebSocketCloseGracefully(HINTERNET hWebSocket, VolcSession* sess = n
 
 inline bool EnsureConnection(VolcSession& sess) {
     if (sess.hSession && sess.hConnect) {
-        if (sess.lastUsedTick > 0 && GetTickCount64() - sess.lastUsedTick > 3000) {
+        if (sess.lastUsedTick > 0 && GetTickCount64() - sess.lastUsedTick > 300000) {
             VolcDebugLog("EnsureConnection: connection expired (%llums old), rebuilding",
                          GetTickCount64() - sess.lastUsedTick);
             WinHttpCloseHandle(sess.hConnect);
@@ -401,10 +402,10 @@ inline bool EnsureConnection(VolcSession& sess) {
 
     if (!sess.hSession) {
         sess.hSession = WinHttpOpen(L"VoxType/1.0",
-            WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME,
+            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
             WINHTTP_NO_PROXY_BYPASS, 0);
         if (!sess.hSession) return false;
-        WinHttpSetTimeouts(sess.hSession, 2000, 2000, 2000, 2000);
+        WinHttpSetTimeouts(sess.hSession, 3000, 3000, 5000, 5000);
     }
 
     ULONGLONG t1 = GetTickCount64();
@@ -570,6 +571,7 @@ inline bool OpenSessionImpl(VolcSession& sess, const VolcConfig& cfg, bool isRet
         if (!isRetry && GetTickCount64() - t0 < 2000 && RebuildConnection(sess)) return OpenSessionImpl(sess, cfg, true);
         return false;
     }
+    sess.activeReq.store(hReq);
 
     WinHttpSetOption(hReq, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0);
     DWORD closeTimeout = 5000;
@@ -588,31 +590,32 @@ inline bool OpenSessionImpl(VolcSession& sess, const VolcConfig& cfg, bool isRet
         static_cast<DWORD>(wcslen(headers.c_str())), WINHTTP_ADDREQ_FLAG_ADD)) {
         VolcDebugLog("OpenSession: WinHttpAddRequestHeaders failed (err=%u, elapsed=%llums)",
                      GetLastError(), GetTickCount64() - t0);
-        WinHttpCloseHandle(hReq);
+        { HINTERNET taken = sess.activeReq.exchange(nullptr); if (taken) WinHttpCloseHandle(taken); }
         WinHttpCloseHandle(sess.hConnect); sess.hConnect = nullptr;
         WinHttpCloseHandle(sess.hSession); sess.hSession = nullptr;
         if (!isRetry && GetTickCount64() - t0 < 2000 && RebuildConnection(sess)) return OpenSessionImpl(sess, cfg, true);
         return false;
     }
 
-    WinHttpSetTimeouts(hReq, 2000, 2000, 2000, 2000);
+    WinHttpSetTimeouts(hReq, 3000, 3000, 5000, 5000);
 
     if (sess.forceAbort.load()) {
         VolcDebugLog("OpenSession: aborted before SendRequest");
-        WinHttpCloseHandle(hReq);
+        { HINTERNET taken = sess.activeReq.exchange(nullptr); if (taken) WinHttpCloseHandle(taken); }
         return false;
     }
 
     ULONGLONG t3 = GetTickCount64();
     constexpr ULONGLONG kHardTimeoutMs = 3000;
     std::atomic<bool> requestDone{false};
-    std::thread watchdogThread([&hReq, &requestDone, t3, kHardTimeoutMs]() {
+    std::thread watchdogThread([&sess, &requestDone, t3, kHardTimeoutMs]() {
         while (!requestDone.load()) {
             Sleep(100);
             if (requestDone.load()) return;
             if (GetTickCount64() - t3 >= kHardTimeoutMs) {
-                VolcDebugLog("OpenSession: hard timeout (%llums), closing hReq", GetTickCount64() - t3);
-                WinHttpCloseHandle(hReq);
+                VolcDebugLog("OpenSession: hard timeout (%llums), closing activeReq", GetTickCount64() - t3);
+                HINTERNET taken = sess.activeReq.exchange(nullptr);
+                if (taken) WinHttpCloseHandle(taken);
                 return;
             }
         }
@@ -625,6 +628,7 @@ inline bool OpenSessionImpl(VolcSession& sess, const VolcConfig& cfg, bool isRet
     watchdogThread.join();
 
     if (!sendOk) {
+        { HINTERNET taken = sess.activeReq.exchange(nullptr); if (taken) WinHttpCloseHandle(taken); }
         VolcDebugLog("OpenSession: WinHttpSendRequest failed (err=%u, elapsed=%llums)",
                      GetLastError(), GetTickCount64() - t0);
         if (sess.hConnect) { WinHttpCloseHandle(sess.hConnect); sess.hConnect = nullptr; }
@@ -634,6 +638,7 @@ inline bool OpenSessionImpl(VolcSession& sess, const VolcConfig& cfg, bool isRet
     }
 
     if (!recvOk) {
+        { HINTERNET taken = sess.activeReq.exchange(nullptr); if (taken) WinHttpCloseHandle(taken); }
         VolcDebugLog("OpenSession: WinHttpReceiveResponse failed (err=%u, elapsed=%llums)",
                      GetLastError(), GetTickCount64() - t0);
         if (sess.hConnect) { WinHttpCloseHandle(sess.hConnect); sess.hConnect = nullptr; }
@@ -653,7 +658,7 @@ inline bool OpenSessionImpl(VolcSession& sess, const VolcConfig& cfg, bool isRet
     if (statusCode != 101) {
         VolcDebugLog("OpenSession: HTTP status %u (expected 101, elapsed=%llums)",
                      statusCode, GetTickCount64() - t0);
-        WinHttpCloseHandle(hReq);
+        { HINTERNET taken = sess.activeReq.exchange(nullptr); if (taken) WinHttpCloseHandle(taken); }
         WinHttpCloseHandle(sess.hConnect); sess.hConnect = nullptr;
         WinHttpCloseHandle(sess.hSession); sess.hSession = nullptr;
         if (!isRetry && GetTickCount64() - t0 < 2000 && RebuildConnection(sess)) return OpenSessionImpl(sess, cfg, true);
@@ -661,7 +666,7 @@ inline bool OpenSessionImpl(VolcSession& sess, const VolcConfig& cfg, bool isRet
     }
 
     sess.hWebSocket = WinHttpWebSocketCompleteUpgrade(hReq, 0);
-    WinHttpCloseHandle(hReq);
+    { HINTERNET taken = sess.activeReq.exchange(nullptr); if (taken) WinHttpCloseHandle(taken); }
 
     if (!sess.hWebSocket) {
         VolcDebugLog("OpenSession: CompleteUpgrade failed (err=%u, elapsed=%llums)",
@@ -875,7 +880,7 @@ inline TestResult TestConnection(const VolcConfig& cfg) {
         return res;
     }
 
-    HINTERNET hSession = WinHttpOpen(L"VoxType/1.0", WINHTTP_ACCESS_TYPE_NO_PROXY,
+    HINTERNET hSession = WinHttpOpen(L"VoxType/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                      WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) {
         res.message = L"WinHttpOpen failed.";

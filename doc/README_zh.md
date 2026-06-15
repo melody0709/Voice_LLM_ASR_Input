@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  当前版本：<code>v0.9.2</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
+  当前版本：<code>v0.9.3</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
