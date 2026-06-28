@@ -28,13 +28,22 @@ static volc_asr::VolcSession s_volcSession;
 namespace {
 
 constexpr DWORD kVolcRecordingWatchdogMs = 18000;
+constexpr DWORD kVolcOpeningFinalizeWatchdogMs = 10000;
 constexpr DWORD kVolcRetryChunkBytes = 6400;
 constexpr size_t kVolcMaxReplayBytes = 120u * 32000u;
 constexpr size_t kVolcShortNoTextRetrySkipBytes = 3u * 32000u;
 constexpr DWORD kKeepaliveMs = 3500;
+constexpr DWORD kVolcOpenHardTimeouts[] = {3000, 3000, 5000, 6000};
 
 std::deque<std::wstring> g_volcRecognitionHistory;
 std::mutex g_volcRecognitionHistoryMutex;
+
+DWORD VolcOpenHardTimeoutForAttempt(int attemptIndex) {
+    if (attemptIndex < 0) attemptIndex = 0;
+    const size_t count = sizeof(kVolcOpenHardTimeouts) / sizeof(kVolcOpenHardTimeouts[0]);
+    const size_t index = (std::min)(static_cast<size_t>(attemptIndex), count - 1);
+    return kVolcOpenHardTimeouts[index];
+}
 
 std::wstring JsonEscape(const std::wstring& s) {
     std::wstring out;
@@ -112,6 +121,8 @@ public:
         pendingAudio_.Clear();
         recordingMs_.store(0.0);
         capturedPcmBytes_.store(0);
+        openingSession_.store(false);
+        openingAttempt_.store(0);
         running_.store(true);
         worker_ = std::thread([this]() { WorkerLoop(); });
         return true;
@@ -126,6 +137,15 @@ public:
         recordingMs_.store(recordingMs);
         capturedPcmBytes_.store(capturedPcmBytes);
         streaming_.store(false);
+        const DWORD baseFinalizeMs = ComputeCloudAsrFinalizeTimeoutMs(recordingMs, capturedPcmBytes);
+        if (openingSession_.load()) {
+            VolcDebugLog("Volc watchdog: OpenSession pending at StopInput; base=%ums guarded=%ums attempt=%d pending=%zu pcm=%zu",
+                         baseFinalizeMs,
+                         (std::max)(baseFinalizeMs, kVolcOpeningFinalizeWatchdogMs),
+                         openingAttempt_.load(),
+                         pendingAudio_.Size(),
+                         capturedPcmBytes);
+        }
     }
 
     void Abort() override {
@@ -153,7 +173,11 @@ public:
 
     DWORD CurrentWatchdogMs() const override {
         if (streaming_.load()) return kVolcRecordingWatchdogMs;
-        return ComputeCloudAsrFinalizeTimeoutMs(recordingMs_.load(), capturedPcmBytes_.load());
+        const DWORD finalizeMs = ComputeCloudAsrFinalizeTimeoutMs(recordingMs_.load(), capturedPcmBytes_.load());
+        if (openingSession_.load()) {
+            return (std::max)(finalizeMs, kVolcOpeningFinalizeWatchdogMs);
+        }
+        return finalizeMs;
     }
 
     const wchar_t* ProviderName() const override {
@@ -207,13 +231,20 @@ private:
         bool nostreamMode = (vcfg.mode == L"bigmodel_nostream");
 
         volc_asr::VolcSession retrySess;
-        bool sessionOpened = volc_asr::OpenSession(retrySess, vcfg);
+        DWORD openHardTimeoutMs = VolcOpenHardTimeoutForAttempt(0);
+        VolcDebugLog("Volc retry: OpenSession attempt 1 starting (hardTimeout=%ums, replay=%zu)",
+                     openHardTimeoutMs, pcm.size());
+        bool sessionOpened = volc_asr::OpenSession(retrySess, vcfg, openHardTimeoutMs);
         const int retryDelays[] = {500, 1000};
         for (int i = 0; !sessionOpened && i < 2; i++) {
-            VolcDebugLog("Volc retry: OpenSession attempt %d failed, retrying in %dms...", i + 1, retryDelays[i]);
+            openHardTimeoutMs = VolcOpenHardTimeoutForAttempt(i + 1);
+            VolcDebugLog("Volc retry: OpenSession attempt %d failed, retrying in %dms (next hardTimeout=%ums)...",
+                         i + 1, retryDelays[i], openHardTimeoutMs);
             Sleep(retryDelays[i]);
             volc_asr::RebuildConnection(retrySess);
-            sessionOpened = volc_asr::OpenSession(retrySess, vcfg);
+            VolcDebugLog("Volc retry: OpenSession attempt %d starting (hardTimeout=%ums)",
+                         i + 2, openHardTimeoutMs);
+            sessionOpened = volc_asr::OpenSession(retrySess, vcfg, openHardTimeoutMs);
         }
         if (!sessionOpened) {
             VolcDebugLog("Volc retry: OpenSession failed after 3 attempts");
@@ -278,6 +309,8 @@ private:
     void WorkerLoop() {
         const ULONGLONG tTotal0 = GetTickCount64();
         auto markStopped = [this]() {
+            openingSession_.store(false);
+            openingAttempt_.store(0);
             running_.store(false);
         };
 
@@ -318,27 +351,46 @@ private:
         }
 
         // Open session with retries
-        bool sessionOpened = volc_asr::OpenSession(s_volcSession, vcfg);
+        openingSession_.store(true);
+        openingAttempt_.store(1);
+        DWORD openHardTimeoutMs = VolcOpenHardTimeoutForAttempt(0);
+        VolcDebugLog("Volc thread: OpenSession attempt 1 starting (hardTimeout=%ums, streaming=%d, pending=%zu)",
+                     openHardTimeoutMs, streaming_.load() ? 1 : 0, pendingAudio_.Size());
+        bool sessionOpened = volc_asr::OpenSession(s_volcSession, vcfg, openHardTimeoutMs);
         int openAttempts = 0;
         const int retryDelays[] = {500, 1000, 2000, 3000};
         while (!sessionOpened && !s_volcSession.forceAbort.load()) {
             if (!s_volcSession.lastError.empty()) break;
             if (!streaming_.load() && openAttempts >= 3) break;
             const int delayMs = retryDelays[(std::min)(openAttempts, 3)];
+            const int nextAttempt = openAttempts + 2;
+            openHardTimeoutMs = VolcOpenHardTimeoutForAttempt(nextAttempt - 1);
             NotifyStatus(L"Reconnecting... Volcano Engine");
-            VolcDebugLog("Volc thread: attempt %d failed, retrying in %dms...",
-                         openAttempts + 1, delayMs);
+            VolcDebugLog("Volc thread: attempt %d failed, retrying in %dms (nextAttempt=%d hardTimeout=%ums, streaming=%d, pending=%zu)",
+                         openAttempts + 1, delayMs, nextAttempt, openHardTimeoutMs,
+                         streaming_.load() ? 1 : 0, pendingAudio_.Size());
             Sleep(delayMs);
             volc_asr::RebuildConnection(s_volcSession);
-            sessionOpened = volc_asr::OpenSession(s_volcSession, vcfg);
+            openingAttempt_.store(nextAttempt);
+            VolcDebugLog("Volc thread: OpenSession attempt %d starting (hardTimeout=%ums, streaming=%d, pending=%zu)",
+                         nextAttempt, openHardTimeoutMs, streaming_.load() ? 1 : 0, pendingAudio_.Size());
+            sessionOpened = volc_asr::OpenSession(s_volcSession, vcfg, openHardTimeoutMs);
             openAttempts++;
         }
+        openingSession_.store(false);
+        openingAttempt_.store(0);
         if (!sessionOpened) {
             s_volcSession.connected = false;
             std::wstring errMsg = L"VolcEngine connect failed";
             if (!s_volcSession.lastError.empty()) {
                 errMsg = s_volcSession.lastError;
             }
+            VolcDebugLog("Volc thread: OpenSession failed after %d attempts (forceAbort=%d, streaming=%d, pending=%zu, err='%ls')",
+                         openAttempts + 1,
+                         s_volcSession.forceAbort.load() ? 1 : 0,
+                         streaming_.load() ? 1 : 0,
+                         pendingAudio_.Size(),
+                         errMsg.c_str());
             if (!abort_.load()) {
                 DispatchFinal(errMsg);
             }
@@ -348,6 +400,8 @@ private:
         if (openAttempts > 0) {
             VolcDebugLog("Volc thread: OpenSession recovered after %d retries", openAttempts);
         }
+        VolcDebugLog("Volc thread: OpenSession ready (attempts=%d, stopped=%d, pending=%zu)",
+                     openAttempts + 1, streaming_.load() ? 0 : 1, pendingAudio_.Size());
         s_volcSession.connected = true;
         volc_asr::g_volcKeepAlive = true;
 
@@ -653,6 +707,8 @@ private:
     std::atomic<bool> streaming_{false};
     std::atomic<bool> abort_{false};
     std::atomic<bool> running_{false};
+    std::atomic<bool> openingSession_{false};
+    std::atomic<int> openingAttempt_{0};
     std::thread worker_;
     std::atomic<double> recordingMs_{0.0};
     std::atomic<size_t> capturedPcmBytes_{0};

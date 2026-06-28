@@ -22,6 +22,7 @@ add_executable(VoxType WIN32
     src/asr/mimo_asr.cpp
     src/asr/qwen_asr.cpp
     src/asr/qwen_streaming_session.cpp
+    src/asr/volcengine_net_diag.cpp
     src/asr/volcengine_streaming_session.cpp
     src/ui/hud.cpp
     src/ui/hotkey.cpp
@@ -68,6 +69,7 @@ target_link_libraries(VoxType
     shlwapi
     winmm
     winhttp
+    ws2_32
     crypt32
     mmdevapi
     imm32

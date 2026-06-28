@@ -39,7 +39,12 @@ public:
         return take > 0;
     }
 
+    size_t Size() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return data_.size();
+    }
+
 private:
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     std::vector<BYTE> data_;
 };

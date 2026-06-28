@@ -425,7 +425,92 @@ inline bool RebuildConnection(VolcSession& sess) {
     return EnsureConnection(sess);
 }
 
-inline bool OpenSessionImpl(VolcSession& sess, const VolcConfig& cfg, bool isRetry) {
+struct VolcWinHttpTraceContext {
+    int id = 0;
+    ULONGLONG startTick = 0;
+    DWORD hardTimeoutMs = 0;
+    std::atomic<DWORD> lastStatus{0};
+    std::atomic<ULONGLONG> lastStatusTick{0};
+    std::atomic<DWORD> lastActiveStatus{0};
+    std::atomic<ULONGLONG> lastActiveStatusTick{0};
+};
+
+inline const char* VolcWinHttpStatusName(DWORD status) {
+    switch (status) {
+    case WINHTTP_CALLBACK_STATUS_RESOLVING_NAME: return "RESOLVING_NAME";
+    case WINHTTP_CALLBACK_STATUS_NAME_RESOLVED: return "NAME_RESOLVED";
+    case WINHTTP_CALLBACK_STATUS_CONNECTING_TO_SERVER: return "CONNECTING_TO_SERVER";
+    case WINHTTP_CALLBACK_STATUS_CONNECTED_TO_SERVER: return "CONNECTED_TO_SERVER";
+    case WINHTTP_CALLBACK_STATUS_SENDING_REQUEST: return "SENDING_REQUEST";
+    case WINHTTP_CALLBACK_STATUS_REQUEST_SENT: return "REQUEST_SENT";
+    case WINHTTP_CALLBACK_STATUS_RECEIVING_RESPONSE: return "RECEIVING_RESPONSE";
+    case WINHTTP_CALLBACK_STATUS_RESPONSE_RECEIVED: return "RESPONSE_RECEIVED";
+    case WINHTTP_CALLBACK_STATUS_CLOSING_CONNECTION: return "CLOSING_CONNECTION";
+    case WINHTTP_CALLBACK_STATUS_CONNECTION_CLOSED: return "CONNECTION_CLOSED";
+    case WINHTTP_CALLBACK_STATUS_HANDLE_CREATED: return "HANDLE_CREATED";
+    case WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING: return "HANDLE_CLOSING";
+    case WINHTTP_CALLBACK_STATUS_DETECTING_PROXY: return "DETECTING_PROXY";
+    case WINHTTP_CALLBACK_STATUS_REDIRECT: return "REDIRECT";
+    case WINHTTP_CALLBACK_STATUS_INTERMEDIATE_RESPONSE: return "INTERMEDIATE_RESPONSE";
+    case WINHTTP_CALLBACK_STATUS_SECURE_FAILURE: return "SECURE_FAILURE";
+    case WINHTTP_CALLBACK_STATUS_HEADERS_AVAILABLE: return "HEADERS_AVAILABLE";
+    case WINHTTP_CALLBACK_STATUS_DATA_AVAILABLE: return "DATA_AVAILABLE";
+    case WINHTTP_CALLBACK_STATUS_READ_COMPLETE: return "READ_COMPLETE";
+    case WINHTTP_CALLBACK_STATUS_WRITE_COMPLETE: return "WRITE_COMPLETE";
+    case WINHTTP_CALLBACK_STATUS_REQUEST_ERROR: return "REQUEST_ERROR";
+    case WINHTTP_CALLBACK_STATUS_SENDREQUEST_COMPLETE: return "SENDREQUEST_COMPLETE";
+    default: return "UNKNOWN";
+    }
+}
+
+inline void CALLBACK VolcWinHttpStatusCallback(HINTERNET,
+                                               DWORD_PTR context,
+                                               DWORD status,
+                                               LPVOID statusInfo,
+                                               DWORD statusInfoLen) {
+    auto* trace = reinterpret_cast<VolcWinHttpTraceContext*>(context);
+    if (!trace) return;
+    const ULONGLONG now = GetTickCount64();
+    trace->lastStatus.store(status);
+    trace->lastStatusTick.store(now);
+    if (status != WINHTTP_CALLBACK_STATUS_HANDLE_CREATED &&
+        status != WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING &&
+        status != WINHTTP_CALLBACK_STATUS_CLOSING_CONNECTION &&
+        status != WINHTTP_CALLBACK_STATUS_CONNECTION_CLOSED) {
+        trace->lastActiveStatus.store(status);
+        trace->lastActiveStatusTick.store(now);
+    }
+
+    const ULONGLONG elapsed = trace->startTick > 0 ? now - trace->startTick : 0;
+    if (status == WINHTTP_CALLBACK_STATUS_REQUEST_ERROR && statusInfo &&
+        statusInfoLen >= sizeof(WINHTTP_ASYNC_RESULT)) {
+        const auto* asyncResult = static_cast<const WINHTTP_ASYNC_RESULT*>(statusInfo);
+        VolcDebugLog("OpenSession WinHTTP trace #%d: %s elapsed=%llums api=%p err=%u",
+                     trace->id, VolcWinHttpStatusName(status), elapsed,
+                     asyncResult->dwResult, asyncResult->dwError);
+        return;
+    }
+    if (status == WINHTTP_CALLBACK_STATUS_SECURE_FAILURE && statusInfo &&
+        statusInfoLen >= sizeof(DWORD)) {
+        const DWORD flags = *static_cast<const DWORD*>(statusInfo);
+        VolcDebugLog("OpenSession WinHTTP trace #%d: %s elapsed=%llums flags=0x%08X",
+                     trace->id, VolcWinHttpStatusName(status), elapsed, flags);
+        return;
+    }
+
+    VolcDebugLog("OpenSession WinHTTP trace #%d: %s elapsed=%llums",
+                 trace->id, VolcWinHttpStatusName(status), elapsed);
+}
+
+inline int NextVolcWinHttpTraceId() {
+    static std::atomic<int> s_nextTraceId{1};
+    return s_nextTraceId.fetch_add(1);
+}
+
+void VolcMaybeLogConnectDiagnosticsAsync(int triggerTraceId, const char* reason, DWORD cooldownMs = 15000);
+
+inline bool OpenSessionImpl(VolcSession& sess, const VolcConfig& cfg, bool isRetry, DWORD hardTimeoutMs) {
+    if (hardTimeoutMs < 1000) hardTimeoutMs = 1000;
     ULONGLONG t0 = GetTickCount64();
     VolcDebugLog("=== OpenSession START ===");
     std::wstring cleanKey = TrimWhitespace(cfg.apiKey);
@@ -568,7 +653,7 @@ inline bool OpenSessionImpl(VolcSession& sess, const VolcConfig& cfg, bool isRet
                      GetLastError(), GetTickCount64() - t0);
         WinHttpCloseHandle(sess.hConnect); sess.hConnect = nullptr;
         WinHttpCloseHandle(sess.hSession); sess.hSession = nullptr;
-        if (!isRetry && GetTickCount64() - t0 < 2000 && RebuildConnection(sess)) return OpenSessionImpl(sess, cfg, true);
+        if (!isRetry && GetTickCount64() - t0 < 2000 && RebuildConnection(sess)) return OpenSessionImpl(sess, cfg, true, hardTimeoutMs);
         return false;
     }
     sess.activeReq.store(hReq);
@@ -593,11 +678,13 @@ inline bool OpenSessionImpl(VolcSession& sess, const VolcConfig& cfg, bool isRet
         { HINTERNET taken = sess.activeReq.exchange(nullptr); if (taken) WinHttpCloseHandle(taken); }
         WinHttpCloseHandle(sess.hConnect); sess.hConnect = nullptr;
         WinHttpCloseHandle(sess.hSession); sess.hSession = nullptr;
-        if (!isRetry && GetTickCount64() - t0 < 2000 && RebuildConnection(sess)) return OpenSessionImpl(sess, cfg, true);
+        if (!isRetry && GetTickCount64() - t0 < 2000 && RebuildConnection(sess)) return OpenSessionImpl(sess, cfg, true, hardTimeoutMs);
         return false;
     }
 
-    WinHttpSetTimeouts(hReq, 3000, 3000, 5000, 5000);
+    const int requestTimeoutMs = static_cast<int>(hardTimeoutMs);
+    WinHttpSetTimeouts(hReq, requestTimeoutMs, requestTimeoutMs, requestTimeoutMs, requestTimeoutMs);
+    VolcDebugLog("OpenSession: request hard timeout budget=%ums", hardTimeoutMs);
 
     if (sess.forceAbort.load()) {
         VolcDebugLog("OpenSession: aborted before SendRequest");
@@ -606,14 +693,38 @@ inline bool OpenSessionImpl(VolcSession& sess, const VolcConfig& cfg, bool isRet
     }
 
     ULONGLONG t3 = GetTickCount64();
-    constexpr ULONGLONG kHardTimeoutMs = 3000;
+    VolcWinHttpTraceContext traceContext;
+    traceContext.id = NextVolcWinHttpTraceId();
+    traceContext.startTick = t3;
+    traceContext.hardTimeoutMs = hardTimeoutMs;
+    WINHTTP_STATUS_CALLBACK callbackResult = WinHttpSetStatusCallback(
+        hReq, VolcWinHttpStatusCallback, WINHTTP_CALLBACK_FLAG_ALL_NOTIFICATIONS, 0);
+    if (callbackResult == WINHTTP_INVALID_STATUS_CALLBACK) {
+        VolcDebugLog("OpenSession WinHTTP trace #%d: SetStatusCallback failed (err=%u)",
+                     traceContext.id, GetLastError());
+    } else {
+        VolcDebugLog("OpenSession WinHTTP trace #%d: START hardTimeout=%ums path=/api/v3/sauc/%ls",
+                     traceContext.id, hardTimeoutMs, cfg.mode.c_str());
+    }
+
     std::atomic<bool> requestDone{false};
-    std::thread watchdogThread([&sess, &requestDone, t3, kHardTimeoutMs]() {
+    std::atomic<bool> hardTimedOut{false};
+    std::thread watchdogThread([&sess, &requestDone, &hardTimedOut, &traceContext, t3, hardTimeoutMs]() {
         while (!requestDone.load()) {
             Sleep(100);
             if (requestDone.load()) return;
-            if (GetTickCount64() - t3 >= kHardTimeoutMs) {
-                VolcDebugLog("OpenSession: hard timeout (%llums), closing activeReq", GetTickCount64() - t3);
+            if (GetTickCount64() - t3 >= hardTimeoutMs) {
+                hardTimedOut.store(true);
+                const DWORD lastStatus = traceContext.lastStatus.load();
+                const ULONGLONG lastStatusTick = traceContext.lastStatusTick.load();
+                const ULONGLONG lastStatusAge = lastStatusTick > 0 ? GetTickCount64() - lastStatusTick : 0;
+                const DWORD activeStatus = traceContext.lastActiveStatus.load();
+                const ULONGLONG activeStatusTick = traceContext.lastActiveStatusTick.load();
+                const ULONGLONG activeStatusAge = activeStatusTick > 0 ? GetTickCount64() - activeStatusTick : 0;
+                VolcDebugLog("OpenSession: hard timeout (%llums >= %ums), closing activeReq (trace=%d lastStatus=%s age=%llums activeStatus=%s activeAge=%llums)",
+                             GetTickCount64() - t3, hardTimeoutMs, traceContext.id,
+                             VolcWinHttpStatusName(lastStatus), lastStatusAge,
+                             VolcWinHttpStatusName(activeStatus), activeStatusAge);
                 HINTERNET taken = sess.activeReq.exchange(nullptr);
                 if (taken) WinHttpCloseHandle(taken);
                 return;
@@ -621,31 +732,68 @@ inline bool OpenSessionImpl(VolcSession& sess, const VolcConfig& cfg, bool isRet
         }
     });
 
-    bool sendOk = (WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                                      WINHTTP_NO_REQUEST_DATA, 0, 0, 0) != FALSE);
-    bool recvOk = sendOk && (WinHttpReceiveResponse(hReq, nullptr) != FALSE);
+    BOOL sendResult = WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                                         WINHTTP_NO_REQUEST_DATA, 0, 0,
+                                         reinterpret_cast<DWORD_PTR>(&traceContext));
+    DWORD sendErr = sendResult ? ERROR_SUCCESS : GetLastError();
+    BOOL recvResult = FALSE;
+    DWORD recvErr = ERROR_SUCCESS;
+    if (sendResult) {
+        recvResult = WinHttpReceiveResponse(hReq, nullptr);
+        if (!recvResult) recvErr = GetLastError();
+    }
+    bool sendOk = (sendResult != FALSE);
+    bool recvOk = (recvResult != FALSE);
     requestDone.store(true);
     watchdogThread.join();
+    {
+        const DWORD lastStatus = traceContext.lastStatus.load();
+        const ULONGLONG lastStatusTick = traceContext.lastStatusTick.load();
+        const ULONGLONG lastStatusAge = lastStatusTick > 0 ? GetTickCount64() - lastStatusTick : 0;
+        const DWORD activeStatus = traceContext.lastActiveStatus.load();
+        const ULONGLONG activeStatusTick = traceContext.lastActiveStatusTick.load();
+        const ULONGLONG activeStatusAge = activeStatusTick > 0 ? GetTickCount64() - activeStatusTick : 0;
+        VolcDebugLog("OpenSession WinHTTP trace #%d: END sendOk=%d recvOk=%d hardTimedOut=%d forceAbort=%d lastStatus=%s age=%llums activeStatus=%s activeAge=%llums elapsed=%llums",
+                     traceContext.id, sendOk ? 1 : 0, recvOk ? 1 : 0,
+                     hardTimedOut.load() ? 1 : 0, sess.forceAbort.load() ? 1 : 0,
+                     VolcWinHttpStatusName(lastStatus), lastStatusAge,
+                     VolcWinHttpStatusName(activeStatus), activeStatusAge, GetTickCount64() - t3);
+    }
 
     if (!sendOk) {
         { HINTERNET taken = sess.activeReq.exchange(nullptr); if (taken) WinHttpCloseHandle(taken); }
-        VolcDebugLog("OpenSession: WinHttpSendRequest failed (err=%u, elapsed=%llums)",
-                     GetLastError(), GetTickCount64() - t0);
+        VolcDebugLog("OpenSession: WinHttpSendRequest failed (err=%u, elapsed=%llums, hardTimedOut=%d, forceAbort=%d)",
+                     sendErr, GetTickCount64() - t0, hardTimedOut.load() ? 1 : 0, sess.forceAbort.load() ? 1 : 0);
+        if (traceContext.lastActiveStatus.load() == WINHTTP_CALLBACK_STATUS_CONNECTING_TO_SERVER) {
+            VolcMaybeLogConnectDiagnosticsAsync(
+                traceContext.id,
+                hardTimedOut.load() ? "send_failed_after_connect_hard_timeout" : "send_failed_while_connecting");
+        }
         if (sess.hConnect) { WinHttpCloseHandle(sess.hConnect); sess.hConnect = nullptr; }
         if (sess.hSession) { WinHttpCloseHandle(sess.hSession); sess.hSession = nullptr; }
-        if (!isRetry && GetTickCount64() - t0 < 2000 && RebuildConnection(sess)) return OpenSessionImpl(sess, cfg, true);
+        if (!isRetry && GetTickCount64() - t0 < 2000 && RebuildConnection(sess)) return OpenSessionImpl(sess, cfg, true, hardTimeoutMs);
         return false;
     }
 
     if (!recvOk) {
         { HINTERNET taken = sess.activeReq.exchange(nullptr); if (taken) WinHttpCloseHandle(taken); }
-        VolcDebugLog("OpenSession: WinHttpReceiveResponse failed (err=%u, elapsed=%llums)",
-                     GetLastError(), GetTickCount64() - t0);
+        VolcDebugLog("OpenSession: WinHttpReceiveResponse failed (err=%u, elapsed=%llums, hardTimedOut=%d, forceAbort=%d)",
+                     recvErr, GetTickCount64() - t0, hardTimedOut.load() ? 1 : 0, sess.forceAbort.load() ? 1 : 0);
         if (sess.hConnect) { WinHttpCloseHandle(sess.hConnect); sess.hConnect = nullptr; }
         if (sess.hSession) { WinHttpCloseHandle(sess.hSession); sess.hSession = nullptr; }
-        if (!isRetry && GetTickCount64() - t0 < 2000 && RebuildConnection(sess)) return OpenSessionImpl(sess, cfg, true);
+        if (!isRetry && GetTickCount64() - t0 < 2000 && RebuildConnection(sess)) return OpenSessionImpl(sess, cfg, true, hardTimeoutMs);
         return false;
     }
+
+    if (hardTimedOut.load()) {
+        { HINTERNET taken = sess.activeReq.exchange(nullptr); if (taken) WinHttpCloseHandle(taken); }
+        VolcDebugLog("OpenSession: request completed after hard timeout race (elapsed=%llums), treating as failed",
+                     GetTickCount64() - t0);
+        if (sess.hConnect) { WinHttpCloseHandle(sess.hConnect); sess.hConnect = nullptr; }
+        if (sess.hSession) { WinHttpCloseHandle(sess.hSession); sess.hSession = nullptr; }
+        return false;
+    }
+
     ULONGLONG t4 = GetTickCount64();
     VolcDebugLog("SendRequest+ReceiveResponse: %llums", t4 - t3);
 
@@ -661,7 +809,7 @@ inline bool OpenSessionImpl(VolcSession& sess, const VolcConfig& cfg, bool isRet
         { HINTERNET taken = sess.activeReq.exchange(nullptr); if (taken) WinHttpCloseHandle(taken); }
         WinHttpCloseHandle(sess.hConnect); sess.hConnect = nullptr;
         WinHttpCloseHandle(sess.hSession); sess.hSession = nullptr;
-        if (!isRetry && GetTickCount64() - t0 < 2000 && RebuildConnection(sess)) return OpenSessionImpl(sess, cfg, true);
+        if (!isRetry && GetTickCount64() - t0 < 2000 && RebuildConnection(sess)) return OpenSessionImpl(sess, cfg, true, hardTimeoutMs);
         return false;
     }
 
@@ -673,7 +821,7 @@ inline bool OpenSessionImpl(VolcSession& sess, const VolcConfig& cfg, bool isRet
                      GetLastError(), GetTickCount64() - t0);
         WinHttpCloseHandle(sess.hConnect); sess.hConnect = nullptr;
         WinHttpCloseHandle(sess.hSession); sess.hSession = nullptr;
-        if (!isRetry && GetTickCount64() - t0 < 2000 && RebuildConnection(sess)) return OpenSessionImpl(sess, cfg, true);
+        if (!isRetry && GetTickCount64() - t0 < 2000 && RebuildConnection(sess)) return OpenSessionImpl(sess, cfg, true, hardTimeoutMs);
         return false;
     }
 
@@ -711,8 +859,8 @@ inline bool OpenSessionImpl(VolcSession& sess, const VolcConfig& cfg, bool isRet
     return true;
 }
 
-inline bool OpenSession(VolcSession& sess, const VolcConfig& cfg) {
-    return OpenSessionImpl(sess, cfg, false);
+inline bool OpenSession(VolcSession& sess, const VolcConfig& cfg, DWORD hardTimeoutMs = 3000) {
+    return OpenSessionImpl(sess, cfg, false, hardTimeoutMs);
 }
 
 inline std::wstring SendAudio(VolcSession& sess, const std::vector<BYTE>& pcmChunk, bool isLast, bool asyncMode = false, bool nostreamMode = false) {
@@ -835,7 +983,7 @@ inline void PrewarmConnection(VolcSession& sess) {
         return;
     }
     sess.lastUsedTick = GetTickCount64();
-    VolcDebugLog("PrewarmConnection: OK (hSession+hConnect ready)");
+    VolcDebugLog("PrewarmConnection: OK (hSession+hConnect handles ready; network handshake deferred)");
 }
 
 struct TestResult {
