@@ -7,6 +7,7 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 set(SHERPA_DIR "${CMAKE_SOURCE_DIR}/third_party/sherpa-onnx")
 set(KNF_DIR "${CMAKE_SOURCE_DIR}/third_party/kaldi_native_fbank")
+set(OPUS_DIR "${CMAKE_SOURCE_DIR}/third_party/opus")
 
 add_executable(VoxType WIN32
     src/app/main.cpp
@@ -19,6 +20,8 @@ add_executable(VoxType WIN32
     src/asr/asr_dispatcher.cpp
     src/asr/cloud_asr_common.cpp
     src/asr/cloud_http_common.cpp
+    src/asr/doubao_ime_asr.cpp
+    src/asr/doubao_ime_streaming_session.cpp
     src/asr/mimo_asr.cpp
     src/asr/qwen_asr.cpp
     src/asr/qwen_streaming_session.cpp
@@ -47,12 +50,14 @@ target_include_directories(VoxType PRIVATE
     "${SHERPA_DIR}/include"
     "${CMAKE_SOURCE_DIR}/third_party/onnxruntime/include"
     "${KNF_DIR}/include"
+    "${OPUS_DIR}/include"
 )
 
 target_link_directories(VoxType PRIVATE
     "${SHERPA_DIR}/lib"
     "${CMAKE_SOURCE_DIR}/third_party/onnxruntime"
     "${KNF_DIR}/lib"
+    "${OPUS_DIR}/lib"
 )
 
 target_link_libraries(VoxType
@@ -71,6 +76,8 @@ target_link_libraries(VoxType
     winhttp
     ws2_32
     crypt32
+    bcrypt
+    opus
     mmdevapi
     imm32
     delayimp

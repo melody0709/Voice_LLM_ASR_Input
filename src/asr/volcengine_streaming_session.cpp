@@ -434,7 +434,7 @@ private:
 
         auto bufferUntilStop = [&]() {
             VolcDebugLog("Volc thread: connection lost while recording, buffering until stop");
-            NotifyStatus(L"Reconnecting... Volcano Engine");
+            NotifyStatus(L"Buffering... Volcano Engine");
             size_t bufferedBytes = 0;
             while (streaming_.load() && !s_volcSession.forceAbort.load()) {
                 std::vector<BYTE> buffered;

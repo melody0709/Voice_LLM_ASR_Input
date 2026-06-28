@@ -6,12 +6,15 @@
 #include "engine.h"
 #include "hotkey.h"
 #include "hud.h"
+#include "doubao_ime_asr.h"
 #include "mimo_asr.h"
 #include "qwen_asr.h"
 #include "volcengine_asr.h"
 
 #include <algorithm>
+#include <atomic>
 #include <commctrl.h>
+#include <cstdint>
 #include <imm.h>
 #include <windowsx.h>
 #include <shlobj.h>
@@ -118,10 +121,36 @@ const wchar_t* MimoLanguageCodeFromIndex(int index) {
     }
     return mimo_asr::kDefaultLanguage;
 }
+
+struct DoubaoImeTestMessage {
+    doubao_ime_asr::TestResult result;
+    uint64_t generation = 0;
+};
+
+std::atomic<uint64_t> g_doubaoImeTestGeneration{0};
+constexpr UINT kDoubaoImeTestResultMessage = WM_APP + 11;
 }
 
 void SetStatus(HWND hwnd, const std::wstring& text) {
     SetWindowTextW(GetDlgItem(hwnd, IDC_STATUS), text.c_str());
+}
+
+std::wstring DoubaoImeCredentialStatusText() {
+    if (g_config.doubaoImeDeviceId.empty()) {
+        return L"Not registered. First use or Test Connection will register automatically.";
+    }
+    std::wstring id = g_config.doubaoImeDeviceId;
+    if (id.size() > 22) {
+        id = id.substr(0, 10) + L"..." + id.substr(id.size() - 8);
+    }
+    return L"Registered device: " + id;
+}
+
+void RefreshDoubaoImeStatus(HWND hwnd) {
+    HWND status = GetDlgItem(hwnd, IDC_DOUBAO_IME_STATUS);
+    if (status) {
+        SetWindowTextW(status, DoubaoImeCredentialStatusText().c_str());
+    }
 }
 
 void SetClipboardText(const std::wstring& text) {
@@ -324,6 +353,10 @@ void AddMimoControl(HWND hwnd) {
     if (hwnd) g_mimoControls.push_back(hwnd);
 }
 
+void AddDoubaoImeControl(HWND hwnd) {
+    if (hwnd) g_doubaoImeControls.push_back(hwnd);
+}
+
 void AddVadFireredControl(HWND hwnd) {
     if (hwnd) g_vadFireredControls.push_back(hwnd);
 }
@@ -343,6 +376,7 @@ void ShowCloudSubPage(HWND hwnd, int providerIdx) {
     for (HWND c : g_volcengineControls) ShowWindow(c, providerIdx == 0 ? SW_SHOW : SW_HIDE);
     for (HWND c : g_qwenControls) ShowWindow(c, providerIdx == 2 ? SW_SHOW : SW_HIDE);
     for (HWND c : g_mimoControls) ShowWindow(c, providerIdx == 3 ? SW_SHOW : SW_HIDE);
+    for (HWND c : g_doubaoImeControls) ShowWindow(c, providerIdx == 4 ? SW_SHOW : SW_HIDE);
 }
 
 void ShowSettingsPage(HWND hwnd, int page) {
@@ -368,6 +402,7 @@ void ShowSettingsPage(HWND hwnd, int page) {
         for (HWND c : g_volcengineControls) ShowWindow(c, SW_HIDE);
         for (HWND c : g_qwenControls) ShowWindow(c, SW_HIDE);
         for (HWND c : g_mimoControls) ShowWindow(c, SW_HIDE);
+        for (HWND c : g_doubaoImeControls) ShowWindow(c, SW_HIDE);
     }
     InvalidateRect(hwnd, nullptr, TRUE);
 }
@@ -583,11 +618,13 @@ void LoadSettingsControls(HWND hwnd) {
     ComboBox_AddString(backendCombo, L"Baidu Cloud");
     ComboBox_AddString(backendCombo, L"Qwen ASR");
     ComboBox_AddString(backendCombo, L"MiMo ASR");
+    ComboBox_AddString(backendCombo, L"Doubao IME (Free)");
     int backendIdx = 0;
     if (g_config.asrBackend == L"volcengine") backendIdx = 1;
     else if (g_config.asrBackend == L"baidu") backendIdx = 2;
     else if (g_config.asrBackend == L"qwen") backendIdx = 3;
     else if (g_config.asrBackend == L"mimo") backendIdx = 4;
+    else if (g_config.asrBackend == L"doubao_ime") backendIdx = 5;
     ComboBox_SetCurSel(backendCombo, backendIdx);
 
     HWND cloudProviderCombo = GetDlgItem(hwnd, IDC_CLOUD_PROVIDER);
@@ -595,10 +632,12 @@ void LoadSettingsControls(HWND hwnd) {
     ComboBox_AddString(cloudProviderCombo, L"Baidu Cloud");
     ComboBox_AddString(cloudProviderCombo, L"Qwen ASR (DashScope)");
     ComboBox_AddString(cloudProviderCombo, L"MiMo ASR (Xiaomi)");
+    ComboBox_AddString(cloudProviderCombo, L"Doubao IME (Free)");
     int cloudIdx = 0;
     if (g_config.cloudProvider == L"baidu") cloudIdx = 1;
     else if (g_config.cloudProvider == L"qwen") cloudIdx = 2;
     else if (g_config.cloudProvider == L"mimo") cloudIdx = 3;
+    else if (g_config.cloudProvider == L"doubao_ime") cloudIdx = 4;
     ComboBox_SetCurSel(cloudProviderCombo, cloudIdx);
     g_cloudProviderIdx = cloudIdx;
 
@@ -653,6 +692,7 @@ void LoadSettingsControls(HWND hwnd) {
     SetWindowTextW(GetDlgItem(hwnd, IDC_MIMO_API_KEY), g_config.mimoApiKey.c_str());
     SetWindowTextW(GetDlgItem(hwnd, IDC_MIMO_BASE_URL), g_config.mimoBaseUrl.c_str());
     SetWindowTextW(GetDlgItem(hwnd, IDC_MIMO_MODEL), g_config.mimoModel.c_str());
+    RefreshDoubaoImeStatus(hwnd);
 
     HWND qwenLangCombo = GetDlgItem(hwnd, IDC_QWEN_LANGUAGE);
     for (const auto& lang : kQwenLanguages) {
@@ -852,6 +892,7 @@ void SaveSettingsControls(HWND hwnd) {
         else if (sel == 2) g_config.asrBackend = L"baidu";
         else if (sel == 3) g_config.asrBackend = L"qwen";
         else if (sel == 4) g_config.asrBackend = L"mimo";
+        else if (sel == 5) g_config.asrBackend = L"doubao_ime";
         else g_config.asrBackend = L"local";
     }
     {
@@ -859,6 +900,7 @@ void SaveSettingsControls(HWND hwnd) {
         if (cloudIdx == 1) g_config.cloudProvider = L"baidu";
         else if (cloudIdx == 2) g_config.cloudProvider = L"qwen";
         else if (cloudIdx == 3) g_config.cloudProvider = L"mimo";
+        else if (cloudIdx == 4) g_config.cloudProvider = L"doubao_ime";
         else g_config.cloudProvider = L"volcengine";
     }
     wchar_t baiduApiKey[256] = {};
@@ -1314,6 +1356,9 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
     case WM_SIZE:
         LayoutSettingsWindow(hwnd);
         return 0;
+    case kDoubaoImeSettingsRefreshMessage:
+        RefreshDoubaoImeStatus(hwnd);
+        return 0;
     case WM_CTLCOLORDLG:
         return reinterpret_cast<LRESULT>(g_settingsBgBrush);
     case WM_CTLCOLORSTATIC: {
@@ -1352,6 +1397,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         g_volcengineControls.clear();
         g_qwenControls.clear();
         g_mimoControls.clear();
+        g_doubaoImeControls.clear();
         g_vadFireredControls.clear();
         g_vadSileroControls.clear();
 
@@ -1657,6 +1703,21 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         AddMimoControl(CreateCombo(hwnd, IDC_MIMO_LANGUAGE, S(UiStyle::InputLeft), S(UiStyle::RowInputY(4)), S(UiStyle::ComboW), S(UiStyle::ComboH)));
 
         AddMimoControl(CreateButton(hwnd, IDC_MIMO_TEST, S(500), S(UiStyle::RowInputY(0)), S(UiStyle::ActionBtnW), S(UiStyle::ActionBtnH), L"Test Connection"));
+
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(1)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Credentials");
+        AddDoubaoImeControl(control);
+        HWND doubaoStatus = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE,
+                                          S(UiStyle::InputLeft), S(UiStyle::RowInputY(1)) + S(4),
+                                          S(500), S(UiStyle::LabelH), hwnd,
+                                          reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_DOUBAO_IME_STATUS)),
+                                          g_instance, nullptr);
+        ApplyUiFont(doubaoStatus);
+        AddDoubaoImeControl(doubaoStatus);
+        AddDoubaoImeControl(CreateButton(hwnd, IDC_DOUBAO_IME_TEST, S(500), S(UiStyle::RowInputY(0)), S(UiStyle::ActionBtnW), S(UiStyle::ActionBtnH), L"Test Connection"));
+        AddDoubaoImeControl(CreateButton(hwnd, IDC_DOUBAO_IME_RESET, S(UiStyle::InputLeft), S(UiStyle::RowInputY(2)), S(170), S(UiStyle::ActionBtnH), L"Reset Credentials"));
+        control = CreateLabel(hwnd, S(UiStyle::InputLeft), S(UiStyle::RowInputY(3)), S(560), S(UiStyle::LabelH),
+                              L"Experimental unofficial Doubao IME endpoint. No API key is required.");
+        AddDoubaoImeControl(control);
 
         control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(1)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"API Key (X-Api-Key)");
         AddVolcengineControl(control);
@@ -2167,6 +2228,36 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             }).detach();
             return 0;
         }
+        case IDC_DOUBAO_IME_TEST: {
+            doubao_ime_asr::DoubaoImeConfig dcfg;
+            dcfg.deviceId = g_config.doubaoImeDeviceId;
+            dcfg.cdid = g_config.doubaoImeCdid;
+            dcfg.token = g_config.doubaoImeToken;
+            const uint64_t generation = g_doubaoImeTestGeneration.fetch_add(1) + 1;
+            EnableWindow(GetDlgItem(hwnd, IDC_DOUBAO_IME_TEST), FALSE);
+
+            SetStatus(hwnd, L"Testing Doubao IME ASR connection...");
+            std::thread([hwnd, dcfg, generation]() {
+                auto* msg = new DoubaoImeTestMessage;
+                msg->generation = generation;
+                msg->result = doubao_ime_asr::TestConnection(dcfg);
+                if (!PostMessageW(hwnd, kDoubaoImeTestResultMessage, msg->result.ok ? 0 : 1,
+                                  reinterpret_cast<LPARAM>(msg))) {
+                    delete msg;
+                }
+            }).detach();
+            return 0;
+        }
+        case IDC_DOUBAO_IME_RESET:
+            g_doubaoImeTestGeneration.fetch_add(1);
+            EnableWindow(GetDlgItem(hwnd, IDC_DOUBAO_IME_TEST), TRUE);
+            g_config.doubaoImeDeviceId.clear();
+            g_config.doubaoImeCdid.clear();
+            g_config.doubaoImeToken.clear();
+            SaveConfig();
+            RefreshDoubaoImeStatus(hwnd);
+            SetStatus(hwnd, L"Doubao IME credentials reset.");
+            return 0;
         default:
             break;
         }
@@ -2192,6 +2283,29 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                             MB_ICONERROR | MB_OK);
             }
             SetStatus(hwnd, shortMsg.c_str());
+        }
+        return 0;
+    }
+    case kDoubaoImeTestResultMessage: {
+        std::unique_ptr<DoubaoImeTestMessage> msg(reinterpret_cast<DoubaoImeTestMessage*>(lParam));
+        if (!msg || msg->generation != g_doubaoImeTestGeneration.load()) {
+            return 0;
+        }
+        EnableWindow(GetDlgItem(hwnd, IDC_DOUBAO_IME_TEST), TRUE);
+        if (msg && msg->result.credentialsChanged) {
+            g_config.doubaoImeDeviceId = msg->result.credentials.deviceId;
+            g_config.doubaoImeCdid = msg->result.credentials.cdid;
+            g_config.doubaoImeToken = msg->result.credentials.token;
+            SaveConfig();
+            RefreshDoubaoImeStatus(hwnd);
+        }
+        if (msg && msg->result.ok) {
+            std::wstring status = msg->result.message.empty() ? std::wstring(L"Connection OK.") : msg->result.message;
+            SetStatus(hwnd, status);
+        } else {
+            std::wstring detail = msg ? msg->result.message : L"Connection failed";
+            SetStatus(hwnd, L"Connection failed: Doubao IME ASR");
+            MessageBoxW(hwnd, detail.c_str(), L"Connection Test Failed", MB_ICONERROR | MB_OK);
         }
         return 0;
     }

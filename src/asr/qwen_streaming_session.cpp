@@ -306,12 +306,18 @@ private:
         };
 
         auto bufferUntilStop = [&]() {
-            NotifyStatus(L"Reconnecting... Qwen ASR");
+            NotifyStatus(L"Buffering... Qwen ASR");
             while (streaming_.load() && !abort_.load()) {
                 std::vector<BYTE> buffered;
                 pendingAudio_.SwapTo(buffered);
                 if (!buffered.empty()) {
                     replayBuffer.Append(buffered);
+                }
+                if (pendingAudio_.Overflowed()) {
+                    error = L"audio buffer overflow while reconnecting";
+                    failed = true;
+                    retryWithReplay = true;
+                    break;
                 }
                 Sleep(20);
             }
@@ -344,6 +350,12 @@ private:
             if (!pending.empty()) {
                 chunk.insert(chunk.end(), pending.begin(), pending.end());
                 if (!flushFullChunks()) break;
+            }
+            if (pendingAudio_.Overflowed()) {
+                error = L"audio buffer overflow while recording";
+                failed = true;
+                retryWithReplay = true;
+                break;
             }
 
             if (!streaming) break;

@@ -2,6 +2,51 @@
 
 > 🇬🇧 [English](../CHANGELOG.md)
 
+## Unreleased
+
+- 暂无。
+
+## v0.9.4 (2026-06-28)
+
+### 新增
+
+- **豆包输入法实验 ASR 后端**：新增非默认流式云端 ASR provider：`doubao_ime`，界面显示为 `Doubao IME (Free)`。它使用非官方豆包输入法端点，不是火山引擎官方语音协议。
+- **豆包输入法客户端/session**：新增设备注册、`asr_config.app_key` token bootstrap、CNG MD5 `x-ss-stub`、WinHTTP WebSocket、手写 protobuf、Opus 20ms 帧编码、partial HUD、final 分发、replay retry、可取消 bootstrap/startup 句柄、瞬态启动重试、auth/token 凭据重置重试。
+- **豆包输入法 Settings 子页**：新增 provider 选择、凭据状态、`Test Connection`、`Reset Credentials`。device id/cdid/token 以 `doubao_ime_*` 持久化，token 使用 DPAPI 加密。
+- **豆包输入法诊断 probe**：新增 `tools/doubao_ime_probe.bat`，用于编译独立控制台探针，默认复用已保存的豆包输入法凭据，支持 live protocol 检查、可选 WAV 识别检查和可选 streaming 发送/drain 检查；支持 `--streaming` 和 `--fresh`。
+- **Vendored Opus**：新增 `third_party/opus` 下的静态 `libopus` 1.6.1 头文件/库和 license，链接 `bcrypt.lib` 用于 CNG hash。
+
+### 变更
+
+- **Streaming 后端识别**：将 Qwen/火山专属判断替换为共享 streaming cloud backend helper，覆盖 Qwen、火山和豆包输入法，用于 Stop/watchdog/debug 行为；本地 streaming VAD 仅保留给 Qwen 和火山引擎。
+- **豆包输入法 Test Connection**：Settings 探测现在会发送 20ms Opus `Last` 帧、结束 session、等待服务端完成，并回传凭据变更，不再只测 WebSocket 初始握手。
+- **豆包输入法 partial fallback**：tray app 的 drain 线程现在会在明确 final 到来前保留最新非 final 候选文本，与参考实现一致，避免服务端只发 partial 后结束时误走空结果重试。
+- **豆包输入法长录音 segment 聚合**：`result_json.results[*].text` 现在会按 result 顺序拼接，不再只保留最后一个 segment，修复长录音被服务端拆段后只粘贴最后一段的问题。
+- **豆包输入法云端 VAD 分段累计**：Doubao IME 现在会跨多个 WebSocket 事件累计 final 文本，并把 partial HUD 更新成“本次录音完整预览”。录音中途的云端 VAD final 不再满足松手后的 final 等待；松手后会继续等待 `FinishSession` 之后的 final 或 `SessionFinished`，修复长录音只上屏最后一个云端分段的问题。
+- **豆包输入法 partial 窗口重置处理**：长录音现在维护“已提交前缀 + 当前服务端 partial 窗口”。只有明显长度骤降才视为输入法服务清空/重启 partial 窗口；普通服务端修正只替换当前窗口，不再提交进累计文本，避免 final 出现不断增长的重复 partial。
+- **豆包输入法清屏 partial HUD**：Doubao IME 的 partial 在三行正文内仍完整实时显示；超过后不再维护历史滚动或旧尾行节流模式，而是清空前文显示，只从当前最后一句重新开始。清屏后的新页会继续正常累积，直到再次超过三行正文才会再次清屏；如果单句本身过长，则从句首向后裁到能放下为止。一次录音内首次清屏后，HUD 会保持固定 4 行高度，避免重新缩回一行再展开；宽度仍为 `min(900 DIP, 75% 屏幕宽度)`。该逻辑只影响 HUD，不改变最终上屏的完整文本。
+- **Streaming partial HUD 泛化**：Qwen、火山引擎和 Doubao IME 现在共用受约束的清屏 partial HUD 路径，长 partial 更新时使用同一套宽度上限、清屏分页和固定高度行为。
+- **Streaming 云端预采集 VAD**：Qwen 和火山引擎现在会先初始化 streaming VAD，再 replay 预采集头部音频，使 replay 的头部音频和实时回调音频进入同一套 VAD trim 状态。
+- **Pending PCM 上限**：`PendingPcmBuffer` 新增默认 120 秒 16kHz mono PCM 上限，避免 streaming 云端后端卡住或重连时无限增长内存；Qwen 和豆包输入法会将溢出作为可重试 transport failure 处理。
+- **豆包输入法 Settings 竞态保护**：`Test Connection` 结果现在携带 generation id，旧后台测试结果不能在 `Reset Credentials` 或更新一次测试后覆盖凭据。
+- **Streaming 云端失败状态文案**：录音中 transport 丢失时现在显示 `Buffering...` 而不是 `Reconnecting...`，因为当前策略是缓存音频并在松手后 replay，不是在同一次按住期间打开替代 WebSocket。
+- **豆包输入法绕过本地 VAD**：Doubao IME 现在忽略本地 `Enable VAD`，直接上传原始 PCM 编码后的 Opus；Qwen 和火山引擎继续保留 streaming VAD trim 路径。
+
+### 验证状态
+
+- `.\build.bat` 已通过。
+- `.\tools\doubao_ime_probe.bat` 已用保存凭据通过 live endpoint 验证（`config_credentials=1`、`protocol_ok=1`、`changed=0`），并成功识别仓库中的 16kHz mono WAV（`wav_ok=1`，文本：`开放时间，早上 9 点至下午 5 点。`）。
+- `.\tools\doubao_ime_probe.bat --streaming` 已通过实时发送/drain 路径验证（`streaming_ok=1`、`partial_count=6`、`final_count=1`、`session_finished=1`，文本：`开放时间，早上 9 点至下午 5 点。`）。
+- partial fallback 修复后已重新运行上述 live probe 和 `.\build.bat`，均仍通过。
+- Settings generation guard、预采集 VAD replay、pending buffer 上限修复后已重新运行 `.\build.bat`、`git diff --check`、`.\tools\doubao_ime_probe.bat --streaming`，均通过；`git diff --check` 仅有既有 CRLF 提示。
+- 长录音 segment 聚合修复后已重新运行 `.\build.bat`、`git diff --check`、`.\tools\doubao_ime_probe.bat --streaming`，均通过；`git diff --check` 仅有既有 CRLF 提示。
+- 跨事件云端 VAD 分段累计修复后已重新运行 `.\build.bat`、`git diff --check`、`.\tools\doubao_ime_probe.bat --streaming`，均通过；`git diff --check` 仅有既有 CRLF 提示。
+- 收紧 partial 窗口重置判断后已重新运行 `.\build.bat` 和 `.\tools\doubao_ime_probe.bat --streaming`，WAV 和 streaming probe 都返回预期样例文本且没有重复。
+- 豆包输入法清屏 HUD 调整后已重新运行 `.\build.bat`。
+- 将清屏 partial HUD 路径泛化到 Qwen、火山引擎和 Doubao IME 后，已重新运行 `.\build.bat` 和 `git diff --check`；构建通过，`git diff --check` 仅有既有 CRLF 提示。
+- 自动化桌面冒烟已打开真实 Settings 窗口，切到 `Cloud ASR` -> `Doubao IME (Free)`，确认当前 DPI 下凭据/Test/Reset 控件可见，且 Settings 内 `Test Connection` 返回 OK。
+- 仍待人工桌面冒烟：热键/麦克风录音、partial HUD、final 粘贴、too-short 处理、断网/服务端关闭后的 watchdog 恢复，以及额外 DPI 检查。
+
 ## v0.9.3 (2026-06-15)
 
 ### 修复

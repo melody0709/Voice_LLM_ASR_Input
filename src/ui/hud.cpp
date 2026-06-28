@@ -13,6 +13,13 @@
 #pragma comment(lib, "dwrite.lib")
 #pragma comment(lib, "shcore.lib")
 
+namespace {
+float g_hudMaxWidthDip = 0.0f;
+float g_hudMaxScreenWidthFraction = 0.0f;
+int g_hudMaxLines = 0;
+int g_hudFixedLines = 0;
+}
+
 // Return DPI scale for a specific monitor (not tied to a window).
 static float DpiScaleForMonitor(HMONITOR monitor) {
     UINT dpiX = 96, dpiY = 96;
@@ -64,11 +71,42 @@ DWRITE_TEXT_METRICS MeasureHudText(const std::wstring& text, float maxWidth, DWR
     return metrics;
 }
 
+static float ConstrainedHudMaxWidthDip(const RECT& workArea,
+                                       float scale,
+                                       float maxWidthDipOverride,
+                                       float maxScreenWidthFraction) {
+    const float workWidthDip = static_cast<float>(std::max(1L, workArea.right - workArea.left)) / scale;
+    float maxWidthDip = std::max(kHudMinWidthDip, workWidthDip - kHudScreenMarginXDip);
+    if (maxScreenWidthFraction > 0.0f) {
+        maxWidthDip = std::min(maxWidthDip, workWidthDip * maxScreenWidthFraction);
+    }
+    if (maxWidthDipOverride > 0.0f) {
+        maxWidthDip = std::min(maxWidthDip, maxWidthDipOverride);
+    }
+    return std::max(kHudMinWidthDip, maxWidthDip);
+}
+
+UINT32 HudWrappedLineCount(const std::wstring& text,
+                           float maxWidthDip,
+                           float maxScreenWidthFraction) {
+    POINT pt;
+    GetCursorPos(&pt);
+    HMONITOR monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi = { sizeof(mi) };
+    GetMonitorInfoW(monitor, &mi);
+    const float scale = DpiScaleForMonitor(monitor);
+    const float textX = kHudLeftPad + kHudWaveWidth + kHudGap;
+    const float hudWidthDip = ConstrainedHudMaxWidthDip(mi.rcWork, scale, maxWidthDip, maxScreenWidthFraction);
+    const float maxTextWidth = hudWidthDip - textX - kHudRightPad;
+    const DWRITE_TEXT_METRICS metrics = MeasureHudText(text, maxTextWidth, DWRITE_WORD_WRAPPING_WRAP);
+    return metrics.lineCount;
+}
+
 HudSize IdealHudSize(const std::wstring& text, const RECT& workArea, float scale) {
     const float textX = kHudLeftPad + kHudWaveWidth + kHudGap;
-    const float workWidthDip = static_cast<float>(std::max(1L, workArea.right - workArea.left)) / scale;
     const float workHeightDip = static_cast<float>(std::max(1L, workArea.bottom - workArea.top)) / scale;
-    const float maxWidthDip = std::max(kHudMinWidthDip, workWidthDip - kHudScreenMarginXDip);
+    const float maxWidthDip = ConstrainedHudMaxWidthDip(
+        workArea, scale, g_hudMaxWidthDip, g_hudMaxScreenWidthFraction);
     const float maxHeightDip = std::max(kHudMinHeightDip, workHeightDip - kHudScreenMarginYDip);
     const float maxTextWidth = maxWidthDip - textX - kHudRightPad;
     const DWRITE_TEXT_METRICS singleLineMetrics =
@@ -76,7 +114,7 @@ HudSize IdealHudSize(const std::wstring& text, const RECT& workArea, float scale
     const float singleLineWidthDip =
         textX + singleLineMetrics.widthIncludingTrailingWhitespace + kHudRightPad + kHudTextSlack;
 
-    if (singleLineWidthDip <= maxWidthDip) {
+    if (g_hudFixedLines <= 0 && singleLineWidthDip <= maxWidthDip) {
         return {
             std::clamp(singleLineWidthDip, kHudMinWidthDip, maxWidthDip),
             kHudMinHeightDip,
@@ -86,7 +124,15 @@ HudSize IdealHudSize(const std::wstring& text, const RECT& workArea, float scale
     const DWRITE_TEXT_METRICS metrics = MeasureHudText(text, maxTextWidth, DWRITE_WORD_WRAPPING_WRAP);
 
     const float measuredWidthDip = std::max(kHudMinWidthDip, maxWidthDip);
-    const float measuredHeightDip = metrics.height + 30.0f;
+    float measuredHeightDip = metrics.height + 30.0f;
+    if (g_hudFixedLines > 0 && metrics.lineCount > 0) {
+        const float lineHeightDip = metrics.height / static_cast<float>(metrics.lineCount);
+        measuredHeightDip = lineHeightDip * static_cast<float>(g_hudFixedLines) + 30.0f;
+    } else if (g_hudMaxLines > 0 && metrics.lineCount > 0) {
+        const float lineHeightDip = metrics.height / static_cast<float>(metrics.lineCount);
+        measuredHeightDip = std::min(measuredHeightDip,
+                                     lineHeightDip * static_cast<float>(g_hudMaxLines) + 30.0f);
+    }
     return {
         std::clamp(measuredWidthDip, kHudMinWidthDip, maxWidthDip),
         std::clamp(measuredHeightDip, kHudMinHeightDip, maxHeightDip),
@@ -131,7 +177,15 @@ void PositionHud(HWND hwnd) {
     SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, SWP_SHOWWINDOW | SWP_NOACTIVATE);
 }
 
-void ShowHud(const std::wstring& text) {
+static void ShowHudInternal(const std::wstring& text,
+                            float maxWidthDip,
+                            float maxScreenWidthFraction,
+                            int maxLines,
+                            int fixedLines) {
+    g_hudMaxWidthDip = maxWidthDip;
+    g_hudMaxScreenWidthFraction = maxScreenWidthFraction;
+    g_hudMaxLines = maxLines;
+    g_hudFixedLines = fixedLines;
     g_hudText = text;
     if (!g_hudWindow) {
         // Compute initial size from the cursor's current monitor DPI.
@@ -164,6 +218,18 @@ void ShowHud(const std::wstring& text) {
         KillTimer(g_hudWindow, kHudAnimationTimer);
     }
     InvalidateRect(g_hudWindow, nullptr, TRUE);
+}
+
+void ShowHud(const std::wstring& text) {
+    ShowHudInternal(text, 0.0f, 0.0f, 0, 0);
+}
+
+void ShowHudConstrained(const std::wstring& text,
+                        float maxWidthDip,
+                        float maxScreenWidthFraction,
+                        int maxLines,
+                        int fixedLines) {
+    ShowHudInternal(text, maxWidthDip, maxScreenWidthFraction, maxLines, fixedLines);
 }
 
 void HideHud() {

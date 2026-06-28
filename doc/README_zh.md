@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  当前版本：<code>v0.9.3</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
+  当前版本：<code>v0.9.4</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -31,7 +31,7 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 - **实时 HUD** — 录音时底部显示悬浮胶囊窗，5 根音量条随声音跳动
 - **双 VAD 可选** — Silero VAD（轻量）/ FireRed VAD（高精度 F1 97.57），智能跳过静音
 - **LLM 纠错（可选）** — 支持 DeepSeek / OpenRouter / SiliconFlow 等多供应商，一键配置
-- **Cloud ASR（可选）** — 支持火山引擎（豆包）、百度智能云、Qwen ASR（`qwen3-asr-flash-realtime`）和小米 MiMo ASR（`mimo-v2.5-asr`）作为替代后端
+- **Cloud ASR（可选）** — 支持火山引擎（豆包）、百度智能云、Qwen ASR（`qwen3-asr-flash-realtime`）、小米 MiMo ASR（`mimo-v2.5-asr`）和实验性豆包输入法 ASR 作为替代后端
 
 ## Quick Start
 
@@ -67,7 +67,7 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 <summary><strong>⚙️ Settings 说明</strong></summary>
 
 **Recognition tab**
-- `ASR Backend` — 选择 `Local (sherpa-onnx)` / `Volcano Engine` / `Baidu Cloud` / `Qwen ASR` / `MiMo ASR`
+- `ASR Backend` — 选择 `Local (sherpa-onnx)` / `Volcano Engine` / `Baidu Cloud` / `Qwen ASR` / `MiMo ASR` / `Doubao IME (Free)`
 - `ASR model` — 语音识别模型（仅 Local 后端）：
   - `FireRedASR2 CTC` — 速度快，适合日常输入
   - `FireRedASR2 AED` — 质量更好，长句更准
@@ -100,7 +100,7 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 - `Basic Fix` / `Deep Fix` — 预设按钮，一键填入不同纠错力度的 System Prompt
 
 **Cloud ASR tab**
-- `Provider` — 选择 `Volcano Engine (Doubao)` / `Baidu Cloud` / `Qwen ASR (DashScope)` / `MiMo ASR (Xiaomi)`，下方控件动态切换
+- `Provider` — 选择 `Volcano Engine (Doubao)` / `Baidu Cloud` / `Qwen ASR (DashScope)` / `MiMo ASR (Xiaomi)` / `Doubao IME (Free)`，下方控件动态切换
 - **Baidu Cloud**：`API Key` / `Secret Key`（DPAPI 加密）+ `Language Model`（普通话/英语/粤语/四川话）+ `Test Connection`
 - **Volcano Engine (Doubao)**：`API Key`（DPAPI 加密）+ `ASR Mode` + `Model Version` + `Language` + `Test Connection`
   - ASR Mode：`bigmodel_nostream`（推荐，准确率最高）/ `bigmodel_async`（最佳延迟）/ `bigmodel`（实时部分结果）
@@ -114,7 +114,11 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 - **MiMo ASR (Xiaomi)**：`API Key`（DPAPI 加密）+ `Base URL` + `Model` + `Language` + `Test Connection`
   - 默认 Base URL：`https://token-plan-ams.xiaomimimo.com/v1`
   - 默认模型：`mimo-v2.5-asr`；音频会封装为 WAV 后通过 `/chat/completions` 上传
-- 云端 ASR 由远端完成识别；启用 VAD 时，流式云端后端使用 streaming VAD trim，批量云端后端使用 batch VAD trim 后再上传。本地标点模型在云端后端下仍不生效
+- **Doubao IME (Free)**：无 API Key 输入框。实验 provider 会注册豆包输入法风格设备，保存 device id/cdid 和 DPAPI 加密 token，将 PCM 编码为 Opus，并使用非官方 `frontier-audio-ime-ws.doubao.com` WebSocket 协议；可用性、额度和服务条款不做保证。
+  - Doubao IME 绕过本地 VAD，依赖输入法服务自己的分段；一次热键按住期间的 partial HUD 和 final 文本会跨云端分段累计，长录音松手后按合并后的整段结果上屏。
+  - Qwen、火山引擎和 Doubao IME 的 streaming partial HUD 统一为仅影响显示的清屏模式：三行正文内实时显示，超过后清空前文并从当前最后一句重新开始；新页继续累积到再次超过三行，最终上屏文本仍保持完整。
+  - 诊断 probe：运行 `.\tools\doubao_ime_probe.bat` 可编译独立控制台探针，默认复用保存的豆包输入法凭据，执行 live protocol 检查；仓库中存在测试 WAV 时会额外做真实语音识别检查。添加 `--streaming` 可按实时节奏发送 WAV 帧并用 drain 线程验证 partial/final 流式路径；添加 `--fresh` 可强制临时重新注册。
+- 云端 ASR 由远端完成识别；启用 VAD 时，Qwen 和火山引擎使用本地 streaming VAD trim，批量云端后端使用 batch VAD trim 后再上传，Doubao IME 直接上传原始 PCM/Opus，不走本地 VAD。本地标点模型在云端后端下仍不生效
 
 </details>
 
@@ -173,7 +177,7 @@ CHANGELOG.md        — 版本变更记录
 <details>
 <summary><strong>⚠️ 已知限制</strong></summary>
 
-- 本地、百度和 MiMo 在录音结束后输出 final；Qwen 和火山引擎可在录音期间显示 partial HUD，最终文本仍在松开后上屏
+- 本地、百度和 MiMo 在录音结束后输出 final；Qwen、火山引擎和 Doubao IME 可在录音期间显示 partial HUD，最终文本仍在松开后上屏
 - 文本注入以剪贴板 + Ctrl+V 为主，管理员权限窗口可能拦截
 - 模型文件较大（约 3GB），首次加载需要几秒
 
@@ -185,6 +189,8 @@ CHANGELOG.md        — 版本变更记录
 详见 [CHANGELOG.md](CHANGELOG.md)
 
 **最近更新：**
+- **v0.9.4** — 豆包输入法实验 `doubao_ime` 流式云端 ASR 后端、静态 Opus 1.6.1、凭据 bootstrap/reset UI、protocol/WAV/streaming 诊断 probe、长录音聚合修复，以及 Qwen/火山/Doubao IME 共用的清屏 streaming partial HUD
+- **v0.9.3** — 火山引擎快速连续录音头部音频丢失修复、streaming VAD 双处理修复、连接复用/超时调优、active request 快速取消、Qwen/火山启动和停止流程清理
 - **v0.9.2** — HUD DPI 适配渲染、火山引擎/Qwen WebSocket 双关和数据竞争修复、Qwen activeClient UAF 修复、重试路径 abort 检查
 - **v0.9.1** — 云端 ASR 架构稳定版、小米 MiMo ASR（`mimo-v2.5-asr`）后端、Qwen/火山引擎 streaming session、共享 streaming/batch VAD trim core、百度同 PCM 重试和 token refresh retry、源码目录分类
 - **v0.9.0** — Qwen ASR（`qwen3-asr-flash-realtime`）后端、边录边发和 partial HUD、默认 Manual turn detection、Qwen watchdog/replay 重试、统一 ASR session/dispatcher/result 架构

@@ -2,6 +2,51 @@
 
 > 🇨🇳 [中文版](doc/CHANGELOG_zh.md)
 
+## Unreleased
+
+- Nothing yet.
+
+## v0.9.4 (2026-06-28)
+
+### Added
+
+- **Doubao IME experimental ASR backend**: Added `doubao_ime` as a non-default streaming cloud ASR provider shown as `Doubao IME (Free)`. It uses the unofficial Doubao input-method endpoint, not the Volcengine official speech protocol.
+- **Doubao IME client/session**: Added device registration, `asr_config.app_key` token bootstrap, CNG MD5 `x-ss-stub`, WinHTTP WebSocket, handwritten protobuf messages, Opus 20ms frame encoding, partial HUD updates, final dispatch, replay retry, cancellable bootstrap/startup handles, transient startup retry, and auth/token credential reset retry.
+- **Doubao IME Settings page**: Added provider selection, credential status, `Test Connection`, and `Reset Credentials`. Device id/cdid/token are persisted as `doubao_ime_*`, with token encrypted by DPAPI.
+- **Doubao IME diagnostic probe**: Added `tools/doubao_ime_probe.bat`, a standalone live probe that compiles a small console tool for protocol, optional WAV recognition, and optional streaming send/drain verification. It reuses saved Doubao IME credentials by default and supports `--streaming` plus `--fresh`.
+- **Vendored Opus**: Added static `libopus` 1.6.1 headers/library under `third_party/opus` with license files and linked `bcrypt.lib` for CNG hashing.
+
+### Changed
+
+- **Streaming backend detection**: Replaced Qwen/Volcengine-only checks with a shared streaming-cloud backend helper covering Qwen, Volcengine, and Doubao IME for Stop/watchdog/debug behavior. Local streaming VAD remains enabled only for Qwen and Volcengine.
+- **Doubao IME Test Connection**: The Settings probe now sends a 20ms Opus `Last` frame, finishes the session, waits for server completion, and propagates credential updates instead of only testing the initial WebSocket handshake.
+- **Doubao IME partial fallback**: The tray-app drain thread now retains the latest non-final candidate until a confirmed final result arrives, matching the reference behavior and avoiding empty-final retry when the service finishes after partial text only.
+- **Doubao IME long-recording segment aggregation**: `result_json.results[*].text` is now concatenated in result order instead of keeping only the last segment, fixing long recordings where the service splits recognition into multiple segments and only the final segment was pasted.
+- **Doubao IME cloud-VAD segment accumulation**: Doubao IME now accumulates final text across multiple WebSocket events and shows partial HUD updates as full-session previews. A cloud-side VAD final during recording no longer satisfies the post-stop final wait; after release, the session waits for a post-`FinishSession` final or `SessionFinished`, fixing long recordings where only the last cloud segment reached the input box.
+- **Doubao IME partial-window reset handling**: Long recordings now track a committed prefix plus the current service partial window. Only a clear length drop is treated as the IME service clearing/restarting its partial window; normal service-side revisions replace the active window instead of being committed, avoiding duplicated growing partials in the final text.
+- **Doubao IME clear-page partial HUD**: Doubao IME partial updates now stay in live full-text mode while they fit within three body lines. After they exceed that limit, the HUD clears previous display text and restarts from the current last sentence, then lets that new page accumulate normally until it exceeds three body lines again. If one sentence alone is too long, the display trims from the front until it fits. After the first clear in a recording, the HUD keeps fixed four-line height for the rest of that recording and keeps width capped to `min(900 DIP, 75% screen width)`. This is display-only and does not change the full final text that gets pasted.
+- **Streaming partial HUD generalization**: Qwen, Volcengine, and Doubao IME now share the constrained clear-page partial HUD path, so all streaming cloud providers use the same width cap, page clearing, and fixed-height behavior during long partial updates.
+- **Streaming cloud pre-capture VAD**: Qwen and Volcengine now initialize streaming VAD before replaying pre-captured head audio, so the replayed head audio goes through the same VAD trim state as live callback audio.
+- **Pending PCM cap**: Added a bounded `PendingPcmBuffer` defaulting to 120 seconds of 16kHz mono PCM to prevent unbounded memory growth while a streaming cloud backend is stalled or reconnecting. Qwen and Doubao IME surface overflow as a retryable transport failure.
+- **Doubao IME Settings race guard**: `Test Connection` results now carry a generation id, so stale background test results cannot overwrite credentials after `Reset Credentials` or a newer test.
+- **Streaming cloud failure status**: Mid-recording transport loss now shows `Buffering...` instead of `Reconnecting...` because the current strategy buffers audio and replays after release rather than opening a replacement WebSocket during the same hold.
+- **Doubao IME local VAD bypass**: Doubao IME now ignores local `Enable VAD` and uploads raw PCM encoded as Opus. Qwen and Volcengine keep the streaming VAD trim path.
+
+### Verification
+
+- `.\build.bat` passes after the Doubao IME integration.
+- `.\tools\doubao_ime_probe.bat` passes against the live Doubao IME endpoint using saved credentials (`config_credentials=1`, `protocol_ok=1`, `changed=0`) and successfully recognizes the bundled 16kHz mono speech WAV (`wav_ok=1`, text: `开放时间，早上 9 点至下午 5 点。`).
+- `.\tools\doubao_ime_probe.bat --streaming` passes the live send/drain path (`streaming_ok=1`, `partial_count=6`, `final_count=1`, `session_finished=1`, text: `开放时间，早上 9 点至下午 5 点。`).
+- Re-ran both checks after the partial-fallback fix: the live probe and `.\build.bat` still pass.
+- Re-ran `.\build.bat`, `git diff --check`, and `.\tools\doubao_ime_probe.bat --streaming` after the Settings generation guard, pre-capture VAD replay, and pending-buffer cap; all pass, with only existing CRLF warnings from `git diff --check`.
+- Re-ran `.\build.bat`, `git diff --check`, and `.\tools\doubao_ime_probe.bat --streaming` after the long-recording segment aggregation fix; all pass, with only existing CRLF warnings from `git diff --check`.
+- Re-ran `.\build.bat`, `git diff --check`, and `.\tools\doubao_ime_probe.bat --streaming` after the cross-event Doubao IME cloud-VAD segment accumulation fix; all pass, with only existing CRLF warnings from `git diff --check`.
+- Re-ran `.\build.bat` and `.\tools\doubao_ime_probe.bat --streaming` after tightening the Doubao IME partial-window reset heuristic; both WAV and streaming probe outputs return the expected sample text without duplication.
+- Re-ran `.\build.bat` after the Doubao IME clear-page HUD tuning.
+- Re-ran `.\build.bat` and `git diff --check` after generalizing the clear-page partial HUD path to Qwen, Volcengine, and Doubao IME; build passes, with only existing CRLF warnings from `git diff --check`.
+- Automated tray-app Settings smoke opened the real Settings window, selected `Cloud ASR` -> `Doubao IME (Free)`, verified the credential/test/reset controls are visible at the current DPI, and the Settings `Test Connection` returns OK.
+- Manual tray-app smoke testing is still pending for hotkey/microphone recording, partial HUD, final paste, too-short handling, network interruption/watchdog recovery, and additional DPI passes.
+
 ## v0.9.3 (2026-06-15)
 
 ### Fixed

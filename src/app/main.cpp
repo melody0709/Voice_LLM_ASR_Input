@@ -13,6 +13,8 @@
 #include "asr_result.h"
 #include "cloud_asr_common.h"
 #include "asr_dispatcher.h"
+#include "doubao_ime_asr.h"
+#include "doubao_ime_streaming_session.h"
 #include "qwen_streaming_session.h"
 #include "volcengine_streaming_session.h"
 #include "volcengine_asr.h"
@@ -25,9 +27,12 @@
 #include <cstdio>
 #include <cstddef>
 #include <cstdint>
+#include <cwctype>
 #include <memory>
 #include <mutex>
 #include <algorithm>
+#include <utility>
+#include <vector>
 #include <commctrl.h>
 
 #pragma comment(lib, "user32.lib")
@@ -91,6 +96,7 @@ std::vector<HWND> g_baiduControls;
 std::vector<HWND> g_volcengineControls;
 std::vector<HWND> g_qwenControls;
 std::vector<HWND> g_mimoControls;
+std::vector<HWND> g_doubaoImeControls;
 std::vector<HWND> g_vadFireredControls;
 std::vector<HWND> g_vadSileroControls;
 bool g_hudIsRefining = false;
@@ -129,6 +135,10 @@ static UINT32 s_wasapiNativeRate = 0;
 
 
 static bool s_debugConsoleOpen = false;
+
+static bool IsStreamingCloudBackend(const std::wstring& backend) {
+    return backend == L"qwen" || backend == L"volcengine" || backend == L"doubao_ime";
+}
 
 static void DebugModeOpenConsole() {
     if (s_debugConsoleOpen) return;
@@ -207,7 +217,7 @@ static void DebugPrintVadTrimLine(size_t rawBytes, size_t trimmedSamples) {
 }
 
 static void DebugPrintCloudVadTrim() {
-    if ((g_config.asrBackend == L"volcengine" || g_config.asrBackend == L"qwen") &&
+    if (IsStreamingCloudBackend(g_config.asrBackend) &&
         g_streamingVadTrimmer && g_streamingVadTrimmer->IsActive()) {
         StreamingVadTrimStats stats = g_streamingVadTrimmer->Stats();
         size_t rawBytes = stats.rawBytes > 0 ? stats.rawBytes : static_cast<size_t>(g_recordingMs * 32.0);
@@ -283,8 +293,8 @@ void RecognizeAsync(const std::vector<BYTE>& pcm) {
     const Config config = g_config;
 
     std::vector<float> localStreamingVadSamples;
-    if (config.asrBackend != L"baidu" && config.asrBackend != L"volcengine" &&
-        config.asrBackend != L"qwen" && config.asrBackend != L"mimo") {
+    if (config.asrBackend != L"baidu" && !IsStreamingCloudBackend(config.asrBackend) &&
+        config.asrBackend != L"mimo") {
         localStreamingVadSamples = std::move(g_streamingVadSamples);
         g_streamingVadSamples.clear();
     }
@@ -318,11 +328,196 @@ void RecognizeAsync(const std::vector<BYTE>& pcm) {
     }).detach();
 }
 
-static void QwenPartialHudCallback(const std::wstring& text, bool, void*) {
-    if (text.empty()) return;
-    PostMessageW(g_mainWindow, kHudUpdateMessage, 0,
-                 reinterpret_cast<LPARAM>(new std::wstring(L"Listening... Qwen ASR\n" + text)));
+struct HudUpdateWithOptionsMessage {
+    std::wstring statusLine;
+    std::wstring text;
+    float maxWidthDip = 0.0f;
+    float maxScreenWidthFraction = 0.0f;
+    int maxLines = 0;
+    int fixedLines = 0;
+    bool streamingPartial = false;
+};
+
+struct StreamingPartialHudCallbackContext {
+    const wchar_t* statusLine = nullptr;
+};
+
+struct StreamingPartialHudState {
+    bool clearPageMode = false;
+    bool fixedHeightMode = false;
+    size_t pageStart = 0;
+    std::wstring body;
+};
+
+static StreamingPartialHudState g_streamingPartialHudState;
+
+static void ResetStreamingPartialHudState() {
+    g_streamingPartialHudState = {};
 }
+
+static bool IsStreamingPartialStrongBoundary(wchar_t c) {
+    return c == L'\n' || c == L'\r' ||
+           c == L'。' || c == L'！' || c == L'？' ||
+           c == L'!' || c == L'?' ||
+           c == L'；' || c == L';';
+}
+
+static bool IsStreamingPartialSoftBoundary(wchar_t c) {
+    return c == L'，' || c == L',' || c == L'、' || c == L'：' || c == L':';
+}
+
+static size_t SkipStreamingPartialLeadingSeparators(const std::wstring& text, size_t pos) {
+    while (pos < text.size() &&
+           (iswspace(text[pos]) ||
+            IsStreamingPartialStrongBoundary(text[pos]) ||
+            IsStreamingPartialSoftBoundary(text[pos]))) {
+        ++pos;
+    }
+    return pos;
+}
+
+static size_t SafeStreamingPartialSubstringStart(const std::wstring& text, size_t start) {
+    if (start > 0 && start < text.size() && text[start] >= 0xDC00 && text[start] <= 0xDFFF) {
+        --start;
+    }
+    return start;
+}
+
+static size_t AdvanceStreamingPartialSubstringStart(const std::wstring& text, size_t start) {
+    if (start >= text.size()) return text.size();
+    ++start;
+    if (start < text.size() && text[start] >= 0xDC00 && text[start] <= 0xDFFF) {
+        ++start;
+    }
+    return (std::min)(start, text.size());
+}
+
+static std::wstring BuildStreamingPartialHudText(const std::wstring& statusLine, const std::wstring& body) {
+    return body.empty()
+        ? statusLine
+        : statusLine + L"\n" + body;
+}
+
+static UINT32 StreamingPartialHudLineCount(const std::wstring& statusLine, const std::wstring& body) {
+    UINT32 lines = HudWrappedLineCount(BuildStreamingPartialHudText(statusLine, body),
+                                       kStreamingPartialHudMaxWidthDip,
+                                       kStreamingPartialHudMaxScreenFraction);
+    if (lines == 0) {
+        lines = static_cast<UINT32>(1 + (body.size() + 43) / 44);
+    }
+    return lines;
+}
+
+static std::wstring BuildStreamingHudPageBody(const std::wstring& text, size_t pageStart) {
+    pageStart = (std::min)(pageStart, text.size());
+    pageStart = SafeStreamingPartialSubstringStart(text, pageStart);
+    return text.substr(pageStart);
+}
+
+static bool StreamingHudPageFits(const std::wstring& statusLine, const std::wstring& text, size_t pageStart) {
+    return StreamingPartialHudLineCount(statusLine, BuildStreamingHudPageBody(text, pageStart)) <=
+           static_cast<UINT32>(kStreamingPartialHudMaxLines);
+}
+
+static size_t FindStreamingCurrentSentenceStart(const std::wstring& statusLine,
+                                                const std::wstring& text,
+                                                size_t pageStart) {
+    if (text.empty()) return 0;
+    pageStart = (std::min)(pageStart, text.size());
+
+    size_t scanEnd = text.size();
+    while (scanEnd > pageStart && iswspace(text[scanEnd - 1])) {
+        --scanEnd;
+    }
+    size_t contentEnd = scanEnd;
+    while (scanEnd > pageStart &&
+           (IsStreamingPartialStrongBoundary(text[scanEnd - 1]) ||
+            IsStreamingPartialSoftBoundary(text[scanEnd - 1]))) {
+        --scanEnd;
+    }
+
+    for (size_t i = scanEnd; i > pageStart; --i) {
+        if (IsStreamingPartialStrongBoundary(text[i - 1])) {
+            return SkipStreamingPartialLeadingSeparators(text, i);
+        }
+    }
+
+    for (size_t i = scanEnd; i > pageStart; --i) {
+        if (IsStreamingPartialSoftBoundary(text[i - 1])) {
+            return SkipStreamingPartialLeadingSeparators(text, i);
+        }
+    }
+
+    size_t candidate = contentEnd > kStreamingPartialHudTailChars
+        ? contentEnd - kStreamingPartialHudTailChars
+        : pageStart + 1;
+    candidate = (std::min)(candidate, contentEnd);
+    if (candidate <= pageStart && pageStart < text.size()) {
+        candidate = pageStart + 1;
+    }
+    candidate = SafeStreamingPartialSubstringStart(text, candidate);
+    candidate = SkipStreamingPartialLeadingSeparators(text, candidate);
+
+    while (candidate < contentEnd && !StreamingHudPageFits(statusLine, text, candidate)) {
+        candidate = AdvanceStreamingPartialSubstringStart(text, candidate);
+        candidate = SkipStreamingPartialLeadingSeparators(text, candidate);
+    }
+    return (std::min)(candidate, text.size());
+}
+
+static std::wstring FormatStreamingPartialHudText(const std::wstring& statusLine, const std::wstring& text) {
+    auto& state = g_streamingPartialHudState;
+    if (state.pageStart > text.size()) {
+        const bool keepFixedHeight = state.fixedHeightMode;
+        g_streamingPartialHudState = {};
+        g_streamingPartialHudState.fixedHeightMode = keepFixedHeight;
+    }
+
+    if (!state.clearPageMode &&
+        StreamingPartialHudLineCount(statusLine, text) <= static_cast<UINT32>(kStreamingPartialHudMaxLines)) {
+        return BuildStreamingPartialHudText(statusLine, text);
+    }
+
+    if (!StreamingHudPageFits(statusLine, text, state.pageStart)) {
+        state.fixedHeightMode = true;
+        state.pageStart = FindStreamingCurrentSentenceStart(statusLine, text, state.pageStart);
+    }
+
+    state.clearPageMode = state.pageStart > 0;
+    if (state.clearPageMode) {
+        state.fixedHeightMode = true;
+    }
+    state.body = BuildStreamingHudPageBody(text, state.pageStart);
+    while (state.pageStart < text.size() &&
+           StreamingPartialHudLineCount(statusLine, state.body) > static_cast<UINT32>(kStreamingPartialHudMaxLines)) {
+        state.fixedHeightMode = true;
+        state.pageStart = AdvanceStreamingPartialSubstringStart(text, state.pageStart);
+        state.pageStart = SkipStreamingPartialLeadingSeparators(text, state.pageStart);
+        state.body = BuildStreamingHudPageBody(text, state.pageStart);
+    }
+    return BuildStreamingPartialHudText(statusLine, state.body);
+}
+
+static void StreamingPartialHudCallback(const std::wstring& text, bool, void* userData) {
+    if (text.empty()) return;
+    const auto* ctx = static_cast<const StreamingPartialHudCallbackContext*>(userData);
+    auto* msg = new HudUpdateWithOptionsMessage;
+    msg->statusLine = (ctx && ctx->statusLine) ? ctx->statusLine : L"Listening...";
+    msg->text = text;
+    msg->maxWidthDip = kStreamingPartialHudMaxWidthDip;
+    msg->maxScreenWidthFraction = kStreamingPartialHudMaxScreenFraction;
+    msg->maxLines = kStreamingPartialHudMaxLines;
+    msg->fixedLines = 0;
+    msg->streamingPartial = true;
+    if (!PostMessageW(g_mainWindow, kHudUpdateWithOptionsMessage, 0,
+                      reinterpret_cast<LPARAM>(msg))) {
+        delete msg;
+    }
+}
+
+static StreamingPartialHudCallbackContext g_qwenPartialHudContext{L"Listening... Qwen ASR"};
+static StreamingPartialHudCallbackContext g_doubaoImePartialHudContext{L"Listening... Doubao IME"};
+static StreamingPartialHudCallbackContext g_volcenginePartialHudContext{L"Listening... Volcano Engine"};
 
 static std::unique_ptr<IStreamingAsrSession> TakeActiveStreamingSession() {
     EnterCriticalSection(&g_streamingSessionCs);
@@ -351,7 +546,7 @@ static void ResetStreamingVadTrimmerState() {
     g_vadDetectedVoice.store(false);
 }
 
-static bool StartStreamingVadTrimmerForCloud(const wchar_t* debugPrefix) {
+static bool StartStreamingVadTrimmerForCloud(const wchar_t* debugPrefix, bool markReady = true) {
     ResetStreamingVadTrimmerState();
     if (!g_config.enableVad) return false;
 
@@ -364,8 +559,8 @@ static bool StartStreamingVadTrimmerForCloud(const wchar_t* debugPrefix) {
         return false;
     }
 
-    g_streamingVadReady = true;
     g_streamingVadTrimmer = std::move(trimmer);
+    g_streamingVadReady = markReady;
     VolcDebugLog("%ls: VAD trim active (%ls)", debugPrefix, g_config.vadModel.c_str());
     return true;
 }
@@ -388,6 +583,16 @@ static void ReplayPreCapturedAudio(IStreamingAsrSession* session) {
     preCaptured = g_audioData;
     LeaveCriticalSection(&g_audioLock);
     if (preCaptured.empty()) return;
+    if (g_streamingVadTrimmer && g_streamingVadTrimmer->IsActive()) {
+        std::vector<std::vector<BYTE>> streamingOutputs;
+        g_streamingVadTrimmer->ProcessPcm16(preCaptured.data(), preCaptured.size(), streamingOutputs);
+        for (const auto& chunk : streamingOutputs) {
+            if (!chunk.empty()) {
+                session->EnqueuePcmChunk(chunk.data(), chunk.size());
+            }
+        }
+        return;
+    }
     session->EnqueuePcmChunk(preCaptured.data(), preCaptured.size());
 }
 
@@ -414,10 +619,11 @@ void StartRecordingSession() {
 
     AbortAndResetActiveStreamingSession();
     ResetStreamingVadTrimmerState();
+    ResetStreamingPartialHudState();
 
     if (g_config.asrBackend == L"qwen") {
         auto session = CreateQwenStreamingSession(g_config, g_mainWindow, RefineWithLlmAsync, &g_lastRawAsrText);
-        session->SetPartialCallback(QwenPartialHudCallback, nullptr);
+        session->SetPartialCallback(StreamingPartialHudCallback, &g_qwenPartialHudContext);
 
         std::wstring startError;
         if (!session->Start(startError)) {
@@ -428,15 +634,45 @@ void StartRecordingSession() {
             return;
         }
 
+        StartStreamingVadTrimmerForCloud(L"Qwen thread", false);
+        ReplayPreCapturedAudio(session.get());
+
+        EnterCriticalSection(&g_streamingSessionCs);
+        g_activeStreamingSession = std::move(session);
+        g_streamingVadReady = g_streamingVadTrimmer && g_streamingVadTrimmer->IsActive();
+        LeaveCriticalSection(&g_streamingSessionCs);
+
+        ShowHud(L"Listening... Qwen ASR");
+        DWORD watchdogMs = 18000;
+        EnterCriticalSection(&g_streamingSessionCs);
+        if (g_activeStreamingSession) {
+            watchdogMs = g_activeStreamingSession->CurrentWatchdogMs();
+        }
+        LeaveCriticalSection(&g_streamingSessionCs);
+        SetTimer(g_mainWindow, kStreamingWatchdogTimer, watchdogMs, nullptr);
+        return;
+    }
+
+    if (g_config.asrBackend == L"doubao_ime") {
+        auto session = CreateDoubaoImeStreamingSession(g_config, g_mainWindow, RefineWithLlmAsync, &g_lastRawAsrText);
+        session->SetPartialCallback(StreamingPartialHudCallback, &g_doubaoImePartialHudContext);
+
+        std::wstring startError;
+        if (!session->Start(startError)) {
+            StopAudioCapture();
+            g_recording = false;
+            ShowHud(startError.empty() ? L"Doubao IME ASR error: session start failed" : startError);
+            if (g_hudWindow) SetTimer(g_hudWindow, kHudHideTimer, 1800, nullptr);
+            return;
+        }
+
         ReplayPreCapturedAudio(session.get());
 
         EnterCriticalSection(&g_streamingSessionCs);
         g_activeStreamingSession = std::move(session);
         LeaveCriticalSection(&g_streamingSessionCs);
 
-        StartStreamingVadTrimmerForCloud(L"Qwen thread");
-
-        ShowHud(L"Listening... Qwen ASR");
+        ShowHud(L"Listening... Doubao IME");
         DWORD watchdogMs = 18000;
         EnterCriticalSection(&g_streamingSessionCs);
         if (g_activeStreamingSession) {
@@ -451,13 +687,7 @@ void StartRecordingSession() {
         VolcengineResetForNewSession();
 
         auto session = CreateVolcengineStreamingSession(g_config, g_mainWindow, RefineWithLlmAsync, &g_lastRawAsrText);
-        session->SetPartialCallback([](const std::wstring& text, bool isFinal, void* userData) {
-            (void)userData;
-            if (!isFinal) {
-                PostMessageW(g_mainWindow, kHudUpdateMessage, 0,
-                             reinterpret_cast<LPARAM>(new std::wstring(L"Listening... Volcano Engine\n" + text)));
-            }
-        }, nullptr);
+        session->SetPartialCallback(StreamingPartialHudCallback, &g_volcenginePartialHudContext);
 
         std::wstring startError;
         if (!session->Start(startError)) {
@@ -467,13 +697,13 @@ void StartRecordingSession() {
             return;
         }
 
+        StartStreamingVadTrimmerForCloud(L"Volc thread", false);
         ReplayPreCapturedAudio(session.get());
 
         EnterCriticalSection(&g_streamingSessionCs);
         g_activeStreamingSession = std::move(session);
+        g_streamingVadReady = g_streamingVadTrimmer && g_streamingVadTrimmer->IsActive();
         LeaveCriticalSection(&g_streamingSessionCs);
-
-        StartStreamingVadTrimmerForCloud(L"Volc thread");
 
         ShowHud(L"Listening... Volcano Engine");
         DWORD watchdogMs = 18000;
@@ -488,8 +718,8 @@ void StartRecordingSession() {
 
     g_streamingVadReady = false;
     g_streamingVadSamples.clear();
-    if (g_config.asrBackend != L"baidu" && g_config.asrBackend != L"volcengine" &&
-        g_config.asrBackend != L"qwen" && g_config.asrBackend != L"mimo" &&
+    if (g_config.asrBackend != L"baidu" && !IsStreamingCloudBackend(g_config.asrBackend) &&
+        g_config.asrBackend != L"mimo" &&
         g_config.enableVad) {
         const int threads = ResolveThreads(g_config.threads);
         g_asrEngine.Lock();
@@ -519,7 +749,7 @@ void StopRecordingSession() {
     g_vadTrimmedSamples = 0;
     g_lastRawAsrText.clear();
 
-    if ((g_config.asrBackend == L"qwen" || g_config.asrBackend == L"volcengine") && HasActiveStreamingSession()) {
+    if (IsStreamingCloudBackend(g_config.asrBackend) && HasActiveStreamingSession()) {
         const std::vector<BYTE> pcm = StopAudioCapture();
         g_lastPcmBytes = pcm.size();
         if (pcm.size() < 8000) {
@@ -651,6 +881,44 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     case kHudUpdateMessage: {
         std::unique_ptr<std::wstring> text(reinterpret_cast<std::wstring*>(lParam));
         if (text) ShowHud(*text);
+        return 0;
+    }
+    case kHudUpdateWithOptionsMessage: {
+        std::unique_ptr<HudUpdateWithOptionsMessage> msg(
+            reinterpret_cast<HudUpdateWithOptionsMessage*>(lParam));
+        if (msg) {
+            const std::wstring text = msg->streamingPartial
+                ? FormatStreamingPartialHudText(msg->statusLine, msg->text)
+                : msg->text;
+            const int fixedLines = msg->streamingPartial && g_streamingPartialHudState.fixedHeightMode
+                ? kStreamingPartialHudMaxLines
+                : msg->fixedLines;
+            ShowHudConstrained(text,
+                               msg->maxWidthDip,
+                               msg->maxScreenWidthFraction,
+                               msg->maxLines,
+                               fixedLines);
+        }
+        return 0;
+    }
+    case kDoubaoImeCredentialsMessage: {
+        std::unique_ptr<doubao_ime_asr::CredentialsUpdateMessage> update(
+            reinterpret_cast<doubao_ime_asr::CredentialsUpdateMessage*>(lParam));
+        if (update) {
+            if (update->clear) {
+                g_config.doubaoImeDeviceId.clear();
+                g_config.doubaoImeCdid.clear();
+                g_config.doubaoImeToken.clear();
+            } else {
+                g_config.doubaoImeDeviceId = update->credentials.deviceId;
+                g_config.doubaoImeCdid = update->credentials.cdid;
+                g_config.doubaoImeToken = update->credentials.token;
+            }
+            SaveConfig();
+            if (g_settingsWindow && IsWindow(g_settingsWindow)) {
+                PostMessageW(g_settingsWindow, kDoubaoImeSettingsRefreshMessage, 0, 0);
+            }
+        }
         return 0;
     }
     case kAsrResultMessage: {

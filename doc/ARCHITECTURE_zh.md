@@ -11,7 +11,7 @@ flowchart LR
     User["用户长按快捷键"] --> Frontend["VoxType.exe<br/>Win32 托盘前端"]
     Frontend --> Recorder["WASAPI 录音<br/>48kHz→16kHz 重采样"]
     Recorder --> Engine["AsrEngine (C++)<br/>sherpa-onnx-cxx-api"]
-    Recorder --> Cloud["云端 ASR worker<br/>火山 / 百度 / Qwen"]
+    Recorder --> Cloud["云端 ASR worker<br/>火山 / 百度 / Qwen / MiMo / 豆包输入法"]
     Engine --> VAD["VAD<br/>Silero / FireRed"]
     VAD --> ASR["sherpa-onnx ASR<br/>FireRed/SenseVoice"]
     ASR --> Punct["CT-Transformer 标点"]
@@ -32,7 +32,7 @@ flowchart LR
 - 监听全局快捷键。
 - 采集麦克风音频。
 - 通过 `AsrEngine` 直接调用 sherpa-onnx C++ API 完成本地 VAD、ASR、标点。
-- 可选将音频发送到云端 ASR 后端：百度、火山引擎或 Qwen ASR。
+- 可选将音频发送到云端 ASR 后端：百度、火山引擎、Qwen ASR、MiMo ASR 或实验性豆包输入法 ASR。
 - 将最终文本注入当前应用。
 
 `AsrEngine` 内部缓存 `OfflineRecognizer`、`VoiceActivityDetector`、`OfflinePunctuation`，同一模型不会重复加载。
@@ -54,7 +54,7 @@ flowchart LR
 | `src/app/globals.h` | 共享常量、控件 ID、结构体定义、extern 全局变量声明 |
 | `src/audio/engine.h` / `src/audio/engine.cpp` | 后端：字符串/路径工具、JSON 配置持久化、音频采集、`AsrEngine` 类、`PreloadAsrEngine()` |
 | `src/audio/streaming_vad_trimmer.h` / `src/audio/streaming_vad_trimmer.cpp` | 云端流式 ASR session 可复用的 provider-independent PCM VAD trim |
-| `src/asr/asr_session.h` / `src/asr/asr_session.cpp` | 本地、百度、Qwen fallback 路径的批量 ASR session 抽象 |
+| `src/asr/asr_session.h` / `src/asr/asr_session.cpp` | 本地、百度、MiMo、Qwen fallback 路径的批量 ASR session 抽象 |
 | `src/asr/asr_result.h` / `src/asr/asr_result.cpp` | ASR 文本归一化、错误分类、后端显示/调试名 |
 | `src/asr/asr_dispatcher.h` / `src/asr/asr_dispatcher.cpp` | ASR final 结果分发、LLM 门控、raw ASR 记录 |
 | `src/asr/cloud_asr_common.h` / `src/asr/cloud_asr_common.cpp` | 云端 replay buffer、自适应 finalize timeout、空 final retry 辅助 |
@@ -66,6 +66,10 @@ flowchart LR
 | `src/asr/baidu_asr.h` | 百度智能云 ASR 模块（header-only） |
 | `src/asr/volcengine_asr.h` | 火山引擎（豆包）ASR 模块（header-only，WebSocket） |
 | `src/asr/qwen_asr.h` / `src/asr/qwen_asr.cpp` | Qwen ASR realtime WebSocket 客户端 |
+| `src/asr/mimo_asr.h` / `src/asr/mimo_asr.cpp` | 小米 MiMo ASR 批量客户端（`mimo-v2.5-asr`，通过 `/chat/completions` 上传 WAV） |
+| `src/asr/doubao_ime_asr.h` / `src/asr/doubao_ime_asr.cpp` | 实验性豆包输入法客户端：设备注册、token bootstrap、Opus 编码、手写 protobuf over WebSocket |
+| `src/asr/doubao_ime_streaming_session.h` / `src/asr/doubao_ime_streaming_session.cpp` | 豆包输入法 `IStreamingAsrSession` 封装：pending PCM buffer、replay retry、partial HUD、凭据写回 |
+| `tools/doubao_ime_probe.bat` / `tools/doubao_ime_probe.cpp` | 独立豆包输入法诊断 probe：复用保存凭据、执行 live protocol 检查，可选执行 16kHz mono WAV 识别检查，并支持按实时节奏发送/接收的 streaming probe |
 | `src/audio/firered_vad.h` | FireRed VAD 模块（header-only） |
 | `src/core/input_context.h` | 输入框上下文读取模块（header-only，UIA/MSAA/WM_GETTEXT 分层 Fallback） |
 | `src/core/utils.h` | 共享工具函数（WideToUtf8、Utf8ToWide、EscapeJson、Trim） |
@@ -101,7 +105,7 @@ Settings 是普通 Win32 窗口，目前分 4 个 tab：
 - `Recognition`: ASR Backend、模型、模型目录、线程、VAD、VAD 模型、Punctuation、快捷键配置。
 - `LLM`: 供应商选择（Provider dropdown + [+] / [−]）、API Base URL、API Key、Model、Test Connection、Debug log、Extra Params。
 - `LLM Prompt`: System Prompt 编辑（多行）、Basic Fix / Deep Fix 预设按钮。
-- `Cloud ASR`: 云端供应商选择、百度/火山引擎/Qwen 专属字段。
+- `Cloud ASR`: 云端供应商选择、百度/火山引擎/Qwen/MiMo/豆包输入法专属字段。
 
 打开 Settings 时：
 
@@ -154,7 +158,7 @@ Settings 是普通 Win32 窗口，目前分 4 个 tab：
 - Win32 窗口尺寸使用当前窗口 DPI 将 DIP 转为物理像素，避免高 DPI 下文本裁切。
 - 录音回调计算每个音频 buffer 的 PCM RMS，归一化后驱动音量条。
 - 音量条使用 attack/release 平滑，录音期间通过约 33ms 定时器重绘。
-- 显示 `Listening...`、`Recognizing...`、最终文本或错误状态。火山引擎和 Qwen ASR 可以从 receive/drain 线程向 HUD 投递 partial 文本。
+- 显示 `Listening...`、`Recognizing...`、最终文本或错误状态。火山引擎、Qwen ASR 和豆包输入法可以从 receive/drain 线程向 HUD 投递 partial 文本。
 
 ### VAD
 
@@ -199,8 +203,12 @@ Settings 是普通 Win32 窗口，目前分 4 个 tab：
 - **百度智能云** 通过 `BaiduAsrSession` 走 batch-style REST 流程。
 - **火山引擎** 保留已验证的 WebSocket 协议实现于 `src/asr/volcengine_asr.h`；`main.cpp` 只在外围编排 replay retry、watchdog 和 HUD 分发。
 - **Qwen ASR** 通过 `src/asr/qwen_asr.h/.cpp` 接入 DashScope `qwen3-asr-flash-realtime`。主录音链路在录音期间持续发送 PCM chunk，独立线程接收 partial/final 事件；产品层固定 Manual turn detection（`turn_detection: null`），松开后发送 `input_audio_buffer.commit` + `session.finish`。
+- **MiMo ASR** 通过 `src/asr/mimo_asr.h/.cpp` 接入小米 MiMo `mimo-v2.5-asr`。它是批量云端后端：16k/16-bit/mono PCM 可先经 VAD trim，再封装为 WAV，通过 `{baseUrl}/chat/completions` 上传。
+- **豆包输入法** 通过 `src/asr/doubao_ime_asr.h/.cpp` 和 `src/asr/doubao_ime_streaming_session.cpp` 接入非官方输入法端点 `frontier-audio-ime-ws.doubao.com`，不是火山引擎官方 `openspeech.bytedance.com` 协议。客户端会注册输入法风格设备、获取 `asr_config.app_key`、使用 vendored static `libopus` 编码 20ms PCM，并通过 WinHTTP WebSocket 发送手写 protobuf 消息（`StartTask`、`StartSession`、`TaskRequest`、`FinishSession`）。凭据写回由主线程完成；auth/token 错误会清凭据重试，瞬态启动失败会在 PCM 继续缓冲时重试，abort 会关闭 bootstrap/WebSocket 活跃句柄以避免卡死。由于输入法服务可能在一次热键按住期间发出多个云端 VAD final segment，或因文本过长清空/重启 partial 窗口，streaming session 会维护“已提交前缀 + 当前 partial 窗口”、跨 WebSocket 事件累计 final 文本；`FinishSession` 之前的 final 不会结束松手后的 final 等待。HUD 展示是 Doubao 专属的 UI 层逻辑：三行文本区以内直接显示 live partial，超过后清空前文显示，只从当前最后一句重新开始；清屏后的新页会继续正常累积，直到再次超过三行正文才会再次清屏，最终上屏完整文本不受影响。
 
-开启 `Enable VAD` 时，流式云端后端可先通过 `StreamingVadTrimmer` 做本地 VAD trim 再上传。trimmer 输出 provider-independent PCM bytes，各 provider session 再按自己的协议重新切 chunk。云端 replay buffer、自适应 finalize timeout、空 final retry 和结果分类等公共策略由 `cloud_asr_common.*` 和 `asr_result.*` 复用。
+开启 `Enable VAD` 时，Qwen 和火山引擎流式后端会先通过 `StreamingVadTrimmer` 做本地 VAD trim 再上传，批量云端后端使用 `BatchVadTrimmer` 后再上传。Doubao IME 刻意绕过本地 VAD，直接将原始 PCM 编码为 Opus 上传。参与 VAD 的路径会输出 provider-independent PCM bytes，各 provider session 再按自己的协议重新切 chunk。云端 replay buffer、自适应 finalize timeout、空 final retry 和结果分类等公共策略由 `cloud_asr_common.*` 和 `asr_result.*` 复用。
+
+当前验证状态：跨事件云端 VAD 分段累计修复后，豆包输入法 live protocol probe、16kHz mono WAV 识别 probe、`--streaming` 发送/drain probe 已通过，`.\build.bat` 和 `git diff --check` 已通过；`git diff --check` 仅有既有 CRLF 提示。长录音热键实测复核、断网 watchdog 和额外 DPI 检查仍需人工桌面冒烟。
 
 ### 模型适配
 
@@ -277,7 +285,7 @@ models/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8/model.
 
 ### 流式演进
 
-Qwen 和火山引擎已经支持录音期间的云端 partial HUD。本地 ASR 和百度仍是录完后 finalize。后续方向是把 streaming 能力变成明确的 session trait，减少 `main.cpp` 中的 provider-specific orchestration：
+Qwen、火山引擎和豆包输入法已经支持录音期间的云端 partial HUD。本地 ASR、百度和 MiMo 仍是录完后 finalize。后续方向是把 streaming 能力变成明确的 session trait，减少 `main.cpp` 中的 provider-specific orchestration：
 
 ```mermaid
 flowchart LR

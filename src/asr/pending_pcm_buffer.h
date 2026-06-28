@@ -11,11 +11,20 @@
 #include <mutex>
 #include <vector>
 
+constexpr size_t kDefaultPendingPcmMaxBytes = 120u * 32000u;
+
 class PendingPcmBuffer {
 public:
+    explicit PendingPcmBuffer(size_t maxBytes = kDefaultPendingPcmMaxBytes)
+        : maxBytes_(maxBytes) {}
+
     bool Append(const BYTE* data, size_t bytes) {
         if (!data || bytes == 0) return false;
         std::lock_guard<std::mutex> lock(mutex_);
+        if (maxBytes_ > 0 && data_.size() + bytes > maxBytes_) {
+            overflowed_ = true;
+            return false;
+        }
         data_.insert(data_.end(), data, data + bytes);
         return true;
     }
@@ -23,6 +32,7 @@ public:
     void Clear() {
         std::lock_guard<std::mutex> lock(mutex_);
         data_.clear();
+        overflowed_ = false;
     }
 
     void SwapTo(std::vector<BYTE>& out) {
@@ -44,7 +54,14 @@ public:
         return data_.size();
     }
 
+    bool Overflowed() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return overflowed_;
+    }
+
 private:
     mutable std::mutex mutex_;
     std::vector<BYTE> data_;
+    size_t maxBytes_ = kDefaultPendingPcmMaxBytes;
+    bool overflowed_ = false;
 };

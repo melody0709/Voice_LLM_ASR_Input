@@ -10,6 +10,7 @@
 #include <mmsystem.h>
 
 #include <atomic>
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <vector>
@@ -37,6 +38,9 @@ constexpr UINT kAsrResultMessage = WM_APP + 3;
 constexpr UINT kLlmResultMessage = WM_APP + 4;
 constexpr UINT kPreloadDoneMessage = WM_APP + 5;
 constexpr UINT kHudUpdateMessage = WM_APP + 6;
+constexpr UINT kDoubaoImeCredentialsMessage = WM_APP + 7;
+constexpr UINT kDoubaoImeSettingsRefreshMessage = WM_APP + 8;
+constexpr UINT kHudUpdateWithOptionsMessage = WM_APP + 9;
 constexpr UINT kTrayId = 1;
 constexpr UINT_PTR kHudHideTimer = 1;
 constexpr UINT_PTR kCapsLockLongPressTimer = 2;
@@ -54,6 +58,10 @@ constexpr float kHudWaveWidth = 52.0f;
 constexpr float kHudGap = 14.0f;
 constexpr float kHudRightPad = 22.0f;
 constexpr float kHudTextSlack = 18.0f;
+constexpr float kStreamingPartialHudMaxWidthDip = 900.0f;
+constexpr float kStreamingPartialHudMaxScreenFraction = 0.75f;
+constexpr int kStreamingPartialHudMaxLines = 4;
+constexpr size_t kStreamingPartialHudTailChars = 132;
 
 namespace UiStyle {
 constexpr int Margin = 12;
@@ -178,6 +186,9 @@ constexpr int IDC_MIMO_BASE_URL = 2092;
 constexpr int IDC_MIMO_MODEL = 2093;
 constexpr int IDC_MIMO_LANGUAGE = 2094;
 constexpr int IDC_MIMO_TEST = 2095;
+constexpr int IDC_DOUBAO_IME_STATUS = 2100;
+constexpr int IDC_DOUBAO_IME_TEST = 2101;
+constexpr int IDC_DOUBAO_IME_RESET = 2102;
 
 struct Config {
     int configVersion = 0;
@@ -234,6 +245,9 @@ struct Config {
     std::wstring mimoBaseUrl = L"https://token-plan-ams.xiaomimimo.com/v1";
     std::wstring mimoModel = L"mimo-v2.5-asr";
     std::wstring mimoLanguage = L"auto";
+    std::wstring doubaoImeDeviceId;
+    std::wstring doubaoImeCdid;
+    std::wstring doubaoImeToken;
     bool enableDebugMode = false;
     bool forceUnicodeInput = false;
     std::wstring audioBackend = L"wasapi";
@@ -326,6 +340,7 @@ extern std::vector<HWND> g_baiduControls;
 extern std::vector<HWND> g_volcengineControls;
 extern std::vector<HWND> g_qwenControls;
 extern std::vector<HWND> g_mimoControls;
+extern std::vector<HWND> g_doubaoImeControls;
 extern std::vector<HWND> g_vadFireredControls;
 extern std::vector<HWND> g_vadSileroControls;
 extern bool g_hudIsRefining;

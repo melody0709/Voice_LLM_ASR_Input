@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  Current version: <code>v0.9.3</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
+  Current version: <code>v0.9.4</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -31,7 +31,7 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 - **Real-time HUD** — Bottom floating capsule window during recording, 5 volume bars responding to sound
 - **Dual VAD Options** — Silero VAD (lightweight) / FireRed VAD (high precision F1 97.57), intelligently skips silence
 - **LLM Correction (Optional)** — Supports DeepSeek / OpenRouter / SiliconFlow and other providers, one-click configuration
-- **Cloud ASR (Optional)** — Supports Volcano Engine (Doubao), Baidu Cloud, Qwen ASR (`qwen3-asr-flash-realtime`), and Xiaomi MiMo ASR (`mimo-v2.5-asr`) as alternative backends
+- **Cloud ASR (Optional)** — Supports Volcano Engine (Doubao), Baidu Cloud, Qwen ASR (`qwen3-asr-flash-realtime`), Xiaomi MiMo ASR (`mimo-v2.5-asr`), and experimental Doubao IME ASR as alternative backends
 
 ## Quick Start
 
@@ -67,7 +67,7 @@ Right-click the tray icon to open Settings, hold the hotkey to start recording, 
 <summary><strong>Settings Guide</strong></summary>
 
 **Recognition tab**
-- `ASR Backend` — Select between `Local (sherpa-onnx)`, `Volcano Engine`, `Baidu Cloud`, `Qwen ASR`, and `MiMo ASR`
+- `ASR Backend` — Select between `Local (sherpa-onnx)`, `Volcano Engine`, `Baidu Cloud`, `Qwen ASR`, `MiMo ASR`, and `Doubao IME (Free)`
 - `ASR model` — Speech recognition model (only for Local backend):
   - `FireRedASR2 CTC` — Fast, suitable for daily input
   - `FireRedASR2 AED` — Better quality, more accurate for long sentences
@@ -100,7 +100,7 @@ Right-click the tray icon to open Settings, hold the hotkey to start recording, 
 - `Basic Fix` / `Deep Fix` — Preset buttons, one-click fill for different correction intensity System Prompts
 
 **Cloud ASR tab**
-- `Provider` — Select between `Volcano Engine (Doubao)`, `Baidu Cloud`, `Qwen ASR (DashScope)`, and `MiMo ASR (Xiaomi)`, controls below update dynamically
+- `Provider` — Select between `Volcano Engine (Doubao)`, `Baidu Cloud`, `Qwen ASR (DashScope)`, `MiMo ASR (Xiaomi)`, and `Doubao IME (Free)`, controls below update dynamically
 - **Baidu Cloud**: `API Key` / `Secret Key` (DPAPI encrypted) + `Language Model` (Mandarin/English/Cantonese/Sichuanese) + `Test Connection`
 - **Volcano Engine (Doubao)**: `API Key` (DPAPI encrypted) + `ASR Mode` + `Model Version` + `Language` + `Test Connection`
   - ASR Mode: `bigmodel_nostream` (recommended, highest accuracy) / `bigmodel_async` (best latency) / `bigmodel` (real-time partial)
@@ -114,7 +114,11 @@ Right-click the tray icon to open Settings, hold the hotkey to start recording, 
 - **MiMo ASR (Xiaomi)**: `API Key` (DPAPI encrypted) + `Base URL` + `Model` + `Language` + `Test Connection`
   - Default Base URL: `https://token-plan-ams.xiaomimimo.com/v1`
   - Default model: `mimo-v2.5-asr`; audio is uploaded as WAV via `/chat/completions`
-- Cloud ASR backends handle recognition remotely; when VAD is enabled, streaming cloud backends use local streaming VAD trim and batch cloud backends use batch VAD trim before upload. Local punctuation models are still bypassed for cloud backends
+- **Doubao IME (Free)**: no API key field. The experimental provider registers a Doubao IME-style device, stores device credentials with DPAPI-encrypted token, encodes PCM to Opus, and uses the unofficial `frontier-audio-ime-ws.doubao.com` WebSocket protocol. Availability and terms are not guaranteed.
+  - Doubao IME bypasses local VAD and relies on the IME service's own segmentation. Partial HUD updates and final text are accumulated across cloud-side segments during one hotkey hold, so long recordings are pasted as one combined result after release.
+  - Streaming partial HUD for Qwen, Volcano Engine, and Doubao IME is display-only clear-page: it shows live text within three body lines, then clears previous HUD text and restarts from the current last sentence; the new page keeps accumulating until it exceeds three body lines again, while the final paste text stays complete.
+  - Diagnostic probe: run `.\tools\doubao_ime_probe.bat` to compile a small console probe that reuses saved Doubao IME credentials when available, performs a live protocol check, and when the bundled sample wav exists, performs a real speech recognition check. Add `--streaming` to send WAV frames with a live drain thread and validate partial/final streaming behavior; add `--fresh` to force temporary re-registration.
+- Cloud ASR backends handle recognition remotely; when VAD is enabled, Qwen and Volcano Engine use local streaming VAD trim, batch cloud backends use batch VAD trim before upload, and Doubao IME uploads raw PCM/Opus without local VAD. Local punctuation models are still bypassed for cloud backends
 
 </details>
 
@@ -173,7 +177,7 @@ CHANGELOG.md        — Version change log
 <details>
 <summary><strong>Known Limitations</strong></summary>
 
-- Local, Baidu, and MiMo results are finalized after recording; Qwen and Volcano Engine can show partial HUD during recording, with final text pasted after release
+- Local, Baidu, and MiMo results are finalized after recording; Qwen, Volcano Engine, and Doubao IME can show partial HUD during recording, with final text pasted after release
 - Text injection primarily via clipboard + Ctrl+V, admin privilege windows may block
 - Model files are large (~3GB), first load takes a few seconds
 
@@ -185,6 +189,8 @@ CHANGELOG.md        — Version change log
 See [CHANGELOG.md](CHANGELOG.md)
 
 **Recent Updates:**
+- **v0.9.4** — Experimental Doubao IME (`doubao_ime`) streaming cloud ASR backend, vendored static Opus 1.6.1, credential bootstrap/reset UI, protocol/WAV/streaming diagnostic probe, Doubao long-recording aggregation fixes, and shared clear-page streaming partial HUD for Qwen/Volcengine/Doubao IME
+- **v0.9.3** — Volcengine rapid recording head-audio loss fix, streaming VAD double-processing fix, connection reuse/timeout tuning, active request fast cancel, and Qwen/Volcengine startup/stop cleanup
 - **v0.9.2** — HUD DPI-aware rendering, Volcengine/Qwen WebSocket double-close and data-race fixes, Qwen activeClient UAF fix, retry abort checks
 - **v0.9.1** — Cloud ASR architecture stabilization, Xiaomi MiMo ASR (`mimo-v2.5-asr`) backend, Qwen/Volcengine streaming sessions, shared streaming/batch VAD trim core, Baidu same-PCM retry and token refresh retry, source tree reorganization
 - **v0.9.0** — Qwen ASR (`qwen3-asr-flash-realtime`) backend, true streaming send with partial HUD, Manual turn detection by default, Qwen watchdog/replay retry, shared ASR session/dispatcher/result architecture
@@ -227,3 +233,5 @@ See [CHANGELOG.md](CHANGELOG.md)
 - [Volcengine Speech](https://www.volcengine.com/docs/6561/1354869) — Volcengine (豆包) streaming ASR API
 - [Alibaba Cloud Model Studio Qwen ASR](https://help.aliyun.com/zh/model-studio/qwen-asr-realtime-interaction-process) — Qwen ASR realtime API
 - [Xiaomi MiMo](https://platform.xiaomimimo.com/docs/zh-CN/usage-guide/Speech-Recognition) — MiMo ASR API
+- [push-2-talk](https://github.com/yyyzl/push-2-talk) — MIT-licensed Doubao IME protocol research reference
+- [Opus](https://opus-codec.org/) — Audio codec used by the Doubao IME experimental provider

@@ -23,7 +23,7 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "winmm.lib")
 
-static constexpr int kCurrentConfigVersion = 5;
+static constexpr int kCurrentConfigVersion = 6;
 
 bool EqualsIgnoreCase(std::wstring a, std::wstring b) {
     std::transform(a.begin(), a.end(), a.begin(), [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
@@ -147,6 +147,7 @@ std::wstring ModelDisplayName(const std::wstring& modelId) {
     if (modelId == L"baidu") return L"Baidu Cloud";
     if (modelId == L"volcengine") return L"Volcano Engine";
     if (modelId == L"mimo") return L"MiMo ASR";
+    if (modelId == L"doubao_ime") return L"Doubao IME";
     return L"FireRedASR2 CTC";
 }
 
@@ -393,6 +394,9 @@ void LoadConfig() {
     if (g_config.mimoBaseUrl.empty()) g_config.mimoBaseUrl = L"https://token-plan-ams.xiaomimimo.com/v1";
     if (g_config.mimoModel.empty()) g_config.mimoModel = L"mimo-v2.5-asr";
     if (g_config.mimoLanguage != L"zh" && g_config.mimoLanguage != L"en") g_config.mimoLanguage = L"auto";
+    g_config.doubaoImeDeviceId = Utf8ToWide(ExtractJsonString(json, "doubao_ime_device_id", ""));
+    g_config.doubaoImeCdid = Utf8ToWide(ExtractJsonString(json, "doubao_ime_cdid", ""));
+    g_config.doubaoImeToken = llm::DecryptString(Utf8ToWide(ExtractJsonString(json, "doubao_ime_token", "")));
     g_config.audioBackend = Utf8ToWide(ExtractJsonString(json, "audio_backend", WideToUtf8(g_config.audioBackend)));
     g_config.audioDeviceId = Utf8ToWide(ExtractJsonString(json, "audio_device_id", ""));
     g_config.configVersion = ExtractJsonInt(json, "config_version", 0);
@@ -492,6 +496,9 @@ void SaveConfig() {
          << "  \"mimo_base_url\": \"" << EscapeJson(g_config.mimoBaseUrl) << "\",\n"
          << "  \"mimo_model\": \"" << EscapeJson(g_config.mimoModel) << "\",\n"
          << "  \"mimo_language\": \"" << EscapeJson(g_config.mimoLanguage) << "\",\n"
+         << "  \"doubao_ime_device_id\": \"" << EscapeJson(g_config.doubaoImeDeviceId) << "\",\n"
+         << "  \"doubao_ime_cdid\": \"" << EscapeJson(g_config.doubaoImeCdid) << "\",\n"
+         << "  \"doubao_ime_token\": \"" << EscapeJson(llm::EncryptString(g_config.doubaoImeToken)) << "\",\n"
          << "  \"audio_backend\": \"" << EscapeJson(g_config.audioBackend) << "\",\n"
          << "  \"audio_device_id\": \"" << EscapeJson(g_config.audioDeviceId) << "\"\n"
          << "}\n";
