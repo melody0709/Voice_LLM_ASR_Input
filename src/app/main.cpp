@@ -323,13 +323,37 @@ static void ApplyBatchResultMetrics(const Config& config, const AsrSessionResult
     g_lastPcmBytes = result.pcmBytes;
     if (result.backend == AsrSessionBackend::BaiduBatch ||
         result.backend == AsrSessionBackend::QwenRealtimeBatch ||
-        result.backend == AsrSessionBackend::MimoBatch) {
+        result.backend == AsrSessionBackend::MimoBatch ||
+        result.backend == AsrSessionBackend::DoubaoImeRecorded) {
         g_cloudApiMs = result.cloudApiMs;
     }
     if (config.enableDebugMode && result.vadTrimmedSamples > 0) {
         g_vadTrimmedSamples = result.vadTrimmedSamples;
         g_vadMs = result.vadMs;
         g_vadModelName = result.vadModelName;
+    }
+}
+
+static void PostDoubaoImeCredentialsUpdate(const doubao_ime_asr::Credentials& credentials, bool clear) {
+    auto* update = new doubao_ime_asr::CredentialsUpdateMessage;
+    update->credentials = credentials;
+    update->clear = clear;
+    if (!PostMessageW(g_mainWindow, kDoubaoImeCredentialsMessage, 0,
+                      reinterpret_cast<LPARAM>(update))) {
+        delete update;
+    }
+}
+
+static void ApplyAsrSessionSideEffects(const AsrSessionResult& result) {
+    if (result.doubaoImeClearCredentials) {
+        PostDoubaoImeCredentialsUpdate({}, true);
+    }
+    if (result.doubaoImeCredentialsChanged) {
+        doubao_ime_asr::Credentials credentials;
+        credentials.deviceId = result.doubaoImeDeviceId;
+        credentials.cdid = result.doubaoImeCdid;
+        credentials.token = result.doubaoImeToken;
+        PostDoubaoImeCredentialsUpdate(credentials, false);
     }
 }
 
@@ -395,6 +419,7 @@ void RecognizeAsync(const std::vector<BYTE>& pcm, uint64_t attemptId) {
         }
 
         if (!ShouldAcceptFinalMessage(attemptId)) return;
+        ApplyAsrSessionSideEffects(selectedResult);
         ApplyBatchResultMetrics(resultConfig, selectedResult);
         DispatchAsrFinalText(g_mainWindow, selectedResult.text, resultConfig,
                              RefineWithLlmAsync, &g_lastRawAsrText, metadata);
@@ -518,6 +543,7 @@ static void DispatchStreamingFallbackAsync(uint64_t attemptId,
         }
 
         if (!IsActiveAsrAttempt(attemptId)) return;
+        ApplyAsrSessionSideEffects(selectedResult);
         ApplyBatchResultMetrics(fallbackConfig, selectedResult);
         DispatchAsrFinalText(g_mainWindow, selectedResult.text, fallbackConfig,
                              RefineWithLlmAsync, &g_lastRawAsrText, metadata);

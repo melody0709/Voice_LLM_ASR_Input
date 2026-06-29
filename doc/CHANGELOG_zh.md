@@ -6,6 +6,24 @@
 
 - 暂无。
 
+## v0.9.6 (2026-06-29)
+
+### 新增
+
+- **Doubao IME fallback 目标**：Recognition tab 的 `Fallback` 选择器现在可选择 `Doubao IME (Free)`。默认 ASR 后端出现运行类失败后，会用同一段原始 PCM 发起 Doubao IME recorded request。
+- **Doubao IME recorded helper**：新增 `doubao_ime_asr::RecognizeRecordedPcm()`，保留固定 20ms frame padding、`RealtimeClient::Finish()` 的 final/partial 合并、有界 recorded retry，以及凭据刷新 side effect。
+
+### 变更
+
+- **Doubao IME 凭据写回**：fallback recorded request 中的注册/token 刷新通过 `AsrSessionResult` 返回 side effect；主窗口在 stale-attempt 检查通过后，复用现有 `kDoubaoImeCredentialsMessage` handler 写回配置。
+- **Fallback backend 支持**：`doubao_ime` 已加入 fallback 校验、Settings backend 选项、batch session 创建和云端耗时统计。Volcengine 仍暂不作为 fallback target。
+
+### 验证
+
+- `.\build.bat` 通过。
+- `.\tools\doubao_ime_probe.bat` 已通过 recorded helper 路径验证仓库内 16kHz mono WAV（`wav_ok=1`，文本：`开放时间，早上 9 点至下午 5 点。`）。
+- 自动化 Settings 冒烟已打开真实 Settings 窗口，并确认 fallback 下拉框包含 `Doubao IME (Free)`。
+
 ## v0.9.5 (2026-06-29)
 
 ### 新增

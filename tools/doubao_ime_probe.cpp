@@ -141,38 +141,13 @@ bool RunWavProbe(const wchar_t* path,
     cfg.cdid = credentials.cdid;
     cfg.token = credentials.token;
 
-    doubao_ime_asr::RealtimeClient client(cfg);
-    if (!client.Connect(error)) {
-        error = doubao_ime_asr::ErrorText(error);
+    doubao_ime_asr::RecordedRecognitionResult result =
+        doubao_ime_asr::RecognizeRecordedPcm(cfg, pcm, 15000);
+    if (!result.ok) {
+        error = doubao_ime_asr::ErrorText(result.error);
         return false;
     }
-
-    const size_t frameBytes = client.FrameBytes();
-    if (frameBytes == 0) {
-        error = L"invalid frame size";
-        client.Close();
-        return false;
-    }
-
-    for (size_t offset = 0; offset < pcm.size(); offset += frameBytes) {
-        const size_t bytes = (std::min)(frameBytes, pcm.size() - offset);
-        std::vector<BYTE> frame(pcm.begin() + static_cast<ptrdiff_t>(offset),
-                                pcm.begin() + static_cast<ptrdiff_t>(offset + bytes));
-        if (frame.size() < frameBytes) frame.resize(frameBytes, 0);
-        const bool isLast = offset + bytes >= pcm.size();
-        if (!client.SendPcmFrame(frame.data(), frame.size(), isLast, error)) {
-            error = doubao_ime_asr::ErrorText(error);
-            client.Close();
-            return false;
-        }
-    }
-
-    if (!client.Finish(15000, text, error)) {
-        error = doubao_ime_asr::ErrorText(error);
-        client.Close();
-        return false;
-    }
-    client.Close();
+    text = result.text;
     return !text.empty();
 }
 

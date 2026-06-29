@@ -1,8 +1,10 @@
 # ASR Fallback Backend 方案
 
-> 状态：方案设计  
-> 日期：2026-06-28  
-> 复审：2026-06-29  
+> 状态：v2 已实施
+> 日期：2026-06-28
+> 复审：2026-06-29
+> v2 准备：2026-06-29，研究 Doubao IME recorded fallback target
+> v2 实施：2026-06-29，Doubao IME recorded fallback target 已接入，`build.bat` 和 `tools\doubao_ime_probe.bat` 通过
 > 目标：在 Recognition tab 增加 Fallback ASR Backend。当默认 ASR 后端发生可恢复/运行类失败时，用同一段录音自动走备用 ASR。
 
 ---
@@ -13,20 +15,26 @@
 
 也就是默认 ASR 先在明确的 primary 预算内跑完它自己的连接、重试、replay、final timeout 逻辑。只有默认 ASR 最终确认失败，才用同一段原始 PCM 启动 fallback。这样不会让两个云端 ASR 同时消耗连接和额度，也不会把 partial HUD、LLM、粘贴路径搞成竞态。
 
-第一版建议支持：
+当前 v1 已支持：
 
 ```text
 Primary ASR:  local / baidu / qwen / mimo / volcengine / doubao_ime
 Fallback ASR: disabled / local / baidu / qwen / mimo
 ```
 
-暂缓把 `volcengine` 和 `doubao_ime` 作为 fallback 目标。原因不是不能做，而是它们现在的录音回放识别逻辑藏在 streaming session 内部，且分别带有火山持久连接、Doubao 凭据写回、partial 聚合等 provider 生命周期。第一版把它们作为 primary 支持即可，失败后 fallback 到 batch-capable 后端。等 v1 稳定后，再抽出 `RecognizeRecordedPcm()` helper 支持它们作为 fallback 目标。
+下一步建议把 `doubao_ime` 加入 fallback target，`volcengine` 继续暂缓：
+
+```text
+Fallback ASR v2: disabled / local / baidu / qwen / mimo / doubao_ime
+```
+
+`doubao_ime` 可以加入 fallback 的原因：它的协议层 `RealtimeClient` 已经支持连接、发送固定 20ms PCM frame、`Finish()` 等 recorded replay 所需能力；需要抽出的主要是 streaming session 私有的 `RetryRecognitionOnce()` 录音回放逻辑，以及凭据刷新/写回 side effect。`volcengine` 仍暂缓，因为它还绑定持久连接、三模式 send/drain、prewarm/reuse 生命周期，抽 recorded helper 风险更高。
 
 2026-06-29 复审后补充三条实施硬约束：
 
 - streaming session 的 final callback **只允许投递主窗口消息**，不能在 session worker 线程里直接运行 fallback。
 - 主窗口收到 primary final/timeout 后，fallback batch 也必须放到后台 worker 跑，不能阻塞 UI/window proc。
-- ASR final 和 LLM final 的消息 payload 要携带最终 backend config/usedFallback/primaryError，不能继续完全依赖全局 `g_config` 做 debug 和日志判断。
+- ASR final 和 LLM final 的消息 payload 要携带最终 backend config/usedFallback/primaryError/attempt id，不能继续完全依赖全局 `g_config` 做 debug、日志和 stale result 判断。
 
 ---
 
@@ -58,7 +66,7 @@ streaming 模式下，即使 Qwen/Volc 走 `StreamingVadTrimmer` 上传裁剪后
 
 它返回 `AsrSessionResult`，包含 text、backend、cloudApiMs、VAD trim stats 等。fallback 执行可以直接复用这个接口，避免在 `main.cpp` 写 provider 协议逻辑。
 
-需要注意：当前 Qwen batch session 没有像 Baidu/MiMo 一样接 `BatchVadTrimmer`。如果把 Qwen 作为 fallback target，建议顺手补齐 batch VAD trim，使 batch cloud 后端语义一致。
+v1 已补齐 Qwen batch VAD trim。v2 要把 Doubao IME 加入 fallback target，应新增一个 `DoubaoImeRecordedSession`，让 Doubao 也走 `CreateBatchAsrSession()`，不要让 `main.cpp` 直接调用 Doubao 协议。
 
 ### 3. Streaming session 现在自己 dispatch final，fallback 插不进去
 
@@ -117,6 +125,82 @@ Streaming session final
 | MiMo | adaptive final timeout + 12000ms，clamp 15000..60000，transient retry |
 
 fallback 不应抢在这些 provider 内部 retry 前启动。否则会出现 primary 其实能恢复，但 fallback 已经粘贴了另一份文本的问题。
+
+Doubao IME 作为 fallback target 时，它是 fallback 自己的 recorded request，而不是 primary streaming final wait 的一部分。因此：
+
+- primary streaming 等待仍由 `ComputeCloudAsrStreamingFinalWaitMs()` 控制，fallback 启用时保持 6-12 秒。
+- Doubao fallback recorded request 使用 `ComputeCloudAsrRecordedRequestTimeoutMs(0, pcm.size())` 作为 final wait 基础，保留 8-30 秒 batch 网络预算。
+- Doubao `RealtimeClient` 自己的 `connectTimeoutMs=10000` 和 session ready `8000ms` 保持不变；不要把它压到 6-12 秒，否则首次注册/握手容易误失败。
+
+### 6. Doubao IME 加入 fallback target 的研究结论
+
+现状：
+
+- `doubao_ime_asr::RealtimeClient` 已经是可复用协议层，提供 `Connect()`、`SendPcmFrame()`、`SendFinishSession()`、`PollEvent()`、`Finish()`、`Abort()`、`Close()`。
+- `RealtimeClient::Connect()` 内部会调用 `EnsureCredentials()`；首次无凭据时会注册设备，token/auth 变化会通过 `CredentialsChanged()` 和 `CurrentCredentials()` 暴露。
+- `FrameBytesForConfig()` 固定按 `sampleRate/channels/frameMs` 计算 frame size。当前 app 配置是 16kHz / mono / 20ms，即每帧 640 bytes PCM。
+- `RealtimeClient::SendPcmFrame()` 要求每次传入完整 frame；最后一帧不足时必须补 0 到完整 frame，并传 `isLast=true`。
+- `RealtimeClient::Finish()` 已经能在 recorded replay 场景合并 final segment，并用 partial 作为 fallback 文本；这比 streaming session 的 partial HUD 聚合轻得多。
+- 现在可复用的 recorded retry 逻辑在 `DoubaoImeStreamingSession::RetryRecognitionOnce()` 私有方法里，不能直接给 batch fallback 调用。
+
+结论：
+
+- v2 不要把 Doubao IME fallback 实现在 `main.cpp`。
+- v2 应新增 recorded helper + batch session：
+  - `doubao_ime_asr::RecognizeRecordedPcm(...)` 负责协议、凭据 retry、frame padding、send、finish。
+  - `DoubaoImeRecordedSession` 负责接入 `CreateBatchAsrSession()`，输出 `AsrSessionResult`。
+- Doubao IME fallback 继续上传原始 PCM，不走本地 `BatchVadTrimmer`。原因是 Doubao primary streaming 当前也明确绕过本地 VAD，fallback target 应保持同一 provider 语义；`Too short` / primary no-speech 已在 fallback 前挡掉。
+- Doubao IME fallback 必须支持凭据 side effect：首次注册、token 刷新、auth failure 清空凭据后重试，都要能写回 `g_config` 并刷新 Settings。
+- 不需要把 Doubao partial HUD 聚合逻辑搬进 recorded helper；fallback recorded request 只需要最终文本。
+
+推荐新增结果结构：
+
+```cpp
+namespace doubao_ime_asr {
+
+struct RecordedRecognitionResult {
+    bool ok = false;
+    std::wstring text;
+    std::wstring error;
+    double elapsedMs = 0.0;
+    Credentials credentials;
+    bool credentialsChanged = false;
+    bool clearCredentials = false;
+};
+
+RecordedRecognitionResult RecognizeRecordedPcm(const DoubaoImeConfig& cfg,
+                                                const std::vector<BYTE>& pcm16k16Mono,
+                                                DWORD finalTimeoutMs);
+
+} // namespace doubao_ime_asr
+```
+
+`RecognizeRecordedPcm()` 建议流程：
+
+1. 如果 PCM 为空，返回 `ok=true` + 空 text，让上层归一化为 `No speech detected`。
+2. 构造可变的 `attemptCfg` 和 `RealtimeClient`。helper 总共最多创建 2 个 recorded request attempt；auth refresh、transient connect、send/final replay 都计入这个总预算，不再叠成“3 次 connect x 2 次 replay”。
+3. 首次 auth/token 类失败时清空 `deviceId/cdid/token`，标记 `clearCredentials=true`，再用下一次 attempt 注册/重连。
+4. transient connect failure 按现有 Doubao 策略短 backoff 重试，但不能突破第 2 条的总 attempt 上限。
+5. `Connect()` 成功后，如果 `CredentialsChanged()`，记录 `credentialsChanged=true` 和 `CurrentCredentials()`，并更新 `attemptCfg`，保证后续 retry 用新凭据。
+6. 按 `FrameBytesForConfig()` 切 PCM；中间 frame 原样发送，最后 frame 不足则补 0 并设置 `isLast=true`。
+7. 保留现有 recorded replay 行为：最后一帧 `SendPcmFrame(..., isLast=true)` 后仍调用 `Finish(finalTimeoutMs, text, error)`，不要因为已经传了 last frame 就跳过 `SendFinishSession()`。
+8. `Finish()` 成功时返回 `ok=true`，`text` 可以为空；失败时返回 `ok=false`，`error` 使用 `ErrorText(error)` 风格。
+9. 失败后如属于 transient send/final failure，可复用 recorded PCM 再试一次，但只在第 2 条的总预算内进行。
+
+`DoubaoImeRecordedSession::Finish()` 负责最终归一化：
+
+- `recorded.ok == true`：`result.text = NormalizeAsrText(recorded.text)`，所以空文本显示 `No speech detected`。
+- `recorded.ok == false`：`result.text = recorded.error`，并确保错误文本有 `Doubao IME ASR error:` 前缀。
+- helper 的 `text` 字段只放识别文本，不放错误文案，避免上层误把 provider error 当成可粘贴文本。
+
+凭据写回建议：
+
+- 不让 `doubao_ime_asr` 层直接碰 `g_config` 或窗口句柄。
+- `DoubaoImeRecordedSession` 把 `RecordedRecognitionResult` 的凭据 side effect 搬到 `AsrSessionResult`。
+- `main.cpp` 在 fallback/batch worker 得到 `AsrSessionResult` 后，通过现有 `kDoubaoImeCredentialsMessage` 写回凭据。
+- 写回时复用现有主窗口 handler：它已经会更新 `g_config`、`SaveConfig()`，并通知 Settings refresh。
+- 如果一次 recorded helper 同时产生 `clearCredentials` 和 `credentialsChanged`，`ApplyAsrSessionSideEffects()` 必须先投递 clear，再投递 store new credentials，避免旧 token 留在 config。
+- side effect 只在结果通过 stale/attempt guard 后应用：batch primary 路径在第二次 `ShouldAcceptFinalMessage(attemptId)` 之后、`DispatchAsrFinalText()` 之前；streaming fallback 路径在 `IsActiveAsrAttempt(attemptId)` 之后、`DispatchAsrFinalText()` 之前。
 
 复审结论：现有 `8s..30s` 的 streaming final 等待对 fallback 场景偏长，尤其 20 秒录音后还等 22 秒、30 秒以上还等 30 秒，体感上会像卡死。实现 fallback 时应把“松开后等 primary final 的 UI 上限”缩短到约 `6s..12s`，同时保留 batch/replay 请求自己的较长网络预算，避免一个函数同时承担两种语义。
 
@@ -383,9 +467,10 @@ Local (sherpa-onnx)
 Baidu Cloud
 Qwen ASR
 MiMo ASR
+Doubao IME (Free)   // v2: after recorded helper lands
 ```
 
-不要在第一版 UI 里提供 `Volcano Engine` / `Doubao IME` 作为 fallback target，避免用户选到尚未抽出 recorded-pcm helper 的 streaming provider。
+v1 不提供 `Volcano Engine` / `Doubao IME`。v2 只新增 `Doubao IME (Free)`；`Volcano Engine` 仍不进 fallback combo，避免用户选到尚未抽出 recorded-pcm helper 的 streaming provider。
 
 保存时校验：
 
@@ -708,13 +793,13 @@ localPreloadConfig.asrBackend = L"local";
 
 `kReloadMessage` 里同样要按 primary/fallback 检查 local 预加载。Settings Save 后如果 primary 是云端、fallback 是 local，也应触发 preload。
 
-Volcengine 作为 fallback target 暂缓，所以第一版不需要为 fallback Volc 做 prewarm。如果第二版支持 `volcengine` fallback target，再把：
+Volcengine 作为 fallback target 继续暂缓，所以 v2 Doubao fallback 不需要改 Volc prewarm。如果后续单独支持 `volcengine` fallback target，再把：
 
 ```text
 primary is volcengine OR fallback is volcengine
 ```
 
-纳入 `VolcenginePrewarmConnection()` 条件。
+纳入 `VolcenginePrewarmConnection()` 条件。Doubao IME 不做跨录音 prewarm，fallback recorded request 按需连接即可。
 
 ---
 
@@ -826,28 +911,81 @@ Fallback failed: Local ASR
 
 避免把很长的 provider error 全塞 HUD。
 
-### Phase 5：可选，支持 Volc/Doubao 作为 fallback target
+### Phase 5：v2 支持 Doubao IME 作为 fallback target
 
-暂缓原因：
+目标：把 `doubao_ime` 加入 fallback combo 和 `CreateBatchAsrSession()`，让它作为 recorded-pcm fallback target 可用；继续不支持 `volcengine` 作为 fallback target。
 
-- Volc 的 recorded replay helper 目前是 `VolcengineStreamingSession::RetryRecognitionOnce()` 私有逻辑。
-- Doubao 的 replay helper 目前是 `DoubaoImeStreamingSession::RetryRecognitionOnce()` 私有逻辑，且涉及凭据刷新和写回。
-- 两者都不是简单调用 `CreateBatchAsrSession()`。
+涉及文件：
 
-后续要支持时，建议新增：
+- `src/asr/doubao_ime_asr.h`
+- `src/asr/doubao_ime_asr.cpp`
+- `src/asr/asr_session.h`
+- `src/asr/asr_session.cpp`
+- `src/asr/asr_result.cpp`
+- `src/ui/settings.cpp`
+- `src/app/main.cpp`
+- `src/app/globals.h`（如需新增 result side-effect 字段对应 id，不需要新增 config 字段）
+- `README.md` / `CHANGELOG.md` / 中文文档
+
+任务：
+
+1. 在 `doubao_ime_asr` 协议层新增 `RecordedRecognitionResult` 和 `RecognizeRecordedPcm()`。
+2. 把当前 `doubao_ime_streaming_session.cpp` 匿名命名空间里的 `BuildDoubaoConfig(const Config&)` 移到可被 streaming session 和 batch session 共用的位置。建议做成轻量 shared helper，例如 `BuildDoubaoImeConfigFromConfig(const Config&)`；协议层 `doubao_ime_asr` 仍不直接依赖 `g_config` 或 HWND。若新增 `.cpp`，必须同步 `build.bat` 和 `CMakeLists.txt`。
+3. 从 `DoubaoImeStreamingSession::RetryRecognitionOnce()` 机械抽取 recorded send/final 逻辑到 helper，保留：
+   - fixed frame padding
+   - auth failure 清凭据并重试
+   - transient connect/send/final failure 有限重试，且总 recorded request attempt 最多 2 次
+   - `RealtimeClient::Finish()` 的 final/partial 合并行为
+4. 新增 `AsrSessionBackend::DoubaoImeRecorded`。
+5. 新增 `DoubaoImeRecordedSession`：
+   - 从 `Config` 构造 `doubao_ime_asr::DoubaoImeConfig`。
+   - 不走 `BatchVadTrimmer`，直接上传 raw PCM。
+   - final timeout 使用 `ComputeCloudAsrRecordedRequestTimeoutMs(0.0, pcm_.size())`。
+   - `RecordedRecognitionResult.ok == false` 时把 `recorded.error` 放入 `result.text`；`ok == true` 时只归一化 `recorded.text`。
+   - `Finish()` 返回 `AsrSessionResult`，`cloudApiMs` 用 recorded helper elapsed。
+6. 给 `AsrSessionResult` 增加 Doubao 凭据 side effect 字段。建议最小字段：
 
 ```cpp
-std::wstring VolcengineRecognizeRecordedPcm(const Config& config,
-                                            const std::vector<BYTE>& pcm,
-                                            DWORD finalTimeoutMs);
-
-std::wstring DoubaoImeRecognizeRecordedPcm(const Config& config,
-                                           const std::vector<BYTE>& pcm,
-                                           HWND targetWindowForCredentialWriteback,
-                                           DWORD finalTimeoutMs);
+bool doubaoImeCredentialsChanged = false;
+bool doubaoImeClearCredentials = false;
+std::wstring doubaoImeDeviceId;
+std::wstring doubaoImeCdid;
+std::wstring doubaoImeToken;
 ```
 
-抽取时只机械移动已有 retry/replay 逻辑，不重写协议 frame、send/drain、Prewarm/CloseSession 行为。
+这些字段保持 `std::wstring`，避免通用 `asr_session.h` 为了一个 provider 反向 include `doubao_ime_asr.h`。
+
+7. 在 `main.cpp` 的 batch result 应用点新增 `ApplyAsrSessionSideEffects(result)`：
+   - 如果 `doubaoImeClearCredentials`，投递 `kDoubaoImeCredentialsMessage` clear。
+   - 如果 `doubaoImeCredentialsChanged`，投递 `kDoubaoImeCredentialsMessage` 写回 credentials。
+   - 如果两个 flag 同时为 true，先 clear 后写回新 credentials。
+   - side effect 必须经过主窗口现有 handler，不能由 asr 层直接写 `g_config`。
+   - 调用点必须覆盖两条路径：`RecognizeAsync()` 的 batch primary/fallback worker，以及 `DispatchStreamingFallbackAsync()` 的 streaming primary -> batch fallback worker。
+   - 调用点必须放在 stale/attempt guard 之后、final dispatch 之前，避免旧 fallback worker 写回凭据或覆盖 Settings。
+8. `IsSupportedFallbackBackend()` 加入 `doubao_ime`。
+9. `settings.cpp` 的 `kBackendOptions` 把 `doubao_ime` 的 `fallbackSupported` 改为 `true`。
+10. `ApplyBatchResultMetrics()` 把 `DoubaoImeRecorded` 纳入 cloud API timing。
+11. Debug/HUD 文案沿用已有 `AsrBackendDisplayName()` / `AsrBackendDebugName()` 的 `Doubao IME` / `DoubaoIME`。
+
+不要做：
+
+- 不要把 `DoubaoImeStreamingSession` 直接实例化为 fallback target。
+- 不要把 fallback recorded request 放进 `main.cpp`。
+- 不要把 target window/HWND 传进 `doubao_ime_asr` 协议层。
+- 不要把 Doubao fallback 也接本地 VAD trim，避免和 Doubao primary streaming 的“绕过本地 VAD”语义不一致。
+- 不要顺手支持 `volcengine` fallback target；Volc 仍等下一阶段单独抽 recorded helper。
+
+验证：
+
+- Settings fallback combo 出现 `Doubao IME (Free)`。
+- primary 与 fallback 都选 `doubao_ime` 时保存为 Disabled。
+- primary local 模型路径错误 -> fallback Doubao 成功识别并粘贴。
+- primary Qwen/Volc/Doubao 作为 primary 失败 -> fallback Doubao 可启动。
+- fallback Doubao 首次无凭据时自动注册，识别成功后 `doubao_ime_device_id/cdid/token` 写回 config。
+- fallback Doubao 遇到 auth/token failure 时清凭据、重试注册，并写回新凭据。
+- fallback Doubao 识别空文本时显示 `No speech detected`，不回显 primary 网络错误。
+- fallback Doubao operational failure 时 HUD 显示 `Fallback failed: Doubao IME`，不粘贴错误文本。
+- fallback Doubao 运行期间开始新录音：旧 fallback 不显示结果、不粘贴、不覆盖当前 watchdog。
 
 ---
 
@@ -947,6 +1085,7 @@ Get-Process VoxType -ErrorAction SilentlyContinue | Stop-Process -Force
 
 - Local 模型路径改错，fallback Local disabled 时显示 primary error。
 - Local 模型路径改错，fallback Baidu/Qwen/MiMo 时走 fallback。
+- Local 模型路径改错，fallback Doubao IME 时走 recorded Doubao helper。
 - Baidu API key 清空，fallback Local。
 - MiMo API key 清空，fallback Local。
 - Qwen API key 清空，fallback Local。
@@ -965,6 +1104,18 @@ Get-Process VoxType -ErrorAction SilentlyContinue | Stop-Process -Force
 - Doubao IME 凭据失败且刷新失败，fallback Local。
 - Doubao IME 网络失败，fallback Local。
 - streaming primary partial HUD 已显示文本时，fallback final 仍能覆盖并正常粘贴。
+
+### Doubao IME fallback target
+
+- Settings fallback combo 可选择 `Doubao IME (Free)`。
+- primary 与 fallback 同为 `doubao_ime` 时保存为 Disabled。
+- fallback Doubao 首次无凭据时自动注册，识别成功后 config 写入 `doubao_ime_device_id` / `doubao_ime_cdid` / `doubao_ime_token`。
+- fallback Doubao token/auth failure 时清空旧凭据、重新注册并重试同一段 PCM。
+- fallback Doubao 网络 transient failure 时有限重试；最终失败显示 `Fallback failed: Doubao IME`，不粘贴。
+- fallback Doubao 返回空文本时显示 `No speech detected`，不回显 primary 错误。
+- fallback Doubao 不跑本地 VAD trim；长录音中间停顿不应被裁掉。
+- fallback Doubao 运行期间开始下一次录音，旧结果不显示、不粘贴、不覆盖当前 watchdog。
+- Debug Mode 显示 primary failed + DoubaoIME pipeline timing。
 
 ### 并发和生命周期
 
@@ -990,17 +1141,20 @@ Get-Process VoxType -ErrorAction SilentlyContinue | Stop-Process -Force
 
 ## 建议提交边界
 
-一次实现建议拆成 2 个提交：
+v1 fallback 已经实现。v2 Doubao IME fallback 建议拆成 2 个提交：
 
-1. `feat: add fallback asr config and batch fallback`
-   - Config/UI/result classification/batch fallback。
-   - 已可覆盖 local/Baidu/Qwen/MiMo primary 的 fallback。
+1. `feat: add doubao ime recorded recognition helper`
+   - `doubao_ime_asr::RecordedRecognitionResult`。
+   - `doubao_ime_asr::RecognizeRecordedPcm()`。
+   - 凭据刷新/清空/写回 side effect 只作为结果返回，不直接写 `g_config`。
 
-2. `feat: route streaming asr failures through fallback`
-   - streaming final callback、attempt context、watchdog fallback。
-   - 覆盖 Qwen/Volc/Doubao primary。
+2. `feat: enable doubao ime as fallback backend`
+   - `DoubaoImeRecordedSession` 接入 `CreateBatchAsrSession()`。
+   - fallback combo 开放 `Doubao IME (Free)`。
+   - `main.cpp` 应用 Doubao 凭据 side effect。
+   - Debug/文档/测试补齐。
 
-如果代码量控制得住，也可以一个提交完成，但不要同时抽 Volc/Doubao recorded fallback helper。
+如果代码量控制得住，也可以一个提交完成，但不要同时抽 Volc recorded fallback helper。
 
 ---
 
@@ -1028,4 +1182,4 @@ Get-Process VoxType -ErrorAction SilentlyContinue | Stop-Process -Force
 - 不做 local decode 强制超时取消。
 - 不把 LLM 作为 fallback 的判断依据。
 - 不把 Qwen/Volc/Doubao send loop、drain thread、retry 抽成复杂模板。
-- 第一版不支持 Volc/Doubao 作为 fallback target。
+- v2 只支持 Doubao IME 作为新增 fallback target，仍不支持 Volcengine fallback target。

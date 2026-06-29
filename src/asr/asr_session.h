@@ -15,6 +15,7 @@ enum class AsrSessionBackend {
     BaiduBatch,
     QwenRealtimeBatch,
     MimoBatch,
+    DoubaoImeRecorded,
 };
 
 class AsrEngine;
@@ -29,6 +30,11 @@ struct AsrSessionResult {
     size_t pcmBytes = 0;
     size_t vadTrimmedSamples = 0;
     std::wstring vadModelName;
+    bool doubaoImeCredentialsChanged = false;
+    bool doubaoImeClearCredentials = false;
+    std::wstring doubaoImeDeviceId;
+    std::wstring doubaoImeCdid;
+    std::wstring doubaoImeToken;
 };
 
 class IAsrSession {

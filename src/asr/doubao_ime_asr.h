@@ -37,6 +37,16 @@ struct TestResult {
     bool credentialsChanged = false;
 };
 
+struct RecordedRecognitionResult {
+    bool ok = false;
+    std::wstring text;
+    std::wstring error;
+    double elapsedMs = 0.0;
+    Credentials credentials;
+    bool credentialsChanged = false;
+    bool clearCredentials = false;
+};
+
 struct RealtimeEvent {
     std::wstring partialText;
     std::wstring finalText;
@@ -80,6 +90,9 @@ bool IsTransientFailure(const std::wstring& error);
 size_t FrameBytesForConfig(const DoubaoImeConfig& cfg);
 std::wstring MergeRecognizedText(std::wstring base, const std::wstring& incoming);
 std::wstring ErrorText(const std::wstring& error);
+RecordedRecognitionResult RecognizeRecordedPcm(const DoubaoImeConfig& cfg,
+                                               const std::vector<BYTE>& pcm16k16Mono,
+                                               DWORD finalTimeoutMs);
 TestResult TestConnection(const DoubaoImeConfig& cfg);
 
 } // namespace doubao_ime_asr

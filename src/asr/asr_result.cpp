@@ -128,7 +128,8 @@ const char* AsrBackendDebugName(const std::wstring& asrBackend) {
 
 bool IsSupportedFallbackBackend(const std::wstring& backend) {
     return backend == L"local" || backend == L"baidu" ||
-           backend == L"qwen" || backend == L"mimo";
+           backend == L"qwen" || backend == L"mimo" ||
+           backend == L"doubao_ime";
 }
 
 bool IsFallbackAsrEnabled(const Config& config) {

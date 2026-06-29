@@ -1571,6 +1571,120 @@ std::wstring ErrorText(const std::wstring& error) {
     return L"Doubao IME ASR error: " + (error.empty() ? L"unknown error" : error);
 }
 
+RecordedRecognitionResult RecognizeRecordedPcm(const DoubaoImeConfig& cfg,
+                                               const std::vector<BYTE>& pcm16k16Mono,
+                                               DWORD finalTimeoutMs) {
+    RecordedRecognitionResult result;
+    const ULONGLONG t0 = GetTickCount64();
+    auto finishResult = [&]() -> RecordedRecognitionResult {
+        result.elapsedMs = static_cast<double>(GetTickCount64() - t0);
+        return result;
+    };
+
+    if (pcm16k16Mono.empty()) {
+        result.ok = true;
+        return finishResult();
+    }
+
+    DoubaoImeConfig attemptCfg = cfg;
+    const size_t frameBytes = FrameBytesForConfig(attemptCfg);
+    if (frameBytes == 0) {
+        result.error = ErrorText(L"invalid frame size");
+        return finishResult();
+    }
+
+    constexpr int kMaxRecordedAttempts = 2;
+    bool refreshedCredentials = false;
+    for (int attempt = 0; attempt < kMaxRecordedAttempts; ++attempt) {
+        RealtimeClient client(attemptCfg);
+        std::wstring error;
+        if (!client.Connect(error)) {
+            const bool authFailure = IsAuthFailure(error);
+            if (client.CredentialsChanged() && !authFailure) {
+                Credentials credentials = client.CurrentCredentials();
+                attemptCfg.deviceId = credentials.deviceId;
+                attemptCfg.cdid = credentials.cdid;
+                attemptCfg.token = credentials.token;
+                result.credentials = credentials;
+                result.credentialsChanged = true;
+            }
+            client.Close();
+
+            if (!refreshedCredentials && authFailure && attempt + 1 < kMaxRecordedAttempts) {
+                attemptCfg.deviceId.clear();
+                attemptCfg.cdid.clear();
+                attemptCfg.token.clear();
+                result.clearCredentials = true;
+                refreshedCredentials = true;
+                Sleep(300);
+                continue;
+            }
+
+            result.error = ErrorText(error);
+            if (attempt + 1 < kMaxRecordedAttempts && IsTransientFailure(error)) {
+                Sleep(attempt == 0 ? 500 : 1000);
+                continue;
+            }
+            return finishResult();
+        }
+
+        if (client.CredentialsChanged()) {
+            Credentials credentials = client.CurrentCredentials();
+            attemptCfg.deviceId = credentials.deviceId;
+            attemptCfg.cdid = credentials.cdid;
+            attemptCfg.token = credentials.token;
+            result.credentials = credentials;
+            result.credentialsChanged = true;
+        }
+
+        bool sendOk = true;
+        std::vector<BYTE> frame;
+        frame.reserve(frameBytes);
+        for (size_t offset = 0; offset < pcm16k16Mono.size(); offset += frameBytes) {
+            const size_t bytes = (std::min)(frameBytes, pcm16k16Mono.size() - offset);
+            frame.assign(pcm16k16Mono.begin() + static_cast<ptrdiff_t>(offset),
+                         pcm16k16Mono.begin() + static_cast<ptrdiff_t>(offset + bytes));
+            if (frame.size() < frameBytes) frame.resize(frameBytes, 0);
+            const bool isLast = offset + bytes >= pcm16k16Mono.size();
+            if (!client.SendPcmFrame(frame.data(), frame.size(), isLast, error)) {
+                sendOk = false;
+                break;
+            }
+        }
+
+        if (!sendOk) {
+            client.Abort();
+            client.Close();
+            result.error = ErrorText(error.empty() ? L"send failed" : error);
+            if (attempt + 1 < kMaxRecordedAttempts && IsTransientFailure(error)) {
+                Sleep(attempt == 0 ? 500 : 1000);
+                continue;
+            }
+            return finishResult();
+        }
+
+        std::wstring text;
+        if (!client.Finish(finalTimeoutMs, text, error)) {
+            client.Close();
+            result.error = ErrorText(error);
+            if (attempt + 1 < kMaxRecordedAttempts && IsTransientFailure(error)) {
+                Sleep(attempt == 0 ? 500 : 1000);
+                continue;
+            }
+            return finishResult();
+        }
+
+        client.Close();
+        result.ok = true;
+        result.text = text;
+        result.error.clear();
+        return finishResult();
+    }
+
+    if (result.error.empty()) result.error = ErrorText(L"retry failed");
+    return finishResult();
+}
+
 TestResult TestConnection(const DoubaoImeConfig& cfg) {
     TestResult result;
     DoubaoImeConfig attemptCfg = cfg;

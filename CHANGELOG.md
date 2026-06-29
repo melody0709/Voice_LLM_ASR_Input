@@ -6,6 +6,24 @@
 
 - Nothing yet.
 
+## v0.9.6 (2026-06-29)
+
+### Added
+
+- **Doubao IME fallback target**: `Doubao IME (Free)` can now be selected in the Recognition-tab `Fallback` selector. It replays the same raw PCM through a recorded Doubao IME request after the primary backend ends in an operational failure.
+- **Doubao IME recorded helper**: Added `doubao_ime_asr::RecognizeRecordedPcm()` with fixed 20ms frame padding, final/partial merge through `RealtimeClient::Finish()`, bounded recorded retry, and credential refresh side effects.
+
+### Changed
+
+- **Doubao IME credential writeback**: Recorded fallback registration/token refresh now returns credential side effects through `AsrSessionResult`; the main window applies them via the existing `kDoubaoImeCredentialsMessage` handler after stale-attempt checks pass.
+- **Fallback backend support**: `doubao_ime` is now included in fallback validation, Settings backend options, batch-session creation, and cloud timing metrics. Volcengine remains unavailable as a fallback target.
+
+### Verification
+
+- `.\build.bat` passes after enabling Doubao IME fallback.
+- `.\tools\doubao_ime_probe.bat` passes through the recorded helper path against the bundled 16kHz mono speech WAV (`wav_ok=1`, text: `开放时间，早上 9 点至下午 5 点。`).
+- Automated Settings smoke opened the real Settings window and verified the fallback combo contains `Doubao IME (Free)`.
+
 ## v0.9.5 (2026-06-29)
 
 ### Added

@@ -143,7 +143,7 @@ constexpr BackendOption kBackendOptions[] = {
     {L"baidu", L"Baidu Cloud", true, true},
     {L"qwen", L"Qwen ASR", true, true},
     {L"mimo", L"MiMo ASR", true, true},
-    {L"doubao_ime", L"Doubao IME (Free)", true, false},
+    {L"doubao_ime", L"Doubao IME (Free)", true, true},
 };
 
 constexpr int kBackendOptionCount = static_cast<int>(sizeof(kBackendOptions) / sizeof(kBackendOptions[0]));

@@ -4,6 +4,7 @@
 #include "asr_streaming_session_base.h"
 #include "cloud_asr_common.h"
 #include "doubao_ime_asr.h"
+#include "doubao_ime_config.h"
 #include "globals.h"
 #include "pending_pcm_buffer.h"
 
@@ -21,18 +22,6 @@ namespace {
 constexpr DWORD kDoubaoRecordingWatchdogMs = 18000;
 constexpr size_t kDoubaoMaxReplayBytes = 120u * 32000u;
 constexpr size_t kDoubaoEmptyRetryMinBytes = 3u * 32000u;
-
-doubao_ime_asr::DoubaoImeConfig BuildDoubaoConfig(const Config& config) {
-    doubao_ime_asr::DoubaoImeConfig dcfg;
-    dcfg.deviceId = config.doubaoImeDeviceId;
-    dcfg.cdid = config.doubaoImeCdid;
-    dcfg.token = config.doubaoImeToken;
-    dcfg.sampleRate = 16000;
-    dcfg.channels = 1;
-    dcfg.frameMs = 20;
-    dcfg.enablePunctuation = true;
-    return dcfg;
-}
 
 std::wstring DoubaoErrorText(const std::wstring& error) {
     return doubao_ime_asr::ErrorText(error);
@@ -121,7 +110,7 @@ public:
                               AsrLlmRefineFn refineFn,
                               std::wstring* lastRawAsrText)
         : StreamingAsrSessionBase(std::move(config), targetWindow, refineFn, lastRawAsrText),
-          dcfg_(BuildDoubaoConfig(config_)) {}
+          dcfg_(BuildDoubaoImeConfigFromConfig(config_)) {}
 
     ~DoubaoImeStreamingSession() override {
         Abort();

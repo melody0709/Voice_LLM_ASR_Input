@@ -4,6 +4,8 @@
 #include "asr_result.h"
 #include "batch_vad_trimmer.h"
 #include "cloud_asr_common.h"
+#include "doubao_ime_asr.h"
+#include "doubao_ime_config.h"
 #include "engine.h"
 #include "mimo_asr.h"
 #include "qwen_asr.h"
@@ -242,6 +244,54 @@ private:
     AsrEngine& engine_;
 };
 
+class DoubaoImeRecordedSession final : public BatchAsrSessionBase {
+public:
+    explicit DoubaoImeRecordedSession(Config config)
+        : config_(std::move(config)) {}
+
+    AsrSessionResult Finish() override {
+        AsrSessionResult result;
+        result.backend = AsrSessionBackend::DoubaoImeRecorded;
+        result.providerName = AsrBackendDisplayName(config_);
+        result.pcmBytes = pcm_.size();
+
+        if (aborted_) {
+            result.text = L"Doubao IME ASR error: aborted";
+            return result;
+        }
+
+        doubao_ime_asr::DoubaoImeConfig dcfg = BuildDoubaoImeConfigFromConfig(config_);
+        const DWORD finalTimeout = ComputeCloudAsrRecordedRequestTimeoutMs(0.0, pcm_.size());
+
+        doubao_ime_asr::RecordedRecognitionResult recorded =
+            doubao_ime_asr::RecognizeRecordedPcm(dcfg, pcm_, finalTimeout);
+
+        result.cloudApiMs = recorded.elapsedMs;
+        result.doubaoImeClearCredentials = recorded.clearCredentials;
+        if (recorded.credentialsChanged) {
+            result.doubaoImeCredentialsChanged = true;
+            result.doubaoImeDeviceId = recorded.credentials.deviceId;
+            result.doubaoImeCdid = recorded.credentials.cdid;
+            result.doubaoImeToken = recorded.credentials.token;
+        }
+
+        if (!recorded.ok) {
+            result.text = doubao_ime_asr::ErrorText(recorded.error);
+            return result;
+        }
+
+        result.text = NormalizeAsrText(recorded.text);
+        return result;
+    }
+
+    const wchar_t* ProviderName() const override {
+        return L"Doubao IME";
+    }
+
+private:
+    Config config_;
+};
+
 } // namespace
 
 bool BatchAsrSessionBase::Start(std::wstring& error) {
@@ -278,6 +328,9 @@ std::unique_ptr<IAsrSession> CreateBatchAsrSession(
     }
     if (config.asrBackend == L"mimo") {
         return std::make_unique<MimoAsrSession>(config, localEngine);
+    }
+    if (config.asrBackend == L"doubao_ime") {
+        return std::make_unique<DoubaoImeRecordedSession>(config);
     }
 
     return std::make_unique<LocalAsrSession>(
