@@ -28,7 +28,7 @@ static volc_asr::VolcSession s_volcSession;
 namespace {
 
 constexpr DWORD kVolcRecordingWatchdogMs = 18000;
-constexpr DWORD kVolcOpeningFinalizeWatchdogMs = 10000;
+constexpr DWORD kVolcOpeningFinalizeWatchdogMs = 8000;
 constexpr DWORD kVolcRetryChunkBytes = 6400;
 constexpr size_t kVolcMaxReplayBytes = 120u * 32000u;
 constexpr size_t kVolcShortNoTextRetrySkipBytes = 3u * 32000u;
@@ -43,6 +43,12 @@ DWORD VolcOpenHardTimeoutForAttempt(int attemptIndex) {
     const size_t count = sizeof(kVolcOpenHardTimeouts) / sizeof(kVolcOpenHardTimeouts[0]);
     const size_t index = (std::min)(static_cast<size_t>(attemptIndex), count - 1);
     return kVolcOpenHardTimeouts[index];
+}
+
+DWORD VolcFinalizeWaitMs(const Config& config, double recordingMs, size_t capturedPcmBytes) {
+    return IsFallbackAsrEnabled(config)
+        ? ComputeCloudAsrStreamingFinalWaitMs(recordingMs, capturedPcmBytes)
+        : ComputeCloudAsrLegacyFinalizeTimeoutMs(recordingMs, capturedPcmBytes);
 }
 
 std::wstring JsonEscape(const std::wstring& s) {
@@ -137,7 +143,7 @@ public:
         recordingMs_.store(recordingMs);
         capturedPcmBytes_.store(capturedPcmBytes);
         streaming_.store(false);
-        const DWORD baseFinalizeMs = ComputeCloudAsrFinalizeTimeoutMs(recordingMs, capturedPcmBytes);
+        const DWORD baseFinalizeMs = VolcFinalizeWaitMs(config_, recordingMs, capturedPcmBytes);
         if (openingSession_.load()) {
             VolcDebugLog("Volc watchdog: OpenSession pending at StopInput; base=%ums guarded=%ums attempt=%d pending=%zu pcm=%zu",
                          baseFinalizeMs,
@@ -173,7 +179,7 @@ public:
 
     DWORD CurrentWatchdogMs() const override {
         if (streaming_.load()) return kVolcRecordingWatchdogMs;
-        const DWORD finalizeMs = ComputeCloudAsrFinalizeTimeoutMs(recordingMs_.load(), capturedPcmBytes_.load());
+        const DWORD finalizeMs = VolcFinalizeWaitMs(config_, recordingMs_.load(), capturedPcmBytes_.load());
         if (openingSession_.load()) {
             return (std::max)(finalizeMs, kVolcOpeningFinalizeWatchdogMs);
         }
@@ -671,7 +677,7 @@ private:
             VolcDebugLog("Volc retry: final text empty, replay available (bytes=%zu, forceAbort=%d)",
                          replayBuffer.Size(), s_volcSession.forceAbort.load() ? 1 : 0);
             NotifyStatus(L"Retrying... Volcano Engine");
-            DWORD retryTimeout = ComputeCloudAsrFinalizeTimeoutMs(recordingMs_.load(), replayBuffer.Size());
+            DWORD retryTimeout = VolcFinalizeWaitMs(config_, recordingMs_.load(), replayBuffer.Size());
             VolcRetryResult retryResult = RetryRecognitionOnce(vcfg, replayBuffer.Data(), retryTimeout);
             if (!retryResult.text.empty()) {
                 finalText = retryResult.text;

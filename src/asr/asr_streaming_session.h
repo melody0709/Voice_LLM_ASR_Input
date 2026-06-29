@@ -6,9 +6,12 @@
 
 #include <windows.h>
 
+#include "globals.h"
+
 #include <string>
 
 using AsrPartialCallback = void(*)(const std::wstring& text, bool isFinal, void* userData);
+using AsrFinalCallback = void(*)(std::wstring text, const Config& config, void* userData);
 
 class IStreamingAsrSession {
 public:
@@ -22,4 +25,5 @@ public:
     virtual DWORD CurrentWatchdogMs() const = 0;
     virtual const wchar_t* ProviderName() const = 0;
     virtual void SetPartialCallback(AsrPartialCallback cb, void* userData) = 0;
+    virtual void SetFinalCallback(AsrFinalCallback cb, void* userData) = 0;
 };

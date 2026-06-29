@@ -120,8 +120,9 @@ private:
 
 class QwenAsrSession final : public BatchAsrSessionBase {
 public:
-    explicit QwenAsrSession(Config config)
-        : config_(std::move(config)) {}
+    QwenAsrSession(Config config, AsrEngine& engine)
+        : config_(std::move(config)),
+          engine_(engine) {}
 
     AsrSessionResult Finish() override {
         AsrSessionResult result;
@@ -139,6 +140,23 @@ public:
             return result;
         }
 
+        std::vector<BYTE> uploadPcm = pcm_;
+        if (config_.enableVad) {
+            BatchVadTrimResult vad = TrimBatchPcm16WithVad(config_, engine_, pcm_);
+            if (vad.active) {
+                result.vadMs = vad.elapsedMs;
+                result.vadModelName = vad.modelName;
+                if (!vad.detectedSpeech || vad.pcm.empty()) {
+                    result.text = L"";
+                    return result;
+                }
+                result.vadTrimmedSamples = vad.pcm.size() / sizeof(int16_t);
+                uploadPcm = std::move(vad.pcm);
+            } else if (config_.enableDebugMode && !vad.error.empty()) {
+                printf("[Qwen diag] VAD trim disabled: %ls\n", vad.error.c_str());
+            }
+        }
+
         qwen_asr::QwenConfig qcfg;
         qcfg.apiKey = config_.qwenApiKey;
         qcfg.baseUrl = config_.qwenBaseUrl;
@@ -147,10 +165,10 @@ public:
         qcfg.turnDetection = L"manual";
         qcfg.chunkMs = config_.qwenChunkMs;
 
-        const DWORD finalTimeout = ComputeCloudAsrFinalizeTimeoutMs(0.0, pcm_.size());
+        const DWORD finalTimeout = ComputeCloudAsrRecordedRequestTimeoutMs(0.0, uploadPcm.size());
 
         HiResTimer timer;
-        result.text = NormalizeAsrText(qwen_asr::Recognize(pcm_, qcfg, finalTimeout));
+        result.text = NormalizeAsrText(qwen_asr::Recognize(uploadPcm, qcfg, finalTimeout));
         result.cloudApiMs = timer.ElapsedMs();
         return result;
     }
@@ -161,6 +179,7 @@ public:
 
 private:
     Config config_;
+    AsrEngine& engine_;
 };
 
 class MimoAsrSession final : public BatchAsrSessionBase {
@@ -255,7 +274,7 @@ std::unique_ptr<IAsrSession> CreateBatchAsrSession(
         return std::make_unique<BaiduAsrSession>(config, localEngine);
     }
     if (config.asrBackend == L"qwen") {
-        return std::make_unique<QwenAsrSession>(config);
+        return std::make_unique<QwenAsrSession>(config, localEngine);
     }
     if (config.asrBackend == L"mimo") {
         return std::make_unique<MimoAsrSession>(config, localEngine);

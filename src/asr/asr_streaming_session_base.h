@@ -26,6 +26,11 @@ public:
         partialUserData_ = userData;
     }
 
+    void SetFinalCallback(AsrFinalCallback cb, void* userData) override {
+        finalCallback_ = cb;
+        finalUserData_ = userData;
+    }
+
 protected:
     void NotifyStatus(const std::wstring& status) const {
         if (!targetWindow_) return;
@@ -40,6 +45,10 @@ protected:
     }
 
     void DispatchFinal(std::wstring text) {
+        if (finalCallback_) {
+            finalCallback_(std::move(text), config_, finalUserData_);
+            return;
+        }
         DispatchAsrFinalText(targetWindow_, std::move(text), config_, refineFn_, lastRawAsrText_);
     }
 
@@ -53,4 +62,6 @@ protected:
 private:
     AsrPartialCallback partialCallback_ = nullptr;
     void* partialUserData_ = nullptr;
+    AsrFinalCallback finalCallback_ = nullptr;
+    void* finalUserData_ = nullptr;
 };

@@ -6,6 +6,27 @@
 
 - 暂无。
 
+## v0.9.5 (2026-06-29)
+
+### 新增
+
+- **Fallback ASR 后端**：Recognition tab 新增 `Fallback` 选择器。默认 ASR 后端出现 timeout、网络/传输、鉴权/配置、provider 错误或本地模型加载等运行类失败时，会用同一段原始 PCM 自动重试备用 ASR。
+- **Batch fallback 路径**：Local、Baidu、Qwen batch、MiMo batch 支持串行 fallback。第一版 fallback 目标支持 `Local`、`Baidu Cloud`、`Qwen ASR` 和 `MiMo ASR`。
+- **Streaming primary fallback 路径**：Qwen、Volcengine、Doubao IME 的 final error 和 watchdog timeout 统一进入主窗口 attempt completion handler，再按需启动 batch fallback。
+
+### 变更
+
+- **Fallback 触发规则**：只对运行类失败触发 fallback；`Too short`、`No speech detected`、过期 attempt 和重复 final 不触发。
+- **Fallback 启用时缩短 streaming final 等待**：松手后 primary streaming final 使用 6-12 秒预算，保留未启用 fallback 时的 8-30 秒旧逻辑；Volcengine opening-finalize guard 降为 8 秒。
+- **ASR/LLM result metadata**：最终 ASR/LLM 消息携带 result config、fallback 状态、primary backend、primary error 和 attempt id，Debug Mode、LLM refinement、旧结果防串扰不再依赖当前全局配置。
+- **Local fallback preload**：启动和 Reload 时，只要 primary 或 fallback 是 Local，就预加载本地模型。
+- **Qwen batch VAD trim**：Qwen batch 现在复用共享 batch VAD trimmer，与 Baidu/MiMo 行为一致。
+
+### 验证
+
+- `.\build.bat` 通过。
+- `git diff --check` 通过。
+
 ## v0.9.4 (2026-06-28)
 
 ### 新增

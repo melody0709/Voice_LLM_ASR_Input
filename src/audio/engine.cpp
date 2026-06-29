@@ -23,7 +23,7 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "winmm.lib")
 
-static constexpr int kCurrentConfigVersion = 6;
+static constexpr int kCurrentConfigVersion = 7;
 
 bool EqualsIgnoreCase(std::wstring a, std::wstring b) {
     std::transform(a.begin(), a.end(), a.begin(), [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
@@ -353,6 +353,8 @@ void LoadConfig() {
     g_config.enableDebugMode = ExtractJsonBool(json, "enable_debug_mode", false);
     g_config.forceUnicodeInput = ExtractJsonBool(json, "force_unicode_input", false);
     g_config.asrBackend = Utf8ToWide(ExtractJsonString(json, "asr_backend", WideToUtf8(g_config.asrBackend)));
+    g_config.fallbackAsrBackend = Utf8ToWide(ExtractJsonString(json, "fallback_asr_backend", "none"));
+    if (g_config.fallbackAsrBackend.empty()) g_config.fallbackAsrBackend = L"none";
     g_config.baiduApiKey = Utf8ToWide(ExtractJsonString(json, "baidu_api_key", ""));
     g_config.baiduSecretKey = llm::DecryptString(Utf8ToWide(ExtractJsonString(json, "baidu_secret_key", "")));
     g_config.baiduDevPid = ExtractJsonInt(json, "baidu_dev_pid", 1537);
@@ -465,6 +467,7 @@ void SaveConfig() {
          << "  \"enable_debug_mode\": " << (g_config.enableDebugMode ? "true" : "false") << ",\n"
          << "  \"force_unicode_input\": " << (g_config.forceUnicodeInput ? "true" : "false") << ",\n"
          << "  \"asr_backend\": \"" << EscapeJson(g_config.asrBackend) << "\",\n"
+         << "  \"fallback_asr_backend\": \"" << EscapeJson(g_config.fallbackAsrBackend) << "\",\n"
          << "  \"baidu_api_key\": \"" << EscapeJson(g_config.baiduApiKey) << "\",\n"
          << "  \"baidu_secret_key\": \"" << EscapeJson(llm::EncryptString(g_config.baiduSecretKey)) << "\",\n"
          << "  \"baidu_dev_pid\": " << g_config.baiduDevPid << ",\n"

@@ -8,20 +8,36 @@ void DispatchAsrFinalText(HWND targetWindow,
                           std::wstring text,
                           const Config& config,
                           AsrLlmRefineFn refineFn,
-                          std::wstring* lastRawAsrText) {
+                          std::wstring* lastRawAsrText,
+                          const AsrFinalMetadata& metadata) {
     text = NormalizeAsrText(std::move(text));
     const bool needLlm = refineFn && ShouldRunLlmRefine(config, text);
+
+    auto* msg = new AsrFinalMessage;
+    msg->attemptId = metadata.attemptId;
+    msg->text = text;
+    msg->resultConfig = config;
+    msg->usedFallback = metadata.usedFallback;
+    msg->primaryBackend = metadata.primaryBackend;
+    msg->primaryError = metadata.primaryError;
+    msg->fallbackBackend = metadata.fallbackBackend;
 
     if (needLlm) {
         if (lastRawAsrText) {
             *lastRawAsrText = text;
         }
-        PostMessageW(targetWindow, kAsrResultMessage, 1,
-                     reinterpret_cast<LPARAM>(new std::wstring(text)));
-        refineFn(text, config);
+        AsrFinalMessage llmInput = *msg;
+        if (!PostMessageW(targetWindow, kAsrResultMessage, 1,
+                          reinterpret_cast<LPARAM>(msg))) {
+            delete msg;
+            return;
+        }
+        refineFn(llmInput);
         return;
     }
 
-    PostMessageW(targetWindow, kAsrResultMessage, 0,
-                 reinterpret_cast<LPARAM>(new std::wstring(text)));
+    if (!PostMessageW(targetWindow, kAsrResultMessage, 0,
+                      reinterpret_cast<LPARAM>(msg))) {
+        delete msg;
+    }
 }

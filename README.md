@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  Current version: <code>v0.9.4</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
+  Current version: <code>v0.9.5</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -31,7 +31,7 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 - **Real-time HUD** — Bottom floating capsule window during recording, 5 volume bars responding to sound
 - **Dual VAD Options** — Silero VAD (lightweight) / FireRed VAD (high precision F1 97.57), intelligently skips silence
 - **LLM Correction (Optional)** — Supports DeepSeek / OpenRouter / SiliconFlow and other providers, one-click configuration
-- **Cloud ASR (Optional)** — Supports Volcano Engine (Doubao), Baidu Cloud, Qwen ASR (`qwen3-asr-flash-realtime`), Xiaomi MiMo ASR (`mimo-v2.5-asr`), and experimental Doubao IME ASR as alternative backends
+- **Cloud ASR (Optional)** — Supports Volcano Engine (Doubao), Baidu Cloud, Qwen ASR (`qwen3-asr-flash-realtime`), Xiaomi MiMo ASR (`mimo-v2.5-asr`), and experimental Doubao IME ASR as alternative backends, with optional fallback ASR
 
 ## Quick Start
 
@@ -68,6 +68,7 @@ Right-click the tray icon to open Settings, hold the hotkey to start recording, 
 
 **Recognition tab**
 - `ASR Backend` — Select between `Local (sherpa-onnx)`, `Volcano Engine`, `Baidu Cloud`, `Qwen ASR`, `MiMo ASR`, and `Doubao IME (Free)`
+- `Fallback` — Optional backup ASR backend. If the primary backend ends in an operational failure such as timeout, network error, auth/config error, or model load error, VoxType retries the same raw PCM with the fallback backend before showing the final result. `Too short` and `No speech detected` do not trigger fallback.
 - `ASR model` — Speech recognition model (only for Local backend):
   - `FireRedASR2 CTC` — Fast, suitable for daily input
   - `FireRedASR2 AED` — Better quality, more accurate for long sentences
@@ -189,6 +190,7 @@ CHANGELOG.md        — Version change log
 See [CHANGELOG.md](CHANGELOG.md)
 
 **Recent Updates:**
+- **v0.9.5** — Recognition-tab fallback ASR backend, serial primary-to-fallback orchestration for batch and streaming failures, shorter fallback-enabled streaming final wait, result metadata for debug/LLM, and local-model preload when Local is configured as fallback
 - **v0.9.4** — Experimental Doubao IME (`doubao_ime`) streaming cloud ASR backend, vendored static Opus 1.6.1, credential bootstrap/reset UI, protocol/WAV/streaming diagnostic probe, Doubao long-recording aggregation fixes, and shared clear-page streaming partial HUD for Qwen/Volcengine/Doubao IME
 - **v0.9.3** — Volcengine rapid recording head-audio loss fix, streaming VAD double-processing fix, connection reuse/timeout tuning, active request fast cancel, and Qwen/Volcengine startup/stop cleanup
 - **v0.9.2** — HUD DPI-aware rendering, Volcengine/Qwen WebSocket double-close and data-race fixes, Qwen activeClient UAF fix, retry abort checks

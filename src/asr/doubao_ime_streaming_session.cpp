@@ -1,5 +1,6 @@
 #include "doubao_ime_streaming_session.h"
 
+#include "asr_result.h"
 #include "asr_streaming_session_base.h"
 #include "cloud_asr_common.h"
 #include "doubao_ime_asr.h"
@@ -169,7 +170,9 @@ public:
 
     DWORD CurrentWatchdogMs() const override {
         if (streaming_.load()) return kDoubaoRecordingWatchdogMs;
-        return ComputeCloudAsrFinalizeTimeoutMs(recordingMs_.load(), capturedPcmBytes_.load());
+        return IsFallbackAsrEnabled(config_)
+            ? ComputeCloudAsrStreamingFinalWaitMs(recordingMs_.load(), capturedPcmBytes_.load())
+            : ComputeCloudAsrLegacyFinalizeTimeoutMs(recordingMs_.load(), capturedPcmBytes_.load());
     }
 
     const wchar_t* ProviderName() const override {
@@ -610,7 +613,9 @@ private:
         }
 
         if (!failed && !abort_.load()) {
-            const DWORD finalTimeout = ComputeCloudAsrFinalizeTimeoutMs(recordingMs_.load(), capturedPcmBytes_.load());
+            const DWORD finalTimeout = IsFallbackAsrEnabled(config_)
+                ? ComputeCloudAsrStreamingFinalWaitMs(recordingMs_.load(), capturedPcmBytes_.load())
+                : ComputeCloudAsrLegacyFinalizeTimeoutMs(recordingMs_.load(), capturedPcmBytes_.load());
             finishSent.store(true);
             if (!client->SendFinishSession(error)) {
                 failed = true;
@@ -655,7 +660,9 @@ private:
             replayBuffer.Available() && !replayBuffer.Empty();
         if (shouldRetryEmptyFinal || shouldRetryFailure) {
             NotifyStatus(L"Retrying... Doubao IME");
-            const DWORD retryTimeout = ComputeCloudAsrFinalizeTimeoutMs(recordingMs_.load(), replayBuffer.Size());
+            const DWORD retryTimeout = IsFallbackAsrEnabled(config_)
+                ? ComputeCloudAsrStreamingFinalWaitMs(recordingMs_.load(), replayBuffer.Size())
+                : ComputeCloudAsrLegacyFinalizeTimeoutMs(recordingMs_.load(), replayBuffer.Size());
             DoubaoRetryResult retryResult = RetryRecognitionOnce(replayBuffer.Data(), retryTimeout);
             if (!retryResult.text.empty()) {
                 finalText = retryResult.text;

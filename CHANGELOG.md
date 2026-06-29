@@ -6,6 +6,28 @@
 
 - Nothing yet.
 
+## v0.9.5 (2026-06-29)
+
+### Added
+
+- **Fallback ASR backend**: Added a Recognition-tab `Fallback` selector. When the primary ASR backend ends in an operational failure, VoxType retries the same raw PCM with the configured fallback backend before dispatching the final ASR result.
+- **Batch fallback path**: Local, Baidu, Qwen batch, and MiMo batch recognition now support serial fallback. The first fallback release supports fallback targets `Local`, `Baidu Cloud`, `Qwen ASR`, and `MiMo ASR`.
+- **Streaming fallback path**: Qwen, Volcengine, and Doubao IME streaming final errors and watchdog timeouts now route through a main-window attempt completion handler, which can launch batch fallback with the stored raw PCM.
+
+### Changed
+
+- **Fallback trigger rules**: Fallback only runs for operational failures such as timeout, network/transport errors, auth/config errors, provider errors, and local model-load errors. `Too short`, `No speech detected`, stale attempts, and duplicate finals do not trigger fallback.
+- **Streaming final wait with fallback**: When fallback is enabled, post-release streaming final wait uses a shorter 6-12 second budget instead of the legacy 8-30 second adaptive wait. Volcengine's opening-finalize guard is reduced from 10 seconds to 8 seconds in fallback-enabled sessions.
+- **ASR/LLM result metadata**: Final ASR and LLM messages now carry the result config, fallback state, primary backend, primary error, and attempt id so Debug Mode, LLM refinement, and stale-result guards do not rely on the current global config after settings changes.
+- **Local fallback preload**: Startup and ASR reload now preload the local model when either the primary backend or fallback backend is Local.
+- **Qwen batch VAD trim**: Qwen batch recognition now uses the shared batch VAD trimmer, matching Baidu and MiMo behavior.
+
+### Verification
+
+- `.\build.bat` passes after implementing fallback ASR.
+- Temporary strategy test passed for fallback result classification, fallback eligibility, and the new streaming final wait curve.
+- Automated tray-app smoke confirmed the real process creates the main window and Settings contains both primary ASR backend and fallback backend combo controls.
+
 ## v0.9.4 (2026-06-28)
 
 ### Added

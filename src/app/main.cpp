@@ -140,6 +140,16 @@ static bool IsStreamingCloudBackend(const std::wstring& backend) {
     return backend == L"qwen" || backend == L"volcengine" || backend == L"doubao_ime";
 }
 
+static bool ShouldPreloadLocalAsr(const Config& config) {
+    return config.asrBackend == L"local" || config.fallbackAsrBackend == L"local";
+}
+
+static Config LocalPreloadConfig(const Config& config) {
+    Config localConfig = config;
+    localConfig.asrBackend = L"local";
+    return localConfig;
+}
+
 static void DebugModeOpenConsole() {
     if (s_debugConsoleOpen) return;
     if (!AllocConsole()) return;
@@ -216,8 +226,8 @@ static void DebugPrintVadTrimLine(size_t rawBytes, size_t trimmedSamples) {
            rawBytes > 0 ? 100.0 * trimBytes / rawBytes : 0.0);
 }
 
-static void DebugPrintCloudVadTrim() {
-    if (IsStreamingCloudBackend(g_config.asrBackend) &&
+static void DebugPrintCloudVadTrim(const Config& config) {
+    if (IsStreamingCloudBackend(config.asrBackend) &&
         g_streamingVadTrimmer && g_streamingVadTrimmer->IsActive()) {
         StreamingVadTrimStats stats = g_streamingVadTrimmer->Stats();
         size_t rawBytes = stats.rawBytes > 0 ? stats.rawBytes : static_cast<size_t>(g_recordingMs * 32.0);
@@ -235,8 +245,16 @@ static void DebugPrintCloudVadTrim() {
         return;
     }
 
-    if ((g_config.asrBackend == L"baidu" || g_config.asrBackend == L"mimo") &&
+    if ((config.asrBackend == L"baidu" || config.asrBackend == L"qwen" || config.asrBackend == L"mimo") &&
         g_vadMs > 0 && g_vadTrimmedSamples > 0) {
+        size_t rawBytes = g_lastPcmBytes > 0 ? g_lastPcmBytes
+            : static_cast<size_t>(g_recordingMs * 32.0);
+        DebugPrintVadTrimLine(rawBytes, g_vadTrimmedSamples);
+    }
+}
+
+static void DebugPrintBatchVadTrim() {
+    if (g_vadMs > 0 && g_vadTrimmedSamples > 0) {
         size_t rawBytes = g_lastPcmBytes > 0 ? g_lastPcmBytes
             : static_cast<size_t>(g_recordingMs * 32.0);
         DebugPrintVadTrimLine(rawBytes, g_vadTrimmedSamples);
@@ -270,7 +288,9 @@ void WriteLlmLog(const std::wstring& asrText, const std::wstring& llmText) {
     file.flush();
 }
 
-void RefineWithLlmAsync(const std::wstring& asrText, const Config& config) {
+void RefineWithLlmAsync(const AsrFinalMessage& finalMessage) {
+    const std::wstring asrText = finalMessage.text;
+    const Config config = finalMessage.resultConfig;
     llm::RequestConfig cfg;
     cfg.endpoint = config.llmEndpoint;
     cfg.apiKey = config.llmApiKey;
@@ -278,18 +298,67 @@ void RefineWithLlmAsync(const std::wstring& asrText, const Config& config) {
     cfg.systemPrompt = config.llmPrompt;
     cfg.extraParams = config.llmExtraParams;
     bool debug = config.enableLlmDebug;
-    std::thread([asrText, cfg, debug]() {
+    std::thread([asrText, cfg, debug, finalMessage]() {
         HiResTimer tLlm;
         std::wstring result = llm::Refine(asrText, cfg);
         g_llmMs = tLlm.ElapsedMs();
         if (debug) {
             WriteLlmLog(asrText, result);
         }
-        PostMessageW(g_mainWindow, kLlmResultMessage, 0, reinterpret_cast<LPARAM>(new std::wstring(result)));
+        auto* msg = new LlmFinalMessage;
+        msg->attemptId = finalMessage.attemptId;
+        msg->text = result;
+        msg->rawAsrText = asrText;
+        msg->resultConfig = finalMessage.resultConfig;
+        msg->usedFallback = finalMessage.usedFallback;
+        msg->primaryBackend = finalMessage.primaryBackend;
+        msg->primaryError = finalMessage.primaryError;
+        if (!PostMessageW(g_mainWindow, kLlmResultMessage, 0, reinterpret_cast<LPARAM>(msg))) {
+            delete msg;
+        }
     }).detach();
 }
 
-void RecognizeAsync(const std::vector<BYTE>& pcm) {
+static void ApplyBatchResultMetrics(const Config& config, const AsrSessionResult& result) {
+    g_lastPcmBytes = result.pcmBytes;
+    if (result.backend == AsrSessionBackend::BaiduBatch ||
+        result.backend == AsrSessionBackend::QwenRealtimeBatch ||
+        result.backend == AsrSessionBackend::MimoBatch) {
+        g_cloudApiMs = result.cloudApiMs;
+    }
+    if (config.enableDebugMode && result.vadTrimmedSamples > 0) {
+        g_vadTrimmedSamples = result.vadTrimmedSamples;
+        g_vadMs = result.vadMs;
+        g_vadModelName = result.vadModelName;
+    }
+}
+
+static AsrSessionResult RunBatchAsrOnce(const Config& config,
+                                        const std::vector<BYTE>& pcm,
+                                        std::vector<float>&& localStreamingVadSamples) {
+    AsrSessionResult result;
+    result.providerName = AsrBackendDisplayName(config);
+    result.pcmBytes = pcm.size();
+
+    auto session = CreateBatchAsrSession(config, g_asrEngine, std::move(localStreamingVadSamples));
+    std::wstring startError;
+    if (!session || !session->Start(startError)) {
+        result.text = startError.empty() ? L"ASR failed: session start failed" : startError;
+        return result;
+    }
+
+    session->EnqueuePcmChunk(pcm.data(), pcm.size());
+    return session->Finish();
+}
+
+static void PostFallbackHud(const Config& fallbackConfig) {
+    PostMessageW(g_mainWindow, kHudUpdateMessage, 0,
+                 reinterpret_cast<LPARAM>(new std::wstring(L"Fallback... " + AsrBackendDisplayName(fallbackConfig))));
+}
+
+static bool ShouldAcceptFinalMessage(uint64_t attemptId);
+
+void RecognizeAsync(const std::vector<BYTE>& pcm, uint64_t attemptId) {
     const Config config = g_config;
 
     std::vector<float> localStreamingVadSamples;
@@ -299,33 +368,187 @@ void RecognizeAsync(const std::vector<BYTE>& pcm) {
         g_streamingVadSamples.clear();
     }
 
-    std::thread([config, pcm, localStreamingVadSamples = std::move(localStreamingVadSamples)]() mutable {
-        auto session = CreateBatchAsrSession(config, g_asrEngine, std::move(localStreamingVadSamples));
-        std::wstring startError;
-        if (!session || !session->Start(startError)) {
-            std::wstring text = startError.empty() ? L"ASR failed: session start failed" : startError;
-            DispatchAsrFinalText(g_mainWindow, text, config, RefineWithLlmAsync, &g_lastRawAsrText);
-            return;
+    std::thread([attemptId, config, pcm, localStreamingVadSamples = std::move(localStreamingVadSamples)]() mutable {
+        AsrSessionResult selectedResult = RunBatchAsrOnce(config, pcm, std::move(localStreamingVadSamples));
+        Config resultConfig = config;
+        AsrFinalMetadata metadata;
+        metadata.attemptId = attemptId;
+
+        if (!ShouldAcceptFinalMessage(attemptId)) return;
+
+        if (ShouldRunFallback(config, selectedResult.text, false, false)) {
+            Config fallbackConfig = BuildFallbackConfig(config);
+            PostFallbackHud(fallbackConfig);
+            AsrSessionResult fallbackResult = RunBatchAsrOnce(fallbackConfig, pcm, {});
+            metadata.usedFallback = true;
+            metadata.primaryBackend = config.asrBackend;
+            metadata.primaryError = NormalizeAsrText(selectedResult.text);
+            metadata.fallbackBackend = fallbackConfig.asrBackend;
+            resultConfig = fallbackConfig;
+
+            if (ClassifyAsrResult(fallbackResult.text).kind == AsrResultKind::OperationalError) {
+                selectedResult = fallbackResult;
+                selectedResult.text = L"Fallback failed: " + AsrBackendDisplayName(fallbackConfig);
+            } else {
+                selectedResult = std::move(fallbackResult);
+            }
         }
 
-        g_lastPcmBytes = pcm.size();
-        session->EnqueuePcmChunk(pcm.data(), pcm.size());
-        AsrSessionResult result = session->Finish();
-
-        g_lastPcmBytes = result.pcmBytes;
-        if (result.backend == AsrSessionBackend::BaiduBatch ||
-            result.backend == AsrSessionBackend::QwenRealtimeBatch ||
-            result.backend == AsrSessionBackend::MimoBatch) {
-            g_cloudApiMs = result.cloudApiMs;
-        }
-        if (config.enableDebugMode && result.vadTrimmedSamples > 0) {
-            g_vadTrimmedSamples = result.vadTrimmedSamples;
-            g_vadMs = result.vadMs;
-            g_vadModelName = result.vadModelName;
-        }
-
-        DispatchAsrFinalText(g_mainWindow, result.text, config, RefineWithLlmAsync, &g_lastRawAsrText);
+        if (!ShouldAcceptFinalMessage(attemptId)) return;
+        ApplyBatchResultMetrics(resultConfig, selectedResult);
+        DispatchAsrFinalText(g_mainWindow, selectedResult.text, resultConfig,
+                             RefineWithLlmAsync, &g_lastRawAsrText, metadata);
     }).detach();
+}
+
+static std::unique_ptr<IStreamingAsrSession> TakeActiveStreamingSession();
+
+struct AsrAttemptFinalMessage {
+    uint64_t attemptId = 0;
+    Config primaryConfig;
+    std::wstring text;
+    bool fromWatchdog = false;
+};
+
+struct RecognitionAttemptContext {
+    uint64_t id = 0;
+    Config primaryConfig;
+    std::shared_ptr<const std::vector<BYTE>> pcm;
+    bool finalHandled = false;
+    bool fallbackStarted = false;
+};
+
+static std::atomic<uint64_t> g_asrAttemptSeq{0};
+static std::mutex g_asrAttemptMutex;
+static RecognitionAttemptContext g_activeAttempt;
+
+static uint64_t BeginAsrAttempt(const Config& config) {
+    std::lock_guard<std::mutex> lock(g_asrAttemptMutex);
+    g_activeAttempt = {};
+    g_activeAttempt.id = ++g_asrAttemptSeq;
+    g_activeAttempt.primaryConfig = config;
+    return g_activeAttempt.id;
+}
+
+static uint64_t ActiveAsrAttemptId() {
+    std::lock_guard<std::mutex> lock(g_asrAttemptMutex);
+    return g_activeAttempt.id;
+}
+
+static Config ActiveAsrAttemptConfig() {
+    std::lock_guard<std::mutex> lock(g_asrAttemptMutex);
+    return g_activeAttempt.primaryConfig;
+}
+
+static bool IsActiveAsrAttempt(uint64_t attemptId) {
+    std::lock_guard<std::mutex> lock(g_asrAttemptMutex);
+    return attemptId != 0 && g_activeAttempt.id == attemptId;
+}
+
+static bool ShouldAcceptFinalMessage(uint64_t attemptId) {
+    return attemptId == 0 || IsActiveAsrAttempt(attemptId);
+}
+
+static void StoreActiveAttemptPcm(uint64_t attemptId, const std::vector<BYTE>& pcm) {
+    std::lock_guard<std::mutex> lock(g_asrAttemptMutex);
+    if (g_activeAttempt.id == attemptId) {
+        g_activeAttempt.pcm = std::make_shared<const std::vector<BYTE>>(pcm);
+    }
+}
+
+static void MarkActiveAttemptFinalHandled(uint64_t attemptId) {
+    std::lock_guard<std::mutex> lock(g_asrAttemptMutex);
+    if (g_activeAttempt.id == attemptId) {
+        g_activeAttempt.finalHandled = true;
+    }
+}
+
+static bool TryBeginAttemptFinal(uint64_t attemptId,
+                                 Config& primaryConfig,
+                                 std::shared_ptr<const std::vector<BYTE>>& pcm,
+                                 bool& fallbackAlreadyStarted) {
+    std::lock_guard<std::mutex> lock(g_asrAttemptMutex);
+    if (attemptId == 0 || g_activeAttempt.id != attemptId || g_activeAttempt.finalHandled) {
+        return false;
+    }
+    g_activeAttempt.finalHandled = true;
+    primaryConfig = g_activeAttempt.primaryConfig;
+    pcm = g_activeAttempt.pcm;
+    fallbackAlreadyStarted = g_activeAttempt.fallbackStarted;
+    return true;
+}
+
+static void MarkAttemptFallbackStarted(uint64_t attemptId) {
+    std::lock_guard<std::mutex> lock(g_asrAttemptMutex);
+    if (g_activeAttempt.id == attemptId) {
+        g_activeAttempt.fallbackStarted = true;
+    }
+}
+
+static void StreamingFinalCallback(std::wstring text, const Config& config, void* userData) {
+    auto* msg = new AsrAttemptFinalMessage;
+    msg->attemptId = static_cast<uint64_t>(reinterpret_cast<UINT_PTR>(userData));
+    msg->primaryConfig = config;
+    msg->text = std::move(text);
+    if (!PostMessageW(g_mainWindow, kAsrAttemptFinalMessage, 0, reinterpret_cast<LPARAM>(msg))) {
+        delete msg;
+    }
+}
+
+static void DispatchStreamingFallbackAsync(uint64_t attemptId,
+                                           Config primaryConfig,
+                                           std::shared_ptr<const std::vector<BYTE>> pcm,
+                                           std::wstring primaryError) {
+    if (!IsActiveAsrAttempt(attemptId)) return;
+    Config fallbackConfig = BuildFallbackConfig(primaryConfig);
+    MarkAttemptFallbackStarted(attemptId);
+    PostFallbackHud(fallbackConfig);
+    std::thread([attemptId, primaryConfig, fallbackConfig, pcm, primaryError = std::move(primaryError)]() {
+        if (!IsActiveAsrAttempt(attemptId)) return;
+        AsrSessionResult selectedResult = RunBatchAsrOnce(fallbackConfig, *pcm, {});
+        AsrFinalMetadata metadata;
+        metadata.attemptId = attemptId;
+        metadata.usedFallback = true;
+        metadata.primaryBackend = primaryConfig.asrBackend;
+        metadata.primaryError = NormalizeAsrText(primaryError);
+        metadata.fallbackBackend = fallbackConfig.asrBackend;
+
+        if (ClassifyAsrResult(selectedResult.text).kind == AsrResultKind::OperationalError) {
+            selectedResult.text = L"Fallback failed: " + AsrBackendDisplayName(fallbackConfig);
+        }
+
+        if (!IsActiveAsrAttempt(attemptId)) return;
+        ApplyBatchResultMetrics(fallbackConfig, selectedResult);
+        DispatchAsrFinalText(g_mainWindow, selectedResult.text, fallbackConfig,
+                             RefineWithLlmAsync, &g_lastRawAsrText, metadata);
+    }).detach();
+}
+
+static void HandleAsrAttemptFinal(AsrAttemptFinalMessage& msg) {
+    Config primaryConfig = msg.primaryConfig;
+    std::shared_ptr<const std::vector<BYTE>> pcm;
+    bool fallbackAlreadyStarted = false;
+    if (!TryBeginAttemptFinal(msg.attemptId, primaryConfig, pcm, fallbackAlreadyStarted)) {
+        return;
+    }
+
+    auto finishedSession = TakeActiveStreamingSession();
+    (void)finishedSession;
+
+    const std::wstring primaryText = NormalizeAsrText(msg.text);
+    const bool canFallback = ShouldRunFallback(primaryConfig,
+                                               primaryText,
+                                               fallbackAlreadyStarted,
+                                               false);
+    if (canFallback && pcm && !pcm->empty()) {
+        DispatchStreamingFallbackAsync(msg.attemptId, primaryConfig, pcm, primaryText);
+        return;
+    }
+
+    AsrFinalMetadata metadata;
+    metadata.attemptId = msg.attemptId;
+    DispatchAsrFinalText(g_mainWindow, primaryText, primaryConfig,
+                         RefineWithLlmAsync, &g_lastRawAsrText, metadata);
 }
 
 struct HudUpdateWithOptionsMessage {
@@ -600,6 +823,7 @@ void StartRecordingSession() {
     if (g_recording) return;
     if (g_hudWindow) KillTimer(g_hudWindow, kHudHideTimer);
 
+    g_hudIsRefining = false;
     std::wstring name = AsrBackendDisplayName(g_config);
     ShowHud(L"Listening... " + name);
 
@@ -617,6 +841,7 @@ void StartRecordingSession() {
         s_wasapiNativeRate = g_wasapiCapture.GetNativeSampleRate();
     }
 
+    const uint64_t attemptId = BeginAsrAttempt(g_config);
     AbortAndResetActiveStreamingSession();
     ResetStreamingVadTrimmerState();
     ResetStreamingPartialHudState();
@@ -624,11 +849,13 @@ void StartRecordingSession() {
     if (g_config.asrBackend == L"qwen") {
         auto session = CreateQwenStreamingSession(g_config, g_mainWindow, RefineWithLlmAsync, &g_lastRawAsrText);
         session->SetPartialCallback(StreamingPartialHudCallback, &g_qwenPartialHudContext);
+        session->SetFinalCallback(StreamingFinalCallback, reinterpret_cast<void*>(static_cast<UINT_PTR>(attemptId)));
 
         std::wstring startError;
         if (!session->Start(startError)) {
             StopAudioCapture();
             g_recording = false;
+            MarkActiveAttemptFinalHandled(attemptId);
             ShowHud(startError.empty() ? L"Qwen ASR error: session start failed" : startError);
             if (g_hudWindow) SetTimer(g_hudWindow, kHudHideTimer, 1800, nullptr);
             return;
@@ -656,11 +883,13 @@ void StartRecordingSession() {
     if (g_config.asrBackend == L"doubao_ime") {
         auto session = CreateDoubaoImeStreamingSession(g_config, g_mainWindow, RefineWithLlmAsync, &g_lastRawAsrText);
         session->SetPartialCallback(StreamingPartialHudCallback, &g_doubaoImePartialHudContext);
+        session->SetFinalCallback(StreamingFinalCallback, reinterpret_cast<void*>(static_cast<UINT_PTR>(attemptId)));
 
         std::wstring startError;
         if (!session->Start(startError)) {
             StopAudioCapture();
             g_recording = false;
+            MarkActiveAttemptFinalHandled(attemptId);
             ShowHud(startError.empty() ? L"Doubao IME ASR error: session start failed" : startError);
             if (g_hudWindow) SetTimer(g_hudWindow, kHudHideTimer, 1800, nullptr);
             return;
@@ -688,12 +917,17 @@ void StartRecordingSession() {
 
         auto session = CreateVolcengineStreamingSession(g_config, g_mainWindow, RefineWithLlmAsync, &g_lastRawAsrText);
         session->SetPartialCallback(StreamingPartialHudCallback, &g_volcenginePartialHudContext);
+        session->SetFinalCallback(StreamingFinalCallback, reinterpret_cast<void*>(static_cast<UINT_PTR>(attemptId)));
 
         std::wstring startError;
         if (!session->Start(startError)) {
             StopAudioCapture();
             g_recording = false;
-            DispatchAsrFinalText(g_mainWindow, startError, g_config, RefineWithLlmAsync, &g_lastRawAsrText);
+            MarkActiveAttemptFinalHandled(attemptId);
+            AsrFinalMetadata metadata;
+            metadata.attemptId = attemptId;
+            DispatchAsrFinalText(g_mainWindow, startError, g_config,
+                                 RefineWithLlmAsync, &g_lastRawAsrText, metadata);
             return;
         }
 
@@ -748,12 +982,15 @@ void StopRecordingSession() {
     g_vadModelName.clear();
     g_vadTrimmedSamples = 0;
     g_lastRawAsrText.clear();
+    const uint64_t attemptId = ActiveAsrAttemptId();
 
     if (IsStreamingCloudBackend(g_config.asrBackend) && HasActiveStreamingSession()) {
         const std::vector<BYTE> pcm = StopAudioCapture();
+        StoreActiveAttemptPcm(attemptId, pcm);
         g_lastPcmBytes = pcm.size();
         if (pcm.size() < 8000) {
             KillTimer(g_mainWindow, kStreamingWatchdogTimer);
+            MarkActiveAttemptFinalHandled(attemptId);
             AbortAndResetActiveStreamingSession();
             ShowHud(L"Too short");
             SetTimer(g_hudWindow, kHudHideTimer, 1200, nullptr);
@@ -762,12 +999,15 @@ void StopRecordingSession() {
         FinishStreamingVadTrimmer();
         if (StreamingVadTrimSawNoSpeech()) {
             KillTimer(g_mainWindow, kStreamingWatchdogTimer);
+            MarkActiveAttemptFinalHandled(attemptId);
             AbortAndResetActiveStreamingSession();
             ShowHud(L"No speech detected");
             SetTimer(g_hudWindow, kHudHideTimer, 1500, nullptr);
             return;
         }
-        DWORD finalizeTimeout = ComputeCloudAsrFinalizeTimeoutMs(g_recordingMs, pcm.size());
+        DWORD finalizeTimeout = IsFallbackAsrEnabled(g_config)
+            ? ComputeCloudAsrStreamingFinalWaitMs(g_recordingMs, pcm.size())
+            : ComputeCloudAsrLegacyFinalizeTimeoutMs(g_recordingMs, pcm.size());
         EnterCriticalSection(&g_streamingSessionCs);
         if (g_activeStreamingSession) {
             g_activeStreamingSession->StopInput(g_recordingMs, pcm.size());
@@ -786,6 +1026,7 @@ void StopRecordingSession() {
 
     const std::vector<BYTE> pcm = StopAudioCapture();
     if (pcm.size() < 8000) {
+        MarkActiveAttemptFinalHandled(attemptId);
         ShowHud(L"Too short");
         SetTimer(g_hudWindow, kHudHideTimer, 1200, nullptr);
         return;
@@ -819,6 +1060,7 @@ void StopRecordingSession() {
         g_streamingVadReady = false;
 
         if (g_streamingVadSamples.empty()) {
+            MarkActiveAttemptFinalHandled(attemptId);
             ShowHud(L"No speech detected");
             SetTimer(g_hudWindow, kHudHideTimer, 1500, nullptr);
             return;
@@ -827,7 +1069,7 @@ void StopRecordingSession() {
 
     std::wstring name = AsrBackendDisplayName(g_config);
     ShowHud(L"Recognizing... " + name);
-    RecognizeAsync(pcm);
+    RecognizeAsync(pcm, attemptId);
 }
 
 void ShowTrayMenu(HWND hwnd) {
@@ -868,8 +1110,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     case kReloadMessage:
         g_enableDebugMode = g_config.enableDebugMode;
         g_asrEngine.Reload();
-        if (g_config.asrBackend == L"local") {
-            const Config cfg = g_config;
+        if (ShouldPreloadLocalAsr(g_config)) {
+            const Config cfg = LocalPreloadConfig(g_config);
             std::thread([cfg]() {
                 PreloadAsrEngine(cfg);
                 PostMessageW(g_mainWindow, kPreloadDoneMessage, 0, 0);
@@ -921,10 +1163,22 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         return 0;
     }
+    case kAsrAttemptFinalMessage: {
+        std::unique_ptr<AsrAttemptFinalMessage> result(
+            reinterpret_cast<AsrAttemptFinalMessage*>(lParam));
+        if (result) {
+            HandleAsrAttemptFinal(*result);
+        }
+        return 0;
+    }
     case kAsrResultMessage: {
+        std::unique_ptr<AsrFinalMessage> result(reinterpret_cast<AsrFinalMessage*>(lParam));
+        if (result && !ShouldAcceptFinalMessage(result->attemptId)) {
+            return 0;
+        }
         KillTimer(g_mainWindow, kStreamingWatchdogTimer);
-        std::unique_ptr<std::wstring> result(reinterpret_cast<std::wstring*>(lParam));
-        const std::wstring text = NormalizeAsrText(result ? *result : L"ASR failed");
+        const Config resultConfig = result ? result->resultConfig : g_config;
+        const std::wstring text = NormalizeAsrText(result ? result->text : L"ASR failed");
         const bool isError = IsOperationalAsrError(text);
         if (wParam == 1 && !text.empty() && !isError) {
             g_hudIsRefining = true;
@@ -944,12 +1198,16 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 double pasteMs = tPaste.ElapsedMs();
                 VolcDebugLog("PasteTextImeAware: done (%.0fms)", pasteMs);
 
-                if (g_config.enableDebugMode) {
+                if (resultConfig.enableDebugMode) {
                     DebugPrintHeader(g_recordingMs, g_lastPcmBytes);
 
                     DebugPrintInputContext();
 
-                    if (g_config.asrBackend == L"local") {
+                    if (result && result->usedFallback && !result->primaryError.empty()) {
+                        DebugPrintTextLine(L"Primary failed", result->primaryError);
+                    }
+
+                    if (resultConfig.asrBackend == L"local") {
                         printf("  Pipeline: ");
                         if (g_vadMs > 0) printf("VAD(%ls) %.0f | ", g_vadModelName.c_str(), g_vadMs);
                         printf("ASR %.0f", g_asrDecodeMs);
@@ -962,10 +1220,14 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                             DebugPrintVadTrimLine(rawBytes, g_vadTrimmedSamples);
                         }
                     } else {
-                        const char* backend = AsrBackendDebugName(g_config.asrBackend);
+                        const char* backend = AsrBackendDebugName(resultConfig.asrBackend);
                         printf("  Pipeline: %s %.0f | Paste %.0f = Total %.0fms\n",
                                backend, g_cloudApiMs, pasteMs, g_cloudApiMs + pasteMs);
-                        DebugPrintCloudVadTrim();
+                        if (result && result->usedFallback) {
+                            DebugPrintBatchVadTrim();
+                        } else {
+                            DebugPrintCloudVadTrim(resultConfig);
+                        }
                     }
 
                     DebugPrintTextLine(L"OK", text);
@@ -977,8 +1239,12 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
     case kLlmResultMessage: {
-        std::unique_ptr<std::wstring> result(reinterpret_cast<std::wstring*>(lParam));
-        const std::wstring text = result ? *result : L"LLM failed";
+        std::unique_ptr<LlmFinalMessage> result(reinterpret_cast<LlmFinalMessage*>(lParam));
+        if (result && !ShouldAcceptFinalMessage(result->attemptId)) {
+            return 0;
+        }
+        const Config resultConfig = result ? result->resultConfig : g_config;
+        const std::wstring text = result ? result->text : L"LLM failed";
         g_hudIsRefining = false;
         ShowHud(text);
         if (!text.empty() && text.rfind(L"LLM failed:", 0) != 0) {
@@ -986,12 +1252,16 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             PasteTextImeAware(text);
             double pasteMs = tPaste.ElapsedMs();
 
-            if (g_config.enableDebugMode) {
+            if (resultConfig.enableDebugMode) {
                 DebugPrintHeader(g_recordingMs, g_lastPcmBytes);
 
                 DebugPrintInputContext();
 
-                if (g_config.asrBackend == L"local") {
+                if (result && result->usedFallback && !result->primaryError.empty()) {
+                    DebugPrintTextLine(L"Primary failed", result->primaryError);
+                }
+
+                if (resultConfig.asrBackend == L"local") {
                     printf("  Pipeline: ");
                     if (g_vadMs > 0) printf("VAD(%ls) %.0f | ", g_vadModelName.c_str(), g_vadMs);
                     printf("ASR %.0f", g_asrDecodeMs);
@@ -1000,14 +1270,18 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                            g_llmMs, pasteMs,
                            g_vadMs + g_asrDecodeMs + g_punctMs + g_llmMs + pasteMs);
                 } else {
-                    const char* backend = AsrBackendDebugName(g_config.asrBackend);
+                    const char* backend = AsrBackendDebugName(resultConfig.asrBackend);
                     printf("  Pipeline: %s %.0f | LLM %.0f | Paste %.0f = Total %.0fms\n",
                            backend, g_cloudApiMs, g_llmMs, pasteMs,
                            g_cloudApiMs + g_llmMs + pasteMs);
-                    DebugPrintCloudVadTrim();
+                    if (result && result->usedFallback) {
+                        DebugPrintBatchVadTrim();
+                    } else {
+                        DebugPrintCloudVadTrim(resultConfig);
+                    }
                 }
 
-                DebugPrintTextLine(L"ASR", g_lastRawAsrText);
+                DebugPrintTextLine(L"ASR", result ? result->rawAsrText : g_lastRawAsrText);
                 DebugPrintTextLine(L"LLM", text);
             }
         }
@@ -1036,14 +1310,23 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             }
             auto session = TakeActiveStreamingSession();
             if (session && session->IsRunning()) {
-                session->Abort();
+                const uint64_t attemptId = ActiveAsrAttemptId();
+                const Config primaryConfig = ActiveAsrAttemptConfig();
                 std::wstring providerName = session->ProviderName();
+                session->Abort();
                 std::wstring timeoutText = std::wstring(providerName) + L" error: timeout";
                 if (providerName == L"Volcano Engine") {
                     timeoutText = L"ASR failed: VolcEngine timeout";
                 }
-                PostMessageW(hwnd, kAsrResultMessage, 0,
-                             reinterpret_cast<LPARAM>(new std::wstring(timeoutText)));
+                auto* msg = new AsrAttemptFinalMessage;
+                msg->attemptId = attemptId;
+                msg->primaryConfig = primaryConfig;
+                msg->text = std::move(timeoutText);
+                msg->fromWatchdog = true;
+                if (!PostMessageW(hwnd, kAsrAttemptFinalMessage, 0,
+                                  reinterpret_cast<LPARAM>(msg))) {
+                    delete msg;
+                }
             }
             return 0;
         }
@@ -1079,6 +1362,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     case WM_DESTROY:
         KillTimer(hwnd, kStreamingWatchdogTimer);
+        MarkActiveAttemptFinalHandled(ActiveAsrAttemptId());
         AbortAndResetActiveStreamingSession();
         VolcengineForceAbortAndCloseAll();
         g_captureActive = false;
@@ -1147,10 +1431,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         DebugModeOpenConsole();
     }
 
-    if (g_config.asrBackend == L"local") {
-        const std::wstring modelDir = g_config.modelDir.empty() ? DefaultModelDir(g_config.modelId) : g_config.modelDir;
+    if (ShouldPreloadLocalAsr(g_config)) {
+        const Config localConfig = LocalPreloadConfig(g_config);
+        const std::wstring modelDir = localConfig.modelDir.empty() ? DefaultModelDir(localConfig.modelId) : localConfig.modelDir;
         if (ModelDirExists(modelDir)) {
-            const Config cfg = g_config;
+            const Config cfg = localConfig;
             std::thread([cfg]() {
                 PreloadAsrEngine(cfg);
                 PostMessageW(g_mainWindow, kPreloadDoneMessage, 0, 0);

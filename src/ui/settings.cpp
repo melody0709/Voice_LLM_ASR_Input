@@ -129,6 +129,69 @@ struct DoubaoImeTestMessage {
 
 std::atomic<uint64_t> g_doubaoImeTestGeneration{0};
 constexpr UINT kDoubaoImeTestResultMessage = WM_APP + 11;
+
+struct BackendOption {
+    const wchar_t* id;
+    const wchar_t* label;
+    bool primarySupported;
+    bool fallbackSupported;
+};
+
+constexpr BackendOption kBackendOptions[] = {
+    {L"local", L"Local (sherpa-onnx)", true, true},
+    {L"volcengine", L"Volcano Engine", true, false},
+    {L"baidu", L"Baidu Cloud", true, true},
+    {L"qwen", L"Qwen ASR", true, true},
+    {L"mimo", L"MiMo ASR", true, true},
+    {L"doubao_ime", L"Doubao IME (Free)", true, false},
+};
+
+constexpr int kBackendOptionCount = static_cast<int>(sizeof(kBackendOptions) / sizeof(kBackendOptions[0]));
+constexpr DWORD_PTR kDisabledBackendItem = static_cast<DWORD_PTR>(-1);
+
+bool BackendSupported(const BackendOption& option, bool fallback) {
+    return fallback ? option.fallbackSupported : option.primarySupported;
+}
+
+void PopulateBackendCombo(HWND combo, const std::wstring& selectedBackend, bool fallback) {
+    if (!combo) return;
+    ComboBox_ResetContent(combo);
+
+    int selectedIndex = -1;
+    if (fallback) {
+        int item = ComboBox_AddString(combo, L"Disabled");
+        ComboBox_SetItemData(combo, item, kDisabledBackendItem);
+        if (selectedBackend.empty() || selectedBackend == L"none") {
+            selectedIndex = item;
+        }
+    }
+
+    for (int i = 0; i < kBackendOptionCount; ++i) {
+        const BackendOption& option = kBackendOptions[i];
+        if (!BackendSupported(option, fallback)) continue;
+        int item = ComboBox_AddString(combo, option.label);
+        ComboBox_SetItemData(combo, item, static_cast<DWORD_PTR>(i));
+        if (selectedBackend == option.id) {
+            selectedIndex = item;
+        }
+    }
+
+    if (selectedIndex < 0) selectedIndex = 0;
+    ComboBox_SetCurSel(combo, selectedIndex);
+}
+
+std::wstring BackendIdFromCombo(HWND combo, bool fallback) {
+    if (!combo) return fallback ? L"none" : L"local";
+    const int sel = ComboBox_GetCurSel(combo);
+    if (sel < 0) return fallback ? L"none" : L"local";
+    const DWORD_PTR data = ComboBox_GetItemData(combo, sel);
+    if (fallback && data == kDisabledBackendItem) return L"none";
+    if (data < static_cast<DWORD_PTR>(kBackendOptionCount)) {
+        const BackendOption& option = kBackendOptions[static_cast<int>(data)];
+        if (BackendSupported(option, fallback)) return option.id;
+    }
+    return fallback ? L"none" : L"local";
+}
 }
 
 void SetStatus(HWND hwnd, const std::wstring& text) {
@@ -613,19 +676,8 @@ void LoadSettingsControls(HWND hwnd) {
     Button_SetCheck(GetDlgItem(hwnd, IDC_LLM_DEBUG), g_config.enableLlmDebug ? BST_CHECKED : BST_UNCHECKED);
 
     HWND backendCombo = GetDlgItem(hwnd, IDC_ASR_BACKEND);
-    ComboBox_AddString(backendCombo, L"Local (sherpa-onnx)");
-    ComboBox_AddString(backendCombo, L"Volcano Engine");
-    ComboBox_AddString(backendCombo, L"Baidu Cloud");
-    ComboBox_AddString(backendCombo, L"Qwen ASR");
-    ComboBox_AddString(backendCombo, L"MiMo ASR");
-    ComboBox_AddString(backendCombo, L"Doubao IME (Free)");
-    int backendIdx = 0;
-    if (g_config.asrBackend == L"volcengine") backendIdx = 1;
-    else if (g_config.asrBackend == L"baidu") backendIdx = 2;
-    else if (g_config.asrBackend == L"qwen") backendIdx = 3;
-    else if (g_config.asrBackend == L"mimo") backendIdx = 4;
-    else if (g_config.asrBackend == L"doubao_ime") backendIdx = 5;
-    ComboBox_SetCurSel(backendCombo, backendIdx);
+    PopulateBackendCombo(backendCombo, g_config.asrBackend, false);
+    PopulateBackendCombo(GetDlgItem(hwnd, IDC_ASR_FALLBACK_BACKEND), g_config.fallbackAsrBackend, true);
 
     HWND cloudProviderCombo = GetDlgItem(hwnd, IDC_CLOUD_PROVIDER);
     ComboBox_AddString(cloudProviderCombo, L"Volcano Engine (Doubao)");
@@ -802,6 +854,7 @@ std::wstring ComboText(HWND combo) {
 }
 
 void SaveSettingsControls(HWND hwnd) {
+    bool fallbackAdjusted = false;
     g_config.modelId = ModelIdFromIndex(ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_MODEL)));
 
     wchar_t modelDir[MAX_PATH] = {};
@@ -887,13 +940,13 @@ void SaveSettingsControls(HWND hwnd) {
     g_config.enableLlmDebug = Button_GetCheck(GetDlgItem(hwnd, IDC_LLM_DEBUG)) == BST_CHECKED;
 
     {
-        int sel = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_ASR_BACKEND));
-        if (sel == 1) g_config.asrBackend = L"volcengine";
-        else if (sel == 2) g_config.asrBackend = L"baidu";
-        else if (sel == 3) g_config.asrBackend = L"qwen";
-        else if (sel == 4) g_config.asrBackend = L"mimo";
-        else if (sel == 5) g_config.asrBackend = L"doubao_ime";
-        else g_config.asrBackend = L"local";
+        g_config.asrBackend = BackendIdFromCombo(GetDlgItem(hwnd, IDC_ASR_BACKEND), false);
+        g_config.fallbackAsrBackend = BackendIdFromCombo(GetDlgItem(hwnd, IDC_ASR_FALLBACK_BACKEND), true);
+        if (g_config.fallbackAsrBackend == g_config.asrBackend) {
+            g_config.fallbackAsrBackend = L"none";
+            PopulateBackendCombo(GetDlgItem(hwnd, IDC_ASR_FALLBACK_BACKEND), g_config.fallbackAsrBackend, true);
+            fallbackAdjusted = true;
+        }
     }
     {
         int cloudIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_CLOUD_PROVIDER));
@@ -1013,7 +1066,9 @@ void SaveSettingsControls(HWND hwnd) {
     g_config.volcEnableInputContext = Button_GetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_INPUT_CONTEXT)) == BST_CHECKED;
 
     SaveConfig();
-    SetStatus(hwnd, L"Saved. ASR engine reloaded.");
+    SetStatus(hwnd, fallbackAdjusted
+        ? L"Saved. Fallback disabled because it matches ASR Backend."
+        : L"Saved. ASR engine reloaded.");
     PostMessageW(g_mainWindow, kReloadMessage, 0, 0);
 }
 
@@ -1419,7 +1474,10 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 
         HWND control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(0)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"ASR Backend");
         AddRecognitionControl(control);
-        AddRecognitionControl(CreateCombo(hwnd, IDC_ASR_BACKEND, S(UiStyle::InputLeft), S(UiStyle::RowInputY(0)), S(330), S(UiStyle::ComboH)));
+        AddRecognitionControl(CreateCombo(hwnd, IDC_ASR_BACKEND, S(UiStyle::InputLeft), S(UiStyle::RowInputY(0)), S(UiStyle::PrimaryBackendComboW), S(UiStyle::ComboH)));
+        control = CreateLabel(hwnd, S(UiStyle::FallbackLabelX), S(UiStyle::RowLabelY(0)), S(68), S(UiStyle::LabelH), L"Fallback");
+        AddRecognitionControl(control);
+        AddRecognitionControl(CreateCombo(hwnd, IDC_ASR_FALLBACK_BACKEND, S(UiStyle::FallbackComboX), S(UiStyle::RowInputY(0)), S(UiStyle::FallbackComboW), S(UiStyle::ComboH)));
 
         control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(1)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"ASR model");
         AddRecognitionControl(control);

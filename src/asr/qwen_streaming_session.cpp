@@ -1,5 +1,6 @@
 #include "qwen_streaming_session.h"
 
+#include "asr_result.h"
 #include "asr_streaming_session_base.h"
 #include "cloud_asr_common.h"
 #include "globals.h"
@@ -99,7 +100,9 @@ public:
 
     DWORD CurrentWatchdogMs() const override {
         if (streaming_.load()) return kQwenRecordingWatchdogMs;
-        return ComputeCloudAsrFinalizeTimeoutMs(recordingMs_.load(), capturedPcmBytes_.load());
+        return IsFallbackAsrEnabled(config_)
+            ? ComputeCloudAsrStreamingFinalWaitMs(recordingMs_.load(), capturedPcmBytes_.load())
+            : ComputeCloudAsrLegacyFinalizeTimeoutMs(recordingMs_.load(), capturedPcmBytes_.load());
     }
 
     const wchar_t* ProviderName() const override {
@@ -396,7 +399,9 @@ private:
         }
 
         if (!failed && !abort_.load()) {
-            const DWORD finalTimeout = ComputeCloudAsrFinalizeTimeoutMs(recordingMs_.load(), capturedPcmBytes_.load());
+            const DWORD finalTimeout = IsFallbackAsrEnabled(config_)
+                ? ComputeCloudAsrStreamingFinalWaitMs(recordingMs_.load(), capturedPcmBytes_.load())
+                : ComputeCloudAsrLegacyFinalizeTimeoutMs(recordingMs_.load(), capturedPcmBytes_.load());
             if (!client->SendFinish(error)) {
                 failed = true;
                 retryWithReplay = true;
@@ -438,7 +443,9 @@ private:
             replayBuffer.Available() && !replayBuffer.Empty();
         if (shouldRetryEmptyFinal || shouldRetryFailure) {
             NotifyStatus(L"Retrying... Qwen ASR");
-            const DWORD retryTimeout = ComputeCloudAsrFinalizeTimeoutMs(recordingMs_.load(), replayBuffer.Size());
+            const DWORD retryTimeout = IsFallbackAsrEnabled(config_)
+                ? ComputeCloudAsrStreamingFinalWaitMs(recordingMs_.load(), replayBuffer.Size())
+                : ComputeCloudAsrLegacyFinalizeTimeoutMs(recordingMs_.load(), replayBuffer.Size());
             QwenRetryResult retryResult = RetryRecognitionOnce(replayBuffer.Data(), retryTimeout);
             if (!retryResult.text.empty()) {
                 finalText = retryResult.text;

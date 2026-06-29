@@ -331,7 +331,7 @@ RecognizeAttempt RecognizeInternal(const std::vector<BYTE>& pcm16k16Mono, const 
 
     const std::string requestJson = BuildRequestJson(cfg, base64Audio);
     const DWORD timeoutMs = std::clamp<DWORD>(
-        ComputeCloudAsrFinalizeTimeoutMs(0.0, pcm16k16Mono.size()) + 12000,
+        ComputeCloudAsrRecordedRequestTimeoutMs(0.0, pcm16k16Mono.size()) + 12000,
         15000,
         60000);
 

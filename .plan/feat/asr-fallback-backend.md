@@ -11,7 +11,7 @@
 
 推荐做法：**串行 fallback，不做并行双 ASR**。
 
-也就是默认 ASR 先完整跑完它自己的连接、重试、replay、final timeout 逻辑。只有默认 ASR 最终确认失败，才用同一段原始 PCM 启动 fallback。这样不会让两个云端 ASR 同时消耗连接和额度，也不会把 partial HUD、LLM、粘贴路径搞成竞态。
+也就是默认 ASR 先在明确的 primary 预算内跑完它自己的连接、重试、replay、final timeout 逻辑。只有默认 ASR 最终确认失败，才用同一段原始 PCM 启动 fallback。这样不会让两个云端 ASR 同时消耗连接和额度，也不会把 partial HUD、LLM、粘贴路径搞成竞态。
 
 第一版建议支持：
 
@@ -105,11 +105,11 @@ Streaming session final
 
 | 层 | 当前行为 |
 | --- | --- |
-| 公共 cloud final | `ComputeCloudAsrFinalizeTimeoutMs(audioMs * 0.8 + 6000, clamp 8000..30000)` |
+| 公共 cloud final | 当前为 `ComputeCloudAsrFinalizeTimeoutMs(audioMs * 0.8 + 6000, clamp 8000..30000)`；fallback 方案中应缩短并拆分语义 |
 | Qwen connect | 8s hard connect timeout + 5s session.updated timeout |
 | Qwen streaming final | adaptive final timeout，失败后 replay retry |
 | Volc connect | open hard timeout: 3000, 3000, 5000, 6000ms |
-| Volc opening while finalizing | final watchdog 至少 10000ms |
+| Volc opening while finalizing | 当前 final watchdog 至少 10000ms；fallback 方案中建议降到 8000ms |
 | Volc final | adaptive final timeout + empty final replay retry |
 | Doubao connect | WinHTTP connectTimeoutMs 默认 10000ms + session ready 8000ms |
 | Doubao final | adaptive final timeout + replay retry |
@@ -117,6 +117,8 @@ Streaming session final
 | MiMo | adaptive final timeout + 12000ms，clamp 15000..60000，transient retry |
 
 fallback 不应抢在这些 provider 内部 retry 前启动。否则会出现 primary 其实能恢复，但 fallback 已经粘贴了另一份文本的问题。
+
+复审结论：现有 `8s..30s` 的 streaming final 等待对 fallback 场景偏长，尤其 20 秒录音后还等 22 秒、30 秒以上还等 30 秒，体感上会像卡死。实现 fallback 时应把“松开后等 primary final 的 UI 上限”缩短到约 `6s..12s`，同时保留 batch/replay 请求自己的较长网络预算，避免一个函数同时承担两种语义。
 
 ---
 
@@ -219,6 +221,66 @@ AND fallback backend 可用
 - 不在录音期间启动 fallback。
 - 不因为 primary partial 长时间不更新就 fallback。
 - 不给 local decode 强行加线程杀死式 timeout。
+
+### 推荐调整：缩短松开后的 final 等待
+
+现有公式：
+
+```cpp
+audioMs * 0.8 + 6000, clamp 8000..30000
+```
+
+在 fallback 场景偏保守。用户已经配置备用 ASR 后，primary 再等 20 到 30 秒才失败，体验上像程序卡住，也削弱 fallback 的意义。第一版建议采用双策略：
+
+- fallback 未启用时：暂时保留现有 `8s..30s` 逻辑，降低对老行为的回归风险。
+- fallback 启用时：松开后 primary streaming final 最多等待 `6s..12s`，到点即走统一 timeout completion handler，然后启动 fallback。
+
+建议新增一个专门用于 post-stop streaming final 的函数，不要继续让同一个 `ComputeCloudAsrFinalizeTimeoutMs()` 同时服务 UI watchdog、batch 全量请求和 replay 请求：
+
+```cpp
+DWORD ComputeCloudAsrStreamingFinalWaitMs(double recordingMs, size_t pcmBytes) {
+    const double audioMs = pcmBytes > 0
+        ? static_cast<double>(pcmBytes) / kPcm16k16MonoBytesPerMs
+        : recordingMs;
+    const DWORD adaptive = static_cast<DWORD>(audioMs * 0.25 + 4500.0);
+    return std::clamp<DWORD>(adaptive, 6000, 12000);
+}
+```
+
+对应体感：
+
+| 录音长度 | 当前等待 | fallback 启用后建议等待 |
+| --- | ---: | ---: |
+| 1 秒 | 8 秒 | 6 秒 |
+| 5 秒 | 10 秒 | 6 秒 |
+| 10 秒 | 14 秒 | 7 秒 |
+| 20 秒 | 22 秒 | 约 10 秒 |
+| 30 秒以上 | 30 秒 | 最多 12 秒 |
+
+Volcengine 的 `kVolcOpeningFinalizeWatchdogMs` 建议从 `10000` 降到 `8000`。原因是 `OpenSession` 自己已有 `3000/3000/5000/6000ms` hard timeout，fallback 启用后不应再因为“松开时还在 opening”强制把短录音等待抬到 10 秒。Volc opening 场景下的最终等待约为：
+
+| 录音长度 | fallback 启用后，Volc 仍在 opening |
+| --- | ---: |
+| 1 秒 | 8 秒 |
+| 5 秒 | 8 秒 |
+| 10 秒 | 8 秒 |
+| 20 秒 | 约 10 秒 |
+| 30 秒以上 | 最多 12 秒 |
+
+实现时要明确区分三类 timeout：
+
+```cpp
+DWORD ComputeCloudAsrLegacyFinalizeTimeoutMs(double recordingMs, size_t pcmBytes);
+DWORD ComputeCloudAsrStreamingFinalWaitMs(double recordingMs, size_t pcmBytes);
+DWORD ComputeCloudAsrRecordedRequestTimeoutMs(double recordingMs, size_t pcmBytes);
+```
+
+- `StopRecordingSession()` 设置 `kStreamingWatchdogTimer`：fallback 启用时用 `ComputeCloudAsrStreamingFinalWaitMs()`；未启用时可继续用 legacy。
+- Qwen/Doubao streaming `SendFinish` 后等 final：用同一个 post-stop final deadline，不能比主窗口 watchdog 更长。
+- Volc `CurrentWatchdogMs()`：fallback 启用时用短 final wait，opening guard 降为 8000ms。
+- Qwen batch、MiMo batch、recorded replay：不要被短 UI watchdog 误伤，继续使用 recorded request timeout 或 provider 自己的 request timeout。
+
+重要约束：streaming provider 内部 retry/replay 不能在每次 retry 时重新获得一个完整 `12s` 窗口。主窗口 post-stop watchdog 是 primary 的总上限；retry 只能在剩余时间内完成。到点后 abort primary，生成 timeout result，再由 fallback handler 决定是否启动 fallback。
 
 ### Batch primary
 
@@ -716,6 +778,8 @@ primary is volcengine OR fallback is volcengine
 
 - `src/asr/asr_streaming_session.h`
 - `src/asr/asr_streaming_session_base.h`
+- `src/asr/cloud_asr_common.h`
+- `src/asr/cloud_asr_common.cpp`
 - `src/asr/qwen_streaming_session.cpp`
 - `src/asr/volcengine_streaming_session.cpp`
 - `src/asr/doubao_ime_streaming_session.cpp`
@@ -726,6 +790,10 @@ primary is volcengine OR fallback is volcengine
 - 给 streaming session 增加 final callback。
 - StartRecordingSession 创建 attempt context。
 - StopRecordingSession 存储 raw PCM 到 attempt context。
+- 拆分 legacy finalize timeout、streaming final wait、recorded request timeout。
+- fallback 启用时 streaming post-stop watchdog 使用 `6s..12s` 短等待。
+- Volc opening finalize guard 从 `10000ms` 降到 `8000ms`。
+- provider 内部 retry/replay 不能重置 post-stop 总等待窗口。
 - session final error 走 fallback handler。
 - streaming finalize watchdog timeout 走同一 fallback handler。
 - 新录音开始时使旧 attempt 失效，防止 late final。
@@ -735,6 +803,8 @@ primary is volcengine OR fallback is volcengine
 - Qwen 断网/错 key/timeout 后 fallback local。
 - Volc connect failed/final timeout 后 fallback local。
 - Doubao token/bootstrap/WebSocket 失败后 fallback local。
+- fallback 启用时，松开后 primary streaming 等待约为：1s/5s 录音最多 6s，10s 录音约 7s，20s 录音约 10s，30s+ 最多 12s。
+- Volc 松开时仍在 opening：短录音最多约 8s，不再强制等 10s。
 - primary partial HUD 曾显示文本时，fallback final 能正常覆盖并粘贴。
 - 新录音 abort 旧 session 后，旧 session late final 不触发 fallback。
 
@@ -888,6 +958,8 @@ Get-Process VoxType -ErrorAction SilentlyContinue | Stop-Process -Force
 - Qwen 错 key，松开后 fallback Local。
 - Qwen 断网，松开后 fallback Local。
 - Qwen final timeout，watchdog abort 后 fallback Local。
+- fallback 启用时模拟 final 不返回：1s/5s/10s/20s/30s 录音的 post-stop watchdog 分别约为 6s/6s/7s/10s/12s。
+- Volc opening 未完成时松开：短录音最多约 8s 后进入 timeout/fallback。
 - Volc 错 key或资源错误，fallback Local。
 - Volc connect timeout，fallback Local。
 - Doubao IME 凭据失败且刷新失败，fallback Local。

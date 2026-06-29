@@ -35,6 +35,9 @@ private:
     std::vector<BYTE> data_;
 };
 
+DWORD ComputeCloudAsrLegacyFinalizeTimeoutMs(double recordingMs, size_t pcmBytes);
+DWORD ComputeCloudAsrStreamingFinalWaitMs(double recordingMs, size_t pcmBytes);
+DWORD ComputeCloudAsrRecordedRequestTimeoutMs(double recordingMs, size_t pcmBytes);
 DWORD ComputeCloudAsrFinalizeTimeoutMs(double recordingMs, size_t pcmBytes);
 
 bool IsShortClosedWithoutText(bool streamingMode,
