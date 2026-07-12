@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  Current version: <code>v0.9.6</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
+  Current version: <code>v0.9.7</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -190,6 +190,7 @@ CHANGELOG.md        — Version change log
 See [CHANGELOG.md](CHANGELOG.md)
 
 **Recent Updates:**
+- **v0.9.7** — Privacy-safe, bounded ASR diagnostics with structured primary/fallback lifecycle events; streaming primary failures reported before release are now deferred until the full PCM is available, so configured fallback is no longer bypassed
 - **v0.9.6** — Doubao IME can now be selected as a fallback ASR target through a recorded-PCM helper, including credential refresh/writeback, cloud timing, Settings support, and raw-PCM replay without local VAD trim
 - **v0.9.5** — Recognition-tab fallback ASR backend, serial primary-to-fallback orchestration for batch and streaming failures, shorter fallback-enabled streaming final wait, result metadata for debug/LLM, and local-model preload when Local is configured as fallback
 - **v0.9.4** — Experimental Doubao IME (`doubao_ime`) streaming cloud ASR backend, vendored static Opus 1.6.1, credential bootstrap/reset UI, protocol/WAV/streaming diagnostic probe, Doubao long-recording aggregation fixes, and shared clear-page streaming partial HUD for Qwen/Volcengine/Doubao IME

@@ -136,12 +136,12 @@ void LogProxySnapshot(int triggerTraceId) {
         return;
     }
 
-    VolcDebugLog("Volc connect diag #%d: proxy autoDetect=%d autoConfig='%ls' proxy='%ls' bypass='%ls'",
+    VolcDebugLog("Volc connect diag #%d: proxy autoDetect=%d autoConfig_set=%d proxy_set=%d bypass_set=%d",
                  triggerTraceId,
                  proxy.fAutoDetect ? 1 : 0,
-                 proxy.lpszAutoConfigUrl ? proxy.lpszAutoConfigUrl : L"",
-                 proxy.lpszProxy ? proxy.lpszProxy : L"",
-                 proxy.lpszProxyBypass ? proxy.lpszProxyBypass : L"");
+                 proxy.lpszAutoConfigUrl ? 1 : 0,
+                 proxy.lpszProxy ? 1 : 0,
+                 proxy.lpszProxyBypass ? 1 : 0);
 
     if (proxy.lpszAutoConfigUrl) GlobalFree(proxy.lpszAutoConfigUrl);
     if (proxy.lpszProxy) GlobalFree(proxy.lpszProxy);
@@ -192,7 +192,7 @@ void LogConnectDiagnostics(int triggerTraceId, std::string reason) {
 } // namespace
 
 void VolcMaybeLogConnectDiagnosticsAsync(int triggerTraceId, const char* reason, DWORD cooldownMs) {
-    if (!g_enableDebugMode) return;
+    if (!asr_runtime_log::Enabled()) return;
 
     const ULONGLONG now = GetTickCount64();
     static std::atomic<ULONGLONG> s_lastStartTick{0};

@@ -93,6 +93,31 @@ AsrResultClassification ClassifyAsrResult(const std::wstring& text) {
     return {AsrResultKind::UsableText, AsrFailureReason::None};
 }
 
+const char* AsrResultKindDebugName(AsrResultKind kind) {
+    switch (kind) {
+    case AsrResultKind::UsableText: return "usable_text";
+    case AsrResultKind::NoSpeech: return "no_speech";
+    case AsrResultKind::TooShort: return "too_short";
+    case AsrResultKind::OperationalError: return "operational_error";
+    case AsrResultKind::Cancelled: return "cancelled";
+    }
+    return "unknown";
+}
+
+const char* AsrFailureReasonDebugName(AsrFailureReason reason) {
+    switch (reason) {
+    case AsrFailureReason::None: return "none";
+    case AsrFailureReason::Timeout: return "timeout";
+    case AsrFailureReason::Network: return "network";
+    case AsrFailureReason::AuthOrConfig: return "auth_or_config";
+    case AsrFailureReason::ModelLoad: return "model_load";
+    case AsrFailureReason::ProviderError: return "provider_error";
+    case AsrFailureReason::BufferOverflow: return "buffer_overflow";
+    case AsrFailureReason::Unknown: return "unknown";
+    }
+    return "unknown";
+}
+
 bool IsOperationalAsrError(const std::wstring& text) {
     return ClassifyAsrResult(text).kind == AsrResultKind::OperationalError;
 }
@@ -124,6 +149,17 @@ const char* AsrBackendDebugName(const std::wstring& asrBackend) {
     if (asrBackend == L"mimo") return "MiMo";
     if (asrBackend == L"doubao_ime") return "DoubaoIME";
     return "Local";
+}
+
+const char* AsrBackendLogName(const std::wstring& asrBackend) {
+    if (asrBackend == L"local") return "local";
+    if (asrBackend == L"baidu") return "baidu";
+    if (asrBackend == L"volcengine") return "volcengine";
+    if (asrBackend == L"qwen") return "qwen";
+    if (asrBackend == L"mimo") return "mimo";
+    if (asrBackend == L"doubao_ime") return "doubao_ime";
+    if (asrBackend == L"none" || asrBackend.empty()) return "none";
+    return "unknown";
 }
 
 bool IsSupportedFallbackBackend(const std::wstring& backend) {

@@ -54,9 +54,10 @@ flowchart LR
 | `src/app/globals.h` | 共享常量、控件 ID、结构体定义、extern 全局变量声明 |
 | `src/audio/engine.h` / `src/audio/engine.cpp` | 后端：字符串/路径工具、JSON 配置持久化、音频采集、`AsrEngine` 类、`PreloadAsrEngine()` |
 | `src/audio/streaming_vad_trimmer.h` / `src/audio/streaming_vad_trimmer.cpp` | 云端流式 ASR session 可复用的 provider-independent PCM VAD trim |
-| `src/asr/asr_session.h` / `src/asr/asr_session.cpp` | 本地、百度、MiMo、Qwen fallback 路径的批量 ASR session 抽象 |
-| `src/asr/asr_result.h` / `src/asr/asr_result.cpp` | ASR 文本归一化、错误分类、后端显示/调试名 |
+| `src/asr/asr_session.h` / `src/asr/asr_session.cpp` | Local、百度、MiMo、Qwen 和 Doubao IME recorded 路径的批量 ASR session 抽象 |
+| `src/asr/asr_result.h` / `src/asr/asr_result.cpp` | ASR 文本归一化、结果/失败分类，以及稳定的后端/结果日志名 |
 | `src/asr/asr_dispatcher.h` / `src/asr/asr_dispatcher.cpp` | ASR final 结果分发、LLM 门控、raw ASR 记录 |
+| `src/asr/asr_runtime_log.h` / `src/asr/asr_runtime_log.cpp` | 仅 Debug Mode 使用的隐私安全 ASR 生命周期日志，带时间/PID 和有界轮转 |
 | `src/asr/cloud_asr_common.h` / `src/asr/cloud_asr_common.cpp` | 云端 replay buffer、自适应 finalize timeout、空 final retry 辅助 |
 | `src/ui/hud.h` / `src/ui/hud.cpp` | HUD 窗口、Direct2D/DirectWrite 渲染、托盘图标、UI 资源创建/销毁 |
 | `src/ui/hotkey.h` / `src/ui/hotkey.cpp` | 热键配置、CapsLock 长按逻辑、`WH_KEYBOARD_LL` Hook、`HotkeyEdit` 自绘控件 |
@@ -102,7 +103,7 @@ flowchart LR
 
 Settings 是普通 Win32 窗口，目前分 4 个 tab：
 
-- `Recognition`: ASR Backend、模型、模型目录、线程、VAD、VAD 模型、Punctuation、快捷键配置。
+- `Recognition`: ASR Backend、可选 Fallback 后端、模型、模型目录、线程、VAD、VAD 模型、Punctuation、快捷键配置。
 - `LLM`: 供应商选择（Provider dropdown + [+] / [−]）、API Base URL、API Key、Model、Test Connection、Debug log、Extra Params。
 - `LLM Prompt`: System Prompt 编辑（多行）、Basic Fix / Deep Fix 预设按钮。
 - `Cloud ASR`: 云端供应商选择、百度/火山引擎/Qwen/MiMo/豆包输入法专属字段。
@@ -210,6 +211,21 @@ Settings 是普通 Win32 窗口，目前分 4 个 tab：
 
 当前验证状态：跨事件云端 VAD 分段累计修复后，豆包输入法 live protocol probe、16kHz mono WAV 识别 probe、`--streaming` 发送/drain probe 已通过，`.\build.bat` 和 `git diff --check` 已通过；`git diff --check` 仅有既有 CRLF 提示。长录音热键实测复核、断网 watchdog 和额外 DPI 检查仍需人工桌面冒烟。
 
+### ASR Fallback 编排与诊断
+
+Fallback 采用串行策略：primary 先完成自己的 retry/replay，只有最终结果分类为 `OperationalError` 才会用同一段 16kHz/s16le/mono 原始 PCM 启动已配置的 fallback。`Too short`、`No speech detected`、主动取消、stale attempt、未启用/与 primary 相同的 fallback，以及 primary 可用文本都不会触发 fallback。火山引擎可作为 primary，但有意不作为 fallback target；Local、百度、Qwen、MiMo 和 Doubao IME recorded request 可作为 fallback。
+
+`main.cpp` 维护单调递增的 recognition-attempt context，保存 primary config、录音/final 状态、原始 PCM 和 fallback claim。Streaming callback 只向主窗口投递消息。如果 provider 在热键松开前已经耗尽重试并回报 final failure，该结果先保存在 attempt context；松手后先保存完整 PCM、执行 too-short/VAD no-speech 门控，再恢复同一 completion 路径。这样既不会拿不完整音频提前 fallback，也不会因当时尚无 PCM 而绕过 fallback。Watchdog 和 provider callback 通过同一个 final-claim guard 竞争，fallback worker 在 side effect 和 dispatch 前再次检查 attempt id。
+
+启用 fallback 时，primary streaming 松手后的 final 总预算仍为自适应 6–12 秒；provider 内部 batch/recorded request 使用独立且更长的预算。v0.9.7 不修改这些 retry/timeout 公式。
+
+Debug Mode 会在 `%TEMP%` 下写入两个有界日志：
+
+- `voxtype_asr_runtime.log`：结构化 attempt/primary/fallback 生命周期事件，只记录后端 id、归一化结果/失败分类、来源、耗时、录音时长和 PCM 大小，不记录识别正文或 provider 原始错误。
+- `volc_asr_debug.log`：隐私脱敏的火山传输/retry 诊断，不持久化 request JSON、response payload、识别正文、provider 原始错误和代理地址字符串。
+
+两个日志都包含完整本地日期/时间、毫秒和 PID；单文件达到 5 MiB 后轮转，保留 `.1`、`.2` 两个归档。Debug Mode 关闭时不写文件。轮转不会主动删除用户已有的 v0.9.7 之前日志；新版本停止追加敏感内容，并在达到大小阈值后按正常规则归档/替换。
+
 ### 模型适配
 
 `AsrEngine` 根据 `model_id` 创建不同 recognizer：
@@ -265,12 +281,19 @@ models/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8/model.
   "llm_providers_json": "{\"DeepSeek\":{\"endpoint\":\"https://api.deepseek.com\",\"api_key\":\"<encrypted>\",\"model\":\"deepseek-v4-flash\"}}",
   "llm_prompt": "",
   "enable_llm_debug": false,
-  "asr_backend": "qwen",
-  "cloud_provider": "qwen",
+  "asr_backend": "doubao_ime",
+  "fallback_asr_backend": "local",
+  "cloud_provider": "doubao_ime",
   "qwen_base_url": "wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
   "qwen_model": "qwen3-asr-flash-realtime",
   "qwen_language": "",
-  "qwen_chunk_ms": 100
+  "qwen_chunk_ms": 100,
+  "mimo_base_url": "https://token-plan-ams.xiaomimimo.com/v1",
+  "mimo_model": "mimo-v2.5-asr",
+  "mimo_language": "auto",
+  "doubao_ime_device_id": "<device_id>",
+  "doubao_ime_cdid": "<cdid>",
+  "doubao_ime_token": "<encrypted>"
 }
 ```
 
@@ -278,8 +301,11 @@ models/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8/model.
 - `llm_providers_json`：JSON 字符串，存储所有供应商的 endpoint、api_key（DPAPI 加密）、model。
 - `llm_prompt`：自定义 System Prompt（留空使用内置默认）。
 - `enable_llm_debug`：开启后记录 ASR 前后对比到 `log/llm_refine_YYYYMMDD.log`。
-- `asr_backend`：当前 ASR 后端（`local`、`baidu`、`volcengine` 或 `qwen`）。
+- `asr_backend`：当前 ASR 后端（`local`、`baidu`、`volcengine`、`qwen`、`mimo` 或 `doubao_ime`）。
+- `fallback_asr_backend`：可选串行 fallback（`none`、`local`、`baidu`、`qwen`、`mimo` 或 `doubao_ime`），必须与 `asr_backend` 不同；火山引擎不是 fallback target。
 - `qwen_*`：Qwen ASR 连接、模型、语言和 chunk 配置。Turn detection 固定 Manual，不再持久化。
+- `mimo_*`：MiMo ASR API key、OpenAI-compatible Base URL、模型和语言（`auto`、`zh`、`en`）；`mimo_api_key` 使用 DPAPI 加密。
+- `doubao_ime_*`：实验性 Doubao IME device id、cdid 和 DPAPI 加密 token；程序可自动注册，也可从 Settings 重置。
 
 ## 后续架构演进
 

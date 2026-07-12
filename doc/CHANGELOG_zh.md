@@ -6,6 +6,28 @@
 
 - 暂无。
 
+## v0.9.7 (2026-07-12)
+
+### 新增
+
+- **结构化 ASR 运行审计**：Debug Mode 现在会向 `%TEMP%\voxtype_asr_runtime.log` 写入 attempt start、录音停止、primary final 分类、fallback start/final、stale 丢弃、too-short/no-speech 跳过等事件。事件只包含后端、结果类型、归一化失败原因、来源、耗时和 PCM 字节数，不记录识别正文或 provider 原始错误。
+
+### 修复
+
+- **流式 primary 提前失败后的 fallback**：流式 primary 在热键仍按住时耗尽启动/连接重试并回报 final failure，现在会先挂起该结果，等松手后保存完整原始 PCM，再正常运行已配置的 fallback；不会再因为缺少 fallback 音频而直接结束 attempt。
+- **流式 session 启动失败统一分发**：Qwen、火山引擎和 Doubao IME 同步 `Start()` 失败现在进入同一套分类 completion；只有已采集到足够 PCM 时才允许 fallback。
+- **火山引擎 debug 日志隐私**：持久日志不再写入 request/response hex、Init JSON、识别 payload、final 正文、provider 原始错误和代理地址；同时修正了 narrow mode 字符串误用 `%ls` 的格式串问题。
+- **Debug 开关数据竞争**：跨线程日志门控改为 atomic。
+
+### 变更
+
+- **有界诊断日志**：`%TEMP%\voxtype_asr_runtime.log` 和 `%TEMP%\volc_asr_debug.log` 现在包含完整本地日期/时间、毫秒和 PID；单文件达到 5 MiB 后轮转，并保留 `.1`、`.2` 两个归档。两个文件都只在 Debug Mode 开启时写入。
+- **重试策略不变**：primary retry/replay 预算、fallback 触发分类，以及启用 fallback 时松手后 6–12 秒的 streaming final 等待均保持不变；v0.9.7 只增强这些决策周围的正确性与可观测性。
+
+### 验证
+
+- `.\build.bat`、`.\tools\doubao_ime_probe.bat`、运行时版本/资源检查、敏感日志模式扫描和 `git diff --check` 均通过。
+
 ## v0.9.6 (2026-06-29)
 
 ### 新增

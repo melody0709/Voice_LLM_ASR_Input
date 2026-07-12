@@ -18,6 +18,7 @@ add_executable(VoxType WIN32
     src/asr/asr_session.cpp
     src/asr/asr_result.cpp
     src/asr/asr_dispatcher.cpp
+    src/asr/asr_runtime_log.cpp
     src/asr/cloud_asr_common.cpp
     src/asr/cloud_http_common.cpp
     src/asr/doubao_ime_asr.cpp

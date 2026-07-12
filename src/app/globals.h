@@ -321,7 +321,7 @@ extern ID2D1GradientStopCollection* g_hudBarGradientStopsRec;
 extern ID2D1GradientStopCollection* g_hudBarGradientStopsIdle;
 extern IDWriteTextFormat* g_hudTextFormat;
 extern Config g_config;
-extern bool g_enableDebugMode;
+extern std::atomic<bool> g_enableDebugMode;
 extern bool g_recording;
 extern UINT g_activeHotkeyKey;
 extern bool g_capsLockHotkeyPending;

@@ -11,6 +11,7 @@
 #include "asr_session.h"
 #include "asr_streaming_session.h"
 #include "asr_result.h"
+#include "asr_runtime_log.h"
 #include "cloud_asr_common.h"
 #include "asr_dispatcher.h"
 #include "doubao_ime_asr.h"
@@ -69,7 +70,7 @@ ID2D1GradientStopCollection* g_hudBarGradientStopsRec = nullptr;
 ID2D1GradientStopCollection* g_hudBarGradientStopsIdle = nullptr;
 IDWriteTextFormat* g_hudTextFormat = nullptr;
 Config g_config;
-bool g_enableDebugMode = false;
+std::atomic<bool> g_enableDebugMode{false};
 bool g_recording = false;
 UINT g_activeHotkeyKey = 0;
 bool g_capsLockHotkeyPending = false;
@@ -382,6 +383,30 @@ static void PostFallbackHud(const Config& fallbackConfig) {
 
 static bool ShouldAcceptFinalMessage(uint64_t attemptId);
 
+static unsigned long long ElapsedSinceTick(ULONGLONG startTick) {
+    if (startTick == 0) return 0;
+    return static_cast<unsigned long long>(GetTickCount64() - startTick);
+}
+
+static void LogAsrResultEvent(const char* event,
+                              uint64_t attemptId,
+                              const std::wstring& backend,
+                              const AsrResultClassification& classification,
+                              const char* source,
+                              ULONGLONG startTick,
+                              bool accepted) {
+    asr_runtime_log::Write(
+        "event=%s attempt=%llu backend=%s kind=%s reason=%s source=%s elapsed_ms=%llu accepted=%d",
+        event,
+        static_cast<unsigned long long>(attemptId),
+        AsrBackendLogName(backend),
+        AsrResultKindDebugName(classification.kind),
+        AsrFailureReasonDebugName(classification.reason),
+        source,
+        ElapsedSinceTick(startTick),
+        accepted ? 1 : 0);
+}
+
 void RecognizeAsync(const std::vector<BYTE>& pcm, uint64_t attemptId) {
     const Config config = g_config;
 
@@ -393,16 +418,33 @@ void RecognizeAsync(const std::vector<BYTE>& pcm, uint64_t attemptId) {
     }
 
     std::thread([attemptId, config, pcm, localStreamingVadSamples = std::move(localStreamingVadSamples)]() mutable {
+        const ULONGLONG primaryStartTick = GetTickCount64();
         AsrSessionResult selectedResult = RunBatchAsrOnce(config, pcm, std::move(localStreamingVadSamples));
         Config resultConfig = config;
         AsrFinalMetadata metadata;
         metadata.attemptId = attemptId;
 
-        if (!ShouldAcceptFinalMessage(attemptId)) return;
+        const AsrResultClassification primaryClassification = ClassifyAsrResult(selectedResult.text);
+        const bool primaryAccepted = ShouldAcceptFinalMessage(attemptId);
+        LogAsrResultEvent("primary_final", attemptId, config.asrBackend,
+                          primaryClassification, "batch", primaryStartTick, primaryAccepted);
+        if (!primaryAccepted) {
+            asr_runtime_log::Write("event=primary_discarded_stale attempt=%llu source=batch",
+                                   static_cast<unsigned long long>(attemptId));
+            return;
+        }
 
         if (ShouldRunFallback(config, selectedResult.text, false, false)) {
             Config fallbackConfig = BuildFallbackConfig(config);
+            asr_runtime_log::Write(
+                "event=fallback_start attempt=%llu primary=%s fallback=%s reason=%s pcm_bytes=%zu",
+                static_cast<unsigned long long>(attemptId),
+                AsrBackendLogName(config.asrBackend),
+                AsrBackendLogName(fallbackConfig.asrBackend),
+                AsrFailureReasonDebugName(primaryClassification.reason),
+                pcm.size());
             PostFallbackHud(fallbackConfig);
+            const ULONGLONG fallbackStartTick = GetTickCount64();
             AsrSessionResult fallbackResult = RunBatchAsrOnce(fallbackConfig, pcm, {});
             metadata.usedFallback = true;
             metadata.primaryBackend = config.asrBackend;
@@ -410,7 +452,17 @@ void RecognizeAsync(const std::vector<BYTE>& pcm, uint64_t attemptId) {
             metadata.fallbackBackend = fallbackConfig.asrBackend;
             resultConfig = fallbackConfig;
 
-            if (ClassifyAsrResult(fallbackResult.text).kind == AsrResultKind::OperationalError) {
+            const AsrResultClassification fallbackClassification = ClassifyAsrResult(fallbackResult.text);
+            const bool fallbackAccepted = ShouldAcceptFinalMessage(attemptId);
+            LogAsrResultEvent("fallback_final", attemptId, fallbackConfig.asrBackend,
+                              fallbackClassification, "batch", fallbackStartTick, fallbackAccepted);
+            if (!fallbackAccepted) {
+                asr_runtime_log::Write("event=fallback_discarded_stale attempt=%llu stage=completed",
+                                       static_cast<unsigned long long>(attemptId));
+                return;
+            }
+
+            if (fallbackClassification.kind == AsrResultKind::OperationalError) {
                 selectedResult = fallbackResult;
                 selectedResult.text = L"Fallback failed: " + AsrBackendDisplayName(fallbackConfig);
             } else {
@@ -418,7 +470,11 @@ void RecognizeAsync(const std::vector<BYTE>& pcm, uint64_t attemptId) {
             }
         }
 
-        if (!ShouldAcceptFinalMessage(attemptId)) return;
+        if (!ShouldAcceptFinalMessage(attemptId)) {
+            asr_runtime_log::Write("event=final_dispatch_discarded_stale attempt=%llu",
+                                   static_cast<unsigned long long>(attemptId));
+            return;
+        }
         ApplyAsrSessionSideEffects(selectedResult);
         ApplyBatchResultMetrics(resultConfig, selectedResult);
         DispatchAsrFinalText(g_mainWindow, selectedResult.text, resultConfig,
@@ -428,19 +484,40 @@ void RecognizeAsync(const std::vector<BYTE>& pcm, uint64_t attemptId) {
 
 static std::unique_ptr<IStreamingAsrSession> TakeActiveStreamingSession();
 
+enum class AsrAttemptFinalSource {
+    Callback,
+    Watchdog,
+    SessionStart,
+};
+
+static const char* AsrAttemptFinalSourceName(AsrAttemptFinalSource source) {
+    switch (source) {
+    case AsrAttemptFinalSource::Callback: return "callback";
+    case AsrAttemptFinalSource::Watchdog: return "watchdog";
+    case AsrAttemptFinalSource::SessionStart: return "session_start";
+    }
+    return "unknown";
+}
+
 struct AsrAttemptFinalMessage {
     uint64_t attemptId = 0;
     Config primaryConfig;
     std::wstring text;
-    bool fromWatchdog = false;
+    AsrAttemptFinalSource source = AsrAttemptFinalSource::Callback;
 };
 
 struct RecognitionAttemptContext {
     uint64_t id = 0;
     Config primaryConfig;
     std::shared_ptr<const std::vector<BYTE>> pcm;
+    ULONGLONG startedTick = 0;
+    ULONGLONG stoppedTick = 0;
+    bool recordingStopped = false;
     bool finalHandled = false;
     bool fallbackStarted = false;
+    bool hasDeferredFinal = false;
+    std::wstring deferredFinalText;
+    AsrAttemptFinalSource deferredFinalSource = AsrAttemptFinalSource::Callback;
 };
 
 static std::atomic<uint64_t> g_asrAttemptSeq{0};
@@ -448,11 +525,21 @@ static std::mutex g_asrAttemptMutex;
 static RecognitionAttemptContext g_activeAttempt;
 
 static uint64_t BeginAsrAttempt(const Config& config) {
-    std::lock_guard<std::mutex> lock(g_asrAttemptMutex);
-    g_activeAttempt = {};
-    g_activeAttempt.id = ++g_asrAttemptSeq;
-    g_activeAttempt.primaryConfig = config;
-    return g_activeAttempt.id;
+    uint64_t attemptId = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_asrAttemptMutex);
+        g_activeAttempt = {};
+        g_activeAttempt.id = ++g_asrAttemptSeq;
+        g_activeAttempt.primaryConfig = config;
+        g_activeAttempt.startedTick = GetTickCount64();
+        attemptId = g_activeAttempt.id;
+    }
+    asr_runtime_log::Write(
+        "event=attempt_start attempt=%llu primary=%s fallback=%s",
+        static_cast<unsigned long long>(attemptId),
+        AsrBackendLogName(config.asrBackend),
+        IsFallbackAsrEnabled(config) ? AsrBackendLogName(config.fallbackAsrBackend) : "none");
+    return attemptId;
 }
 
 static uint64_t ActiveAsrAttemptId() {
@@ -474,40 +561,98 @@ static bool ShouldAcceptFinalMessage(uint64_t attemptId) {
     return attemptId == 0 || IsActiveAsrAttempt(attemptId);
 }
 
-static void StoreActiveAttemptPcm(uint64_t attemptId, const std::vector<BYTE>& pcm) {
-    std::lock_guard<std::mutex> lock(g_asrAttemptMutex);
-    if (g_activeAttempt.id == attemptId) {
-        g_activeAttempt.pcm = std::make_shared<const std::vector<BYTE>>(pcm);
+static std::unique_ptr<AsrAttemptFinalMessage> CompleteActiveAttemptRecording(
+    uint64_t attemptId,
+    const std::vector<BYTE>* pcm,
+    double recordingMs,
+    size_t pcmBytes) {
+    std::unique_ptr<AsrAttemptFinalMessage> deferred;
+    bool completed = false;
+    {
+        std::lock_guard<std::mutex> lock(g_asrAttemptMutex);
+        if (g_activeAttempt.id == attemptId && !g_activeAttempt.recordingStopped) {
+            g_activeAttempt.recordingStopped = true;
+            g_activeAttempt.stoppedTick = GetTickCount64();
+            if (pcm) {
+                g_activeAttempt.pcm = std::make_shared<const std::vector<BYTE>>(*pcm);
+            }
+            if (g_activeAttempt.hasDeferredFinal) {
+                deferred = std::make_unique<AsrAttemptFinalMessage>();
+                deferred->attemptId = attemptId;
+                deferred->primaryConfig = g_activeAttempt.primaryConfig;
+                deferred->text = std::move(g_activeAttempt.deferredFinalText);
+                deferred->source = g_activeAttempt.deferredFinalSource;
+                g_activeAttempt.hasDeferredFinal = false;
+            }
+            completed = true;
+        }
     }
+    if (completed) {
+        asr_runtime_log::Write(
+            "event=recording_stop attempt=%llu recording_ms=%.0f pcm_bytes=%zu deferred_primary=%d",
+            static_cast<unsigned long long>(attemptId),
+            recordingMs,
+            pcmBytes,
+            deferred ? 1 : 0);
+    }
+    return deferred;
 }
 
 static void MarkActiveAttemptFinalHandled(uint64_t attemptId) {
     std::lock_guard<std::mutex> lock(g_asrAttemptMutex);
     if (g_activeAttempt.id == attemptId) {
         g_activeAttempt.finalHandled = true;
+        g_activeAttempt.pcm.reset();
+        g_activeAttempt.hasDeferredFinal = false;
+        g_activeAttempt.deferredFinalText.clear();
     }
 }
 
-static bool TryBeginAttemptFinal(uint64_t attemptId,
-                                 Config& primaryConfig,
-                                 std::shared_ptr<const std::vector<BYTE>>& pcm,
-                                 bool& fallbackAlreadyStarted) {
+enum class AttemptFinalDisposition {
+    Ready,
+    DeferredUntilStop,
+    Rejected,
+};
+
+static AttemptFinalDisposition PrepareAttemptFinal(
+    const AsrAttemptFinalMessage& message,
+    Config& primaryConfig,
+    std::shared_ptr<const std::vector<BYTE>>& pcm,
+    bool& fallbackAlreadyStarted,
+    ULONGLONG& elapsedStartTick) {
     std::lock_guard<std::mutex> lock(g_asrAttemptMutex);
-    if (attemptId == 0 || g_activeAttempt.id != attemptId || g_activeAttempt.finalHandled) {
-        return false;
+    if (message.attemptId == 0 || g_activeAttempt.id != message.attemptId ||
+        g_activeAttempt.finalHandled) {
+        return AttemptFinalDisposition::Rejected;
+    }
+    if (!g_activeAttempt.recordingStopped) {
+        if (g_activeAttempt.hasDeferredFinal) {
+            return AttemptFinalDisposition::Rejected;
+        }
+        g_activeAttempt.hasDeferredFinal = true;
+        g_activeAttempt.deferredFinalText = message.text;
+        g_activeAttempt.deferredFinalSource = message.source;
+        return AttemptFinalDisposition::DeferredUntilStop;
     }
     g_activeAttempt.finalHandled = true;
     primaryConfig = g_activeAttempt.primaryConfig;
     pcm = g_activeAttempt.pcm;
+    g_activeAttempt.pcm.reset();
     fallbackAlreadyStarted = g_activeAttempt.fallbackStarted;
-    return true;
+    elapsedStartTick = g_activeAttempt.stoppedTick != 0
+        ? g_activeAttempt.stoppedTick
+        : g_activeAttempt.startedTick;
+    return AttemptFinalDisposition::Ready;
 }
 
-static void MarkAttemptFallbackStarted(uint64_t attemptId) {
+static bool TryMarkAttemptFallbackStarted(uint64_t attemptId) {
     std::lock_guard<std::mutex> lock(g_asrAttemptMutex);
-    if (g_activeAttempt.id == attemptId) {
+    if (g_activeAttempt.id == attemptId && g_activeAttempt.finalHandled &&
+        !g_activeAttempt.fallbackStarted) {
         g_activeAttempt.fallbackStarted = true;
+        return true;
     }
+    return false;
 }
 
 static void StreamingFinalCallback(std::wstring text, const Config& config, void* userData) {
@@ -524,12 +669,33 @@ static void DispatchStreamingFallbackAsync(uint64_t attemptId,
                                            Config primaryConfig,
                                            std::shared_ptr<const std::vector<BYTE>> pcm,
                                            std::wstring primaryError) {
-    if (!IsActiveAsrAttempt(attemptId)) return;
+    if (!IsActiveAsrAttempt(attemptId)) {
+        asr_runtime_log::Write("event=fallback_discarded_stale attempt=%llu stage=before_start",
+                               static_cast<unsigned long long>(attemptId));
+        return;
+    }
     Config fallbackConfig = BuildFallbackConfig(primaryConfig);
-    MarkAttemptFallbackStarted(attemptId);
+    if (!TryMarkAttemptFallbackStarted(attemptId)) {
+        asr_runtime_log::Write("event=fallback_discarded_stale attempt=%llu stage=claim",
+                               static_cast<unsigned long long>(attemptId));
+        return;
+    }
+    const AsrResultClassification primaryClassification = ClassifyAsrResult(primaryError);
+    asr_runtime_log::Write(
+        "event=fallback_start attempt=%llu primary=%s fallback=%s reason=%s pcm_bytes=%zu",
+        static_cast<unsigned long long>(attemptId),
+        AsrBackendLogName(primaryConfig.asrBackend),
+        AsrBackendLogName(fallbackConfig.asrBackend),
+        AsrFailureReasonDebugName(primaryClassification.reason),
+        pcm ? pcm->size() : 0);
     PostFallbackHud(fallbackConfig);
     std::thread([attemptId, primaryConfig, fallbackConfig, pcm, primaryError = std::move(primaryError)]() {
-        if (!IsActiveAsrAttempt(attemptId)) return;
+        if (!IsActiveAsrAttempt(attemptId)) {
+            asr_runtime_log::Write("event=fallback_discarded_stale attempt=%llu stage=worker_start",
+                                   static_cast<unsigned long long>(attemptId));
+            return;
+        }
+        const ULONGLONG fallbackStartTick = GetTickCount64();
         AsrSessionResult selectedResult = RunBatchAsrOnce(fallbackConfig, *pcm, {});
         AsrFinalMetadata metadata;
         metadata.attemptId = attemptId;
@@ -538,11 +704,26 @@ static void DispatchStreamingFallbackAsync(uint64_t attemptId,
         metadata.primaryError = NormalizeAsrText(primaryError);
         metadata.fallbackBackend = fallbackConfig.asrBackend;
 
-        if (ClassifyAsrResult(selectedResult.text).kind == AsrResultKind::OperationalError) {
+        const AsrResultClassification fallbackClassification = ClassifyAsrResult(selectedResult.text);
+        const bool fallbackAccepted = IsActiveAsrAttempt(attemptId);
+        LogAsrResultEvent("fallback_final", attemptId, fallbackConfig.asrBackend,
+                          fallbackClassification, "streaming_fallback",
+                          fallbackStartTick, fallbackAccepted);
+        if (!fallbackAccepted) {
+            asr_runtime_log::Write("event=fallback_discarded_stale attempt=%llu stage=completed",
+                                   static_cast<unsigned long long>(attemptId));
+            return;
+        }
+
+        if (fallbackClassification.kind == AsrResultKind::OperationalError) {
             selectedResult.text = L"Fallback failed: " + AsrBackendDisplayName(fallbackConfig);
         }
 
-        if (!IsActiveAsrAttempt(attemptId)) return;
+        if (!IsActiveAsrAttempt(attemptId)) {
+            asr_runtime_log::Write("event=fallback_discarded_stale attempt=%llu stage=dispatch",
+                                   static_cast<unsigned long long>(attemptId));
+            return;
+        }
         ApplyAsrSessionSideEffects(selectedResult);
         ApplyBatchResultMetrics(fallbackConfig, selectedResult);
         DispatchAsrFinalText(g_mainWindow, selectedResult.text, fallbackConfig,
@@ -554,7 +735,21 @@ static void HandleAsrAttemptFinal(AsrAttemptFinalMessage& msg) {
     Config primaryConfig = msg.primaryConfig;
     std::shared_ptr<const std::vector<BYTE>> pcm;
     bool fallbackAlreadyStarted = false;
-    if (!TryBeginAttemptFinal(msg.attemptId, primaryConfig, pcm, fallbackAlreadyStarted)) {
+    ULONGLONG elapsedStartTick = 0;
+    const AttemptFinalDisposition disposition = PrepareAttemptFinal(
+        msg, primaryConfig, pcm, fallbackAlreadyStarted, elapsedStartTick);
+    if (disposition == AttemptFinalDisposition::DeferredUntilStop) {
+        asr_runtime_log::Write(
+            "event=primary_final_deferred attempt=%llu source=%s reason=recording_active",
+            static_cast<unsigned long long>(msg.attemptId),
+            AsrAttemptFinalSourceName(msg.source));
+        return;
+    }
+    if (disposition == AttemptFinalDisposition::Rejected) {
+        asr_runtime_log::Write(
+            "event=primary_final_discarded attempt=%llu source=%s reason=stale_or_duplicate",
+            static_cast<unsigned long long>(msg.attemptId),
+            AsrAttemptFinalSourceName(msg.source));
         return;
     }
 
@@ -562,19 +757,48 @@ static void HandleAsrAttemptFinal(AsrAttemptFinalMessage& msg) {
     (void)finishedSession;
 
     const std::wstring primaryText = NormalizeAsrText(msg.text);
+    const AsrResultClassification primaryClassification = ClassifyAsrResult(primaryText);
+    LogAsrResultEvent("primary_final", msg.attemptId, primaryConfig.asrBackend,
+                      primaryClassification, AsrAttemptFinalSourceName(msg.source),
+                      elapsedStartTick, true);
     const bool canFallback = ShouldRunFallback(primaryConfig,
                                                primaryText,
                                                fallbackAlreadyStarted,
                                                false);
-    if (canFallback && pcm && !pcm->empty()) {
+    if (canFallback && pcm && pcm->size() >= 8000) {
         DispatchStreamingFallbackAsync(msg.attemptId, primaryConfig, pcm, primaryText);
         return;
+    }
+    if (canFallback) {
+        asr_runtime_log::Write(
+            "event=fallback_not_started attempt=%llu fallback=%s reason=%s pcm_bytes=%zu",
+            static_cast<unsigned long long>(msg.attemptId),
+            AsrBackendLogName(primaryConfig.fallbackAsrBackend),
+            pcm ? "pcm_too_short" : "pcm_unavailable",
+            pcm ? pcm->size() : 0);
     }
 
     AsrFinalMetadata metadata;
     metadata.attemptId = msg.attemptId;
     DispatchAsrFinalText(g_mainWindow, primaryText, primaryConfig,
                          RefineWithLlmAsync, &g_lastRawAsrText, metadata);
+}
+
+static void HandleStreamingSessionStartFailure(uint64_t attemptId,
+                                               const Config& primaryConfig,
+                                               std::wstring errorText) {
+    const std::vector<BYTE> pcm = StopAudioCapture();
+    g_recording = false;
+    g_recordingMs = static_cast<double>(GetTickCount64() - g_sessionStartTick);
+    g_lastPcmBytes = pcm.size();
+    CompleteActiveAttemptRecording(attemptId, &pcm, g_recordingMs, pcm.size());
+
+    AsrAttemptFinalMessage message;
+    message.attemptId = attemptId;
+    message.primaryConfig = primaryConfig;
+    message.text = std::move(errorText);
+    message.source = AsrAttemptFinalSource::SessionStart;
+    HandleAsrAttemptFinal(message);
 }
 
 struct HudUpdateWithOptionsMessage {
@@ -803,8 +1027,7 @@ static bool StartStreamingVadTrimmerForCloud(const wchar_t* debugPrefix, bool ma
     std::wstring error;
     const bool ok = trimmer->Start(g_config, g_asrEngine, &error);
     if (!ok) {
-        VolcDebugLog("%ls: VAD trim disabled (%ls)", debugPrefix,
-                     error.empty() ? L"init failed" : error.c_str());
+        VolcDebugLog("%ls: VAD trim disabled (error_wlen=%zu)", debugPrefix, error.size());
         return false;
     }
 
@@ -855,6 +1078,8 @@ void StartRecordingSession() {
 
     std::wstring error;
     if (!StartAudioCapture(error)) {
+        asr_runtime_log::Write("event=capture_start_failed primary=%s",
+                               AsrBackendLogName(g_config.asrBackend));
         ShowHud(error);
         if (g_hudWindow) SetTimer(g_hudWindow, kHudHideTimer, 1800, nullptr);
         return;
@@ -879,11 +1104,10 @@ void StartRecordingSession() {
 
         std::wstring startError;
         if (!session->Start(startError)) {
-            StopAudioCapture();
-            g_recording = false;
-            MarkActiveAttemptFinalHandled(attemptId);
-            ShowHud(startError.empty() ? L"Qwen ASR error: session start failed" : startError);
-            if (g_hudWindow) SetTimer(g_hudWindow, kHudHideTimer, 1800, nullptr);
+            HandleStreamingSessionStartFailure(
+                attemptId,
+                g_config,
+                startError.empty() ? L"Qwen ASR error: session start failed" : std::move(startError));
             return;
         }
 
@@ -913,11 +1137,10 @@ void StartRecordingSession() {
 
         std::wstring startError;
         if (!session->Start(startError)) {
-            StopAudioCapture();
-            g_recording = false;
-            MarkActiveAttemptFinalHandled(attemptId);
-            ShowHud(startError.empty() ? L"Doubao IME ASR error: session start failed" : startError);
-            if (g_hudWindow) SetTimer(g_hudWindow, kHudHideTimer, 1800, nullptr);
+            HandleStreamingSessionStartFailure(
+                attemptId,
+                g_config,
+                startError.empty() ? L"Doubao IME ASR error: session start failed" : std::move(startError));
             return;
         }
 
@@ -947,13 +1170,10 @@ void StartRecordingSession() {
 
         std::wstring startError;
         if (!session->Start(startError)) {
-            StopAudioCapture();
-            g_recording = false;
-            MarkActiveAttemptFinalHandled(attemptId);
-            AsrFinalMetadata metadata;
-            metadata.attemptId = attemptId;
-            DispatchAsrFinalText(g_mainWindow, startError, g_config,
-                                 RefineWithLlmAsync, &g_lastRawAsrText, metadata);
+            HandleStreamingSessionStartFailure(
+                attemptId,
+                g_config,
+                startError.empty() ? L"VolcEngine error: session start failed" : std::move(startError));
             return;
         }
 
@@ -1012,12 +1232,15 @@ void StopRecordingSession() {
 
     if (IsStreamingCloudBackend(g_config.asrBackend) && HasActiveStreamingSession()) {
         const std::vector<BYTE> pcm = StopAudioCapture();
-        StoreActiveAttemptPcm(attemptId, pcm);
+        std::unique_ptr<AsrAttemptFinalMessage> deferredFinal =
+            CompleteActiveAttemptRecording(attemptId, &pcm, g_recordingMs, pcm.size());
         g_lastPcmBytes = pcm.size();
         if (pcm.size() < 8000) {
             KillTimer(g_mainWindow, kStreamingWatchdogTimer);
             MarkActiveAttemptFinalHandled(attemptId);
             AbortAndResetActiveStreamingSession();
+            asr_runtime_log::Write("event=attempt_skipped attempt=%llu kind=too_short pcm_bytes=%zu",
+                                   static_cast<unsigned long long>(attemptId), pcm.size());
             ShowHud(L"Too short");
             SetTimer(g_hudWindow, kHudHideTimer, 1200, nullptr);
             return;
@@ -1027,8 +1250,15 @@ void StopRecordingSession() {
             KillTimer(g_mainWindow, kStreamingWatchdogTimer);
             MarkActiveAttemptFinalHandled(attemptId);
             AbortAndResetActiveStreamingSession();
+            asr_runtime_log::Write("event=attempt_skipped attempt=%llu kind=no_speech pcm_bytes=%zu",
+                                   static_cast<unsigned long long>(attemptId), pcm.size());
             ShowHud(L"No speech detected");
             SetTimer(g_hudWindow, kHudHideTimer, 1500, nullptr);
+            return;
+        }
+        if (deferredFinal) {
+            KillTimer(g_mainWindow, kStreamingWatchdogTimer);
+            HandleAsrAttemptFinal(*deferredFinal);
             return;
         }
         DWORD finalizeTimeout = IsFallbackAsrEnabled(g_config)
@@ -1051,8 +1281,11 @@ void StopRecordingSession() {
     }
 
     const std::vector<BYTE> pcm = StopAudioCapture();
+    CompleteActiveAttemptRecording(attemptId, nullptr, g_recordingMs, pcm.size());
     if (pcm.size() < 8000) {
         MarkActiveAttemptFinalHandled(attemptId);
+        asr_runtime_log::Write("event=attempt_skipped attempt=%llu kind=too_short pcm_bytes=%zu",
+                               static_cast<unsigned long long>(attemptId), pcm.size());
         ShowHud(L"Too short");
         SetTimer(g_hudWindow, kHudHideTimer, 1200, nullptr);
         return;
@@ -1087,6 +1320,8 @@ void StopRecordingSession() {
 
         if (g_streamingVadSamples.empty()) {
             MarkActiveAttemptFinalHandled(attemptId);
+            asr_runtime_log::Write("event=attempt_skipped attempt=%llu kind=no_speech pcm_bytes=%zu",
+                                   static_cast<unsigned long long>(attemptId), pcm.size());
             ShowHud(L"No speech detected");
             SetTimer(g_hudWindow, kHudHideTimer, 1500, nullptr);
             return;
@@ -1259,7 +1494,9 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     DebugPrintTextLine(L"OK", text);
                 }
             } else if (isError) {
-                VolcDebugLog("PasteTextImeAware: skipped operational error '%ls'", text.c_str());
+                const AsrResultClassification classification = ClassifyAsrResult(text);
+                VolcDebugLog("PasteTextImeAware: skipped operational error (reason=%s)",
+                             AsrFailureReasonDebugName(classification.reason));
             }
         }
         return 0;
@@ -1348,7 +1585,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 msg->attemptId = attemptId;
                 msg->primaryConfig = primaryConfig;
                 msg->text = std::move(timeoutText);
-                msg->fromWatchdog = true;
+                msg->source = AsrAttemptFinalSource::Watchdog;
                 if (!PostMessageW(hwnd, kAsrAttemptFinalMessage, 0,
                                   reinterpret_cast<LPARAM>(msg))) {
                     delete msg;

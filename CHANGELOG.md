@@ -6,6 +6,28 @@
 
 - Nothing yet.
 
+## v0.9.7 (2026-07-12)
+
+### Added
+
+- **Structured ASR runtime audit**: Debug Mode now writes `%TEMP%\voxtype_asr_runtime.log` events for attempt start, recording stop, primary final classification, fallback start/final, stale discard, and too-short/no-speech skips. Events contain backend, result kind, normalized failure reason, source, elapsed time, and PCM byte counts, but never recognized text or raw provider errors.
+
+### Fixed
+
+- **Fallback after an early streaming failure**: If a streaming primary exhausts startup/connect retries and reports its final failure while the hotkey is still held, the final is now deferred until release. VoxType then stores the complete raw PCM and runs the configured fallback normally instead of ending the attempt without fallback audio.
+- **Streaming session start-failure routing**: Synchronous Qwen, Volcengine, and Doubao IME `Start()` failures now enter the same classified completion path; fallback is allowed only when enough PCM has already been captured.
+- **Volcengine debug-log privacy**: Removed request/response hex, init JSON, transcript payloads, final text, raw provider errors, and proxy-address values from persistent Volcengine diagnostics. The existing invalid `%ls` formatter used with a narrow mode string was also corrected.
+- **Debug flag data race**: The cross-thread debug logging gate is now atomic.
+
+### Changed
+
+- **Bounded diagnostics**: `%TEMP%\voxtype_asr_runtime.log` and `%TEMP%\volc_asr_debug.log` now include full local date/time with milliseconds and PID, rotate at 5 MiB, and retain two archives (`.1` and `.2`). Both files are written only while Debug Mode is enabled.
+- **Retry policy unchanged**: The primary retry/replay budgets, fallback trigger classification, and fallback-enabled 6–12 second post-release streaming wait remain unchanged; v0.9.7 improves correctness and observability around those decisions.
+
+### Verification
+
+- `.\build.bat`, `.\tools\doubao_ime_probe.bat`, runtime version/resource inspection, sensitive-log-pattern scans, and `git diff --check` pass.
+
 ## v0.9.6 (2026-06-29)
 
 ### Added

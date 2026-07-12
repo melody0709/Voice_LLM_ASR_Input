@@ -10,57 +10,26 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
-#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "asr_runtime_log.h"
 #include "utils.h"
 
 #pragma comment(lib, "winhttp.lib")
 
 #define VOLC_DEBUG_LOG 1
 
-extern bool g_enableDebugMode;
-
 #if VOLC_DEBUG_LOG
 inline void VolcDebugLog(const char* fmt, ...) {
-    if (!g_enableDebugMode) return;
-    static std::mutex s_logMutex;
-    static char logPath[MAX_PATH] = {};
-    std::lock_guard<std::mutex> lk(s_logMutex);
-    if (logPath[0] == '\0') {
-        GetTempPathA(MAX_PATH, logPath);
-        strcat_s(logPath, "volc_asr_debug.log");
-    }
-    FILE* f = nullptr;
-    fopen_s(&f, logPath, "a");
-    if (!f) return;
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    fprintf(f, "[%02d:%02d:%02d.%03d] ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
     va_list args;
     va_start(args, fmt);
-    vfprintf(f, fmt, args);
+    asr_runtime_log::WriteNamedV(L"volc_asr_debug.log", fmt, args);
     va_end(args);
-    fprintf(f, "\n");
-    fclose(f);
-}
-
-inline void VolcDebugHex(const char* label, const uint8_t* data, size_t len, size_t maxBytes = 64) {
-    std::string hex;
-    size_t n = (len < maxBytes) ? len : maxBytes;
-    for (size_t i = 0; i < n; i++) {
-        char buf[4];
-        snprintf(buf, sizeof(buf), "%02X ", data[i]);
-        hex += buf;
-    }
-    if (len > maxBytes) hex += "...";
-    VolcDebugLog("%s (%zu bytes): %s", label, len, hex.c_str());
 }
 #else
 #define VolcDebugLog(...) ((void)0)
-#define VolcDebugHex(...) ((void)0)
 #endif
 
 #define VOLC_WEB_SOCKET_BINARY_MSG 0
@@ -303,7 +272,6 @@ inline VolcResult ReceiveResult(HINTERNET hWebSocket, DWORD timeoutMs, VolcSessi
         if (msgType == MSG_ERROR_RESP) {
             uint32_t errorCode = payloadSize;
             VolcDebugLog("Error frame: code=%u", errorCode);
-            VolcDebugHex("Error response raw", recvBuf.data(), bytesRead);
             if (pos + 4 > responseBody.size()) {
                 result.text = L"[VolcEngine error: code=" + std::to_wstring(errorCode) + L"]";
                 return result;
@@ -317,7 +285,6 @@ inline VolcResult ReceiveResult(HINTERNET hWebSocket, DWORD timeoutMs, VolcSessi
             if (errMsgSize > 0 && pos + errMsgSize <= responseBody.size()) {
                 std::string errMsg(responseBody.begin() + static_cast<ptrdiff_t>(pos),
                                    responseBody.begin() + static_cast<ptrdiff_t>(pos + errMsgSize));
-                VolcDebugLog("Error msg: %s", errMsg.c_str());
                 result.text = L"[VolcEngine error: " + Utf8ToWide(errMsg) + L"]";
                 return result;
             }
@@ -349,8 +316,8 @@ inline VolcResult ReceiveResult(HINTERNET hWebSocket, DWORD timeoutMs, VolcSessi
             }
             bool isDefinite = ExtractJsonBool(payloadJson, "definite");
             if (!text.empty()) {
-                VolcDebugLog("Server resp: text_wlen=%zu definite=%d payload=%.200s",
-                             text.size(), isDefinite, payloadJson.c_str());
+                VolcDebugLog("Server resp: text_wlen=%zu definite=%d payload_bytes=%zu",
+                             text.size(), isDefinite, payloadJson.size());
                 if (isDefinite) {
                     result.text = text;
                     result.definite = true;
@@ -832,8 +799,6 @@ inline bool OpenSessionImpl(VolcSession& sess, const VolcConfig& cfg, bool isRet
     sess.sequence = 0;
 
     VolcDebugLog("Sending init frame (%zu bytes), json=%zu bytes", frame.size(), jsonPayload.size());
-    VolcDebugHex("Init frame", frame.data(), frame.size());
-    VolcDebugLog("Init JSON: %.300s", requestJson.c_str());
 
     WinHttpWebSocketSend(sess.hWebSocket,
                          static_cast<WINHTTP_WEB_SOCKET_BUFFER_TYPE>(VOLC_WEB_SOCKET_BINARY_MSG),
@@ -843,9 +808,11 @@ inline bool OpenSessionImpl(VolcSession& sess, const VolcConfig& cfg, bool isRet
     VolcResult initResp = ReceiveResult(sess.hWebSocket, 5000, &sess);
     ULONGLONG t6 = GetTickCount64();
     VolcDebugLog("Init frame receive: %llums", t6 - t5);
-    VolcDebugLog("Init response: '%ls'", initResp.text.c_str());
+    VolcDebugLog("Init response: text_wlen=%zu error=%d",
+                 initResp.text.size(),
+                 initResp.text.find(L"[VolcEngine error:") != std::wstring::npos ? 1 : 0);
     if (initResp.text.find(L"[VolcEngine error:") != std::wstring::npos) {
-        VolcDebugLog("OpenSession FAILED - server error: %ls", initResp.text.c_str());
+        VolcDebugLog("OpenSession FAILED - server error (text_wlen=%zu)", initResp.text.size());
         sess.lastError = initResp.text;
         WebSocketCloseGracefully(sess.hWebSocket, &sess);
         sess.hWebSocket = nullptr;
@@ -898,7 +865,7 @@ inline std::wstring SendAudio(VolcSession& sess, const std::vector<BYTE>& pcmChu
     }
 
     if ((asyncMode || nostreamMode) && isLast) {
-        VolcDebugLog("SendAudio: isLast sent (%ls, skipping receive — drainThread will read result)",
+        VolcDebugLog("SendAudio: isLast sent (%s, skipping receive; drainThread will read result)",
                      asyncMode ? "async" : "nostream");
         return L"";
     }
@@ -909,8 +876,8 @@ inline std::wstring SendAudio(VolcSession& sess, const std::vector<BYTE>& pcmChu
 
     VolcResult vr = ReceiveResult(sess.hWebSocket, isLast ? 4000 : 150, &sess);
     ULONGLONG tSend1 = GetTickCount64();
-    VolcDebugLog("SendAudio recv: %llums (isLast=%d), text='%ls' definite=%d",
-                 tSend1 - tSend0, isLast, vr.text.c_str(), vr.definite);
+    VolcDebugLog("SendAudio recv: %llums (isLast=%d), text_wlen=%zu definite=%d",
+                 tSend1 - tSend0, isLast, vr.text.size(), vr.definite);
     return vr.text;
 }
 
@@ -956,7 +923,8 @@ inline std::wstring CloseSession(VolcSession& sess) {
 
     sess.connected = false;
     ULONGLONG tClose1 = GetTickCount64();
-    VolcDebugLog("=== CloseSession DONE (total: %llums), finalText='%ls' ===", tClose1 - tClose0, finalText.c_str());
+    VolcDebugLog("=== CloseSession DONE (total: %llums), final_text_wlen=%zu ===",
+                 tClose1 - tClose0, finalText.size());
     return finalText;
 }
 

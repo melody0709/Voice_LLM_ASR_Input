@@ -5,6 +5,7 @@
 > 复审：2026-06-29
 > v2 准备：2026-06-29，研究 Doubao IME recorded fallback target
 > v2 实施：2026-06-29，Doubao IME recorded fallback target 已接入，`build.bat` 和 `tools\doubao_ime_probe.bat` 通过
+> v0.9.7 运行复审：2026-07-12，分析约 30 天/850 次 session 记录，完成 fallback 提前失败修复与隐私安全运行日志
 > 目标：在 Recognition tab 增加 Fallback ASR Backend。当默认 ASR 后端发生可恢复/运行类失败时，用同一段录音自动走备用 ASR。
 
 ---
@@ -15,26 +16,31 @@
 
 也就是默认 ASR 先在明确的 primary 预算内跑完它自己的连接、重试、replay、final timeout 逻辑。只有默认 ASR 最终确认失败，才用同一段原始 PCM 启动 fallback。这样不会让两个云端 ASR 同时消耗连接和额度，也不会把 partial HUD、LLM、粘贴路径搞成竞态。
 
-当前 v1 已支持：
+当前已支持：
 
 ```text
 Primary ASR:  local / baidu / qwen / mimo / volcengine / doubao_ime
-Fallback ASR: disabled / local / baidu / qwen / mimo
+Fallback ASR: disabled / local / baidu / qwen / mimo / doubao_ime
 ```
 
-下一步建议把 `doubao_ime` 加入 fallback target，`volcengine` 继续暂缓：
-
-```text
-Fallback ASR v2: disabled / local / baidu / qwen / mimo / doubao_ime
-```
-
-`doubao_ime` 可以加入 fallback 的原因：它的协议层 `RealtimeClient` 已经支持连接、发送固定 20ms PCM frame、`Finish()` 等 recorded replay 所需能力；需要抽出的主要是 streaming session 私有的 `RetryRecognitionOnce()` 录音回放逻辑，以及凭据刷新/写回 side effect。`volcengine` 仍暂缓，因为它还绑定持久连接、三模式 send/drain、prewarm/reuse 生命周期，抽 recorded helper 风险更高。
+`doubao_ime` 已通过 recorded helper + batch session 加入 fallback。`volcengine` 仍暂缓作为 fallback target，因为它绑定持久连接、三模式 send/drain、prewarm/reuse 生命周期，抽 recorded helper 风险更高；它继续完整支持作为 primary。
 
 2026-06-29 复审后补充三条实施硬约束：
 
 - streaming session 的 final callback **只允许投递主窗口消息**，不能在 session worker 线程里直接运行 fallback。
 - 主窗口收到 primary final/timeout 后，fallback batch 也必须放到后台 worker 跑，不能阻塞 UI/window proc。
 - ASR final 和 LLM final 的消息 payload 要携带最终 backend config/usedFallback/primaryError/attempt id，不能继续完全依赖全局 `g_config` 做 debug、日志和 stale result 判断。
+
+### 2026-07-12 运行复审与 v0.9.7 加固
+
+对 `%TEMP%\volc_asr_debug.log` 约 30 天、38,908 行、850 次完整 session 的记录复核后：20 次火山握手 hard timeout 均由内部 retry 处理；最终 7 条 `OpenSession failed` 全部是 `forceAbort=1` 的主动取消，没有非主动 retry 耗尽；两条明显慢样本分别在第三次握手和 empty-final replay 后恢复成功。最近两段运行的松手后 P95 约 906ms / 797ms，Windows Application Error/Hang、WER 和 CrashDumps 也没有 VoxType 记录。因此不调整 primary retry/replay、fallback 触发分类或 6–12 秒 post-release final 预算。
+
+复审发现并在 v0.9.7 修复两类问题：
+
+- **提前 final 的编排缺口**：streaming primary 如果在用户仍按住热键时耗尽连接重试，旧实现会立即 claim final；此时 raw PCM 尚未写入 attempt context，配置好的 fallback 会被绕过。现在先保存 deferred final，松手后拿到完整 PCM、通过 too-short/VAD no-speech 门控，再进入统一 completion/fallback 路径。同步 `Start()` 失败也改走同一分类入口。
+- **持久日志隐私与可观测性**：旧火山日志会无限追加，并包含 Init JSON、识别 payload/final 正文、provider 原始错误、输入上下文和代理字符串，且只有时分秒。v0.9.7 新增 `%TEMP%\voxtype_asr_runtime.log`，只记录结构化 attempt/primary/fallback 事件及归一化 kind/reason/elapsed/PCM 大小；火山日志删除正文和敏感 payload。两个日志都仅在 Debug Mode 写入，带完整日期/毫秒/PID，5 MiB 轮转并保留 `.1`、`.2`。
+
+边界约束：运行日志调用不放进 WASAPI/waveIn 音频回调；日志不记录 transcript、primary error 原文或 provider payload；旧日志不主动删除，新版本只停止继续追加敏感正文。
 
 ---
 

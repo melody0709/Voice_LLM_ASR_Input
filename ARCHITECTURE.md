@@ -54,9 +54,10 @@ Since v0.6.0, the source code is organized into multiple modules. Current source
 | `src/app/globals.h` | Shared constants, control IDs, struct definitions, extern global variable declarations |
 | `src/audio/engine.h` / `src/audio/engine.cpp` | Backend: string/path utilities, JSON config persistence, audio capture, `AsrEngine` class, `PreloadAsrEngine()` |
 | `src/audio/streaming_vad_trimmer.h` / `src/audio/streaming_vad_trimmer.cpp` | Provider-independent streaming PCM VAD trim for cloud ASR sessions |
-| `src/asr/asr_session.h` / `src/asr/asr_session.cpp` | Batch ASR session abstraction for local, Baidu, MiMo, and Qwen fallback paths |
-| `src/asr/asr_result.h` / `src/asr/asr_result.cpp` | ASR text normalization, error classification, backend display/debug names |
+| `src/asr/asr_session.h` / `src/asr/asr_session.cpp` | Batch ASR session abstraction for Local, Baidu, MiMo, Qwen, and recorded Doubao IME paths |
+| `src/asr/asr_result.h` / `src/asr/asr_result.cpp` | ASR text normalization, result/failure classification, and stable backend/result log names |
 | `src/asr/asr_dispatcher.h` / `src/asr/asr_dispatcher.cpp` | Final ASR result dispatch, LLM gate, raw ASR tracking |
+| `src/asr/asr_runtime_log.h` / `src/asr/asr_runtime_log.cpp` | Debug-only, privacy-safe ASR lifecycle logging with timestamp/PID and bounded rotation |
 | `src/asr/cloud_asr_common.h` / `src/asr/cloud_asr_common.cpp` | Cloud replay buffer, adaptive finalize timeout, empty-final retry helpers |
 | `src/ui/hud.h` / `src/ui/hud.cpp` | HUD window, Direct2D/DirectWrite rendering, tray icon, UI resource creation/deletion |
 | `src/ui/hotkey.h` / `src/ui/hotkey.cpp` | Hotkey config, CapsLock long-press logic, `WH_KEYBOARD_LL` hook, `HotkeyEdit` custom control |
@@ -102,7 +103,7 @@ Tray menu:
 
 Settings is a standard Win32 window with 4 tabs:
 
-- `Recognition`: ASR Backend, model, model directory, threads, VAD, VAD model, Punctuation, hotkey config.
+- `Recognition`: ASR Backend, optional Fallback backend, model, model directory, threads, VAD, VAD model, Punctuation, hotkey config.
 - `LLM`: Provider selection (Provider dropdown + [+] / [−]), API Base URL, API Key, Model, Test Connection, Debug log, Extra Params.
 - `LLM Prompt`: System Prompt editor (multi-line), Basic Fix / Deep Fix preset buttons.
 - `Cloud ASR`: Cloud provider selection and Baidu/Volcengine/Qwen/MiMo/Doubao IME provider-specific fields.
@@ -210,6 +211,21 @@ Current verification status: the Doubao IME silent protocol probe, WAV recogniti
 
 When `Enable VAD` is on, Qwen and Volcengine streaming backends run audio through `StreamingVadTrimmer` before upload, while batch cloud backends use `BatchVadTrimmer` after recording and before the request. Doubao IME intentionally bypasses local VAD and uploads raw PCM encoded as Opus. The local VAD paths share `VadTrimCore`, trimming head/tail silence while preserving middle pauses. Common cloud behavior such as replay buffer, adaptive finalize timeout, empty final retry, and result classification is shared through `cloud_asr_common.*` and `asr_result.*` where applicable.
 
+### ASR Fallback Orchestration and Diagnostics
+
+Fallback is serial: the primary backend completes its own retry/replay policy first, and only a final `OperationalError` can start the configured fallback with the same raw 16kHz/s16le/mono PCM. `Too short`, `No speech detected`, cancellation, stale attempts, a disabled/same-as-primary fallback, and usable primary text never trigger fallback. Volcengine is supported as a primary backend but is intentionally not offered as a fallback target; Local, Baidu, Qwen, MiMo, and recorded Doubao IME are valid fallback targets.
+
+`main.cpp` owns a monotonically increasing recognition-attempt context containing the primary config, recording/final state, raw PCM, and fallback claim. Streaming callbacks only post a main-window message. If a streaming provider exhausts retries and posts a final failure before the hotkey is released, that final is retained in the attempt context; release stores the complete PCM, applies too-short/VAD no-speech gates, and then resumes the same completion path. This prevents early provider failure from either running fallback on partial audio or bypassing fallback because PCM was not yet available. Watchdog and provider callbacks race through one final-claim guard, and fallback workers recheck the attempt id before side effects and dispatch.
+
+With fallback enabled, the post-release primary streaming final budget remains adaptive at 6–12 seconds; provider-internal batch/recorded request budgets remain separate and longer. v0.9.7 does not change those retry or timeout formulas.
+
+Debug Mode writes two bounded files under `%TEMP%`:
+
+- `voxtype_asr_runtime.log`: structured attempt/primary/fallback lifecycle events. It records backend ids, normalized result/failure classes, source, elapsed time, recording duration, and PCM sizes, never transcript text or raw provider errors.
+- `volc_asr_debug.log`: privacy-redacted Volcengine transport/retry diagnostics. Request JSON, response payloads, transcripts, raw provider errors, and proxy-address strings are not persisted.
+
+Both logs include full local date/time with milliseconds and PID, rotate at 5 MiB, and retain `.1` and `.2` archives. No file is written while Debug Mode is disabled. Rotation does not proactively delete an older pre-v0.9.7 log; new writes are sanitized and normal size rotation eventually archives/replaces it.
+
 ### Model Adaptation
 
 `AsrEngine` creates different recognizers based on `model_id`:
@@ -266,6 +282,7 @@ Current structure is a flat JSON:
   "llm_prompt": "",
   "enable_llm_debug": false,
   "asr_backend": "doubao_ime",
+  "fallback_asr_backend": "local",
   "cloud_provider": "doubao_ime",
   "qwen_base_url": "wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
   "qwen_model": "qwen3-asr-flash-realtime",
@@ -285,6 +302,7 @@ Current structure is a flat JSON:
 - `llm_prompt`: Custom System Prompt (leave empty to use built-in default).
 - `enable_llm_debug`: When enabled, records before/after ASR comparison to `log/llm_refine_YYYYMMDD.log`.
 - `asr_backend`: Active ASR backend (`local`, `baidu`, `volcengine`, `qwen`, `mimo`, or `doubao_ime`).
+- `fallback_asr_backend`: Optional serial fallback (`none`, `local`, `baidu`, `qwen`, `mimo`, or `doubao_ime`); it must differ from `asr_backend`. Volcengine is not a fallback target.
 - `qwen_*`: Qwen ASR connection/model/language/chunk settings. Turn detection is fixed to Manual and is not persisted.
 - `mimo_*`: Xiaomi MiMo ASR API key, OpenAI-compatible Base URL, model, and language (`auto`, `zh`, `en`). The API key is DPAPI-encrypted in `mimo_api_key`.
 - `doubao_ime_*`: Experimental Doubao IME device id, cdid, and DPAPI-encrypted token. These are auto-registered and can be reset from Settings.

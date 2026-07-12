@@ -391,12 +391,12 @@ private:
             if (!s_volcSession.lastError.empty()) {
                 errMsg = s_volcSession.lastError;
             }
-            VolcDebugLog("Volc thread: OpenSession failed after %d attempts (forceAbort=%d, streaming=%d, pending=%zu, err='%ls')",
+            VolcDebugLog("Volc thread: OpenSession failed after %d attempts (forceAbort=%d, streaming=%d, pending=%zu, error_wlen=%zu)",
                          openAttempts + 1,
                          s_volcSession.forceAbort.load() ? 1 : 0,
                          streaming_.load() ? 1 : 0,
                          pendingAudio_.Size(),
-                         errMsg.c_str());
+                         errMsg.size());
             if (!abort_.load()) {
                 DispatchFinal(errMsg);
             }
