@@ -4,6 +4,17 @@
 
 ## Unreleased
 
+## v0.9.9 (2026-07-28)
+
+### Fixed
+
+- **HUD recording-level animation for batch ASR**: The Local (sherpa-onnx), Baidu, MiMo, and other batch backends now arm the shared HUD animation after recording becomes active, so the input-level bar lights up and moves consistently with streaming backends.
+- **Preserved cloud recording startup reliability**: This restores the HUD animation without reverting the capture-first startup order introduced in v0.9.3 to protect the first audio segment sent to cloud streaming backends.
+
+### Verification
+
+- `build.bat --package` passes; the Portable and MSI artifacts are verified against the canonical runtime manifest.
+
 ## v0.9.8 (2026-07-27)
 
 ### Added

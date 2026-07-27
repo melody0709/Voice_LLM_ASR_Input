@@ -1072,6 +1072,8 @@ void StartRecordingSession() {
     if (g_hudWindow) KillTimer(g_hudWindow, kHudHideTimer);
 
     g_hudIsRefining = false;
+    g_hudHasSpoken = false;
+    g_vadDetectedVoice.store(false);
     std::wstring name = AsrBackendDisplayName(g_config);
     ShowHud(L"Listening... " + name);
 
@@ -1085,6 +1087,10 @@ void StartRecordingSession() {
     }
     g_sessionStartTick = GetTickCount64();
     g_recording = true;
+    // Preserve the capture-first startup order introduced for streaming head
+    // audio reliability. The initial HUD call happened before g_recording was
+    // set, so arm only its shared animation timer once recording is active.
+    StartHudRecordingAnimation();
     s_wasapiUsed = g_wasapiCapture.IsInitialized();
     if (s_wasapiUsed) {
         s_wasapiDeviceName = g_wasapiCapture.GetDeviceName();

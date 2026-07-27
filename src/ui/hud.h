@@ -17,6 +17,7 @@ void ShowHudConstrained(const std::wstring& text,
                         float maxScreenWidthFraction,
                         int maxLines,
                         int fixedLines = 0);
+void StartHudRecordingAnimation();
 void HideHud();
 HFONT MakeFont(int pointSize, int weight);
 void CreateUiResources();

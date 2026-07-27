@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  当前版本：<code>v0.9.8</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
+  当前版本：<code>v0.9.9</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -190,6 +190,8 @@ CHANGELOG.md        — 版本变更记录
 详见 [CHANGELOG.md](CHANGELOG.md)
 
 **最近更新：**
+- **v0.9.9** — 恢复 Local 及其他 batch ASR 后端的共用录音中 HUD 音量动画；音量条重新亮起并跳动，同时保持 v0.9.3 的云端“先启动采集”顺序不变
+- **v0.9.8** — 统一 CMake/Ninja 发布链路，提供已验证的 Portable 与 MSI 包、MSI 升级/目录选择、便携版数据隔离和开机自启动设置
 - **v0.9.7** — 新增隐私安全、有界轮转的 ASR 诊断日志和结构化 primary/fallback 生命周期事件；流式 primary 在松手前回报失败时会延后到完整 PCM 保存后再决定 fallback，不再绕过已配置的备用后端
 - **v0.9.6** — Doubao IME 现在可作为 fallback ASR 目标，通过 recorded-PCM helper 重放同一段录音，支持凭据刷新/写回、云端耗时统计、Settings 选择，并保持 raw PCM 上传不走本地 VAD trim
 - **v0.9.5** — Recognition tab 新增 fallback ASR 后端，batch/streaming 失败串行 fallback，fallback 启用时缩短 streaming final 等待，ASR/LLM result metadata 支持 debug，Local 作为 fallback 时预加载模型

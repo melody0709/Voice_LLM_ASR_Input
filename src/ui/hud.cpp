@@ -232,6 +232,12 @@ void ShowHudConstrained(const std::wstring& text,
     ShowHudInternal(text, maxWidthDip, maxScreenWidthFraction, maxLines, fixedLines);
 }
 
+void StartHudRecordingAnimation() {
+    if (!g_hudWindow || !g_recording) return;
+    SetTimer(g_hudWindow, kHudAnimationTimer, 33, nullptr);
+    InvalidateRect(g_hudWindow, nullptr, FALSE);
+}
+
 void HideHud() {
     if (g_hudWindow) {
         KillTimer(g_hudWindow, kHudAnimationTimer);
