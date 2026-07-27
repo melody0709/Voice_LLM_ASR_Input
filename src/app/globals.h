@@ -80,6 +80,15 @@ constexpr int BtnH = 34;
 constexpr int ActionBtnH = 36;
 constexpr int CheckH = 26;
 constexpr int HotkeyEditH = 38;
+constexpr int GeneralGroupX = 30;
+constexpr int GeneralGroupW = 788;
+constexpr int GeneralShortcutGroupH = 170;
+constexpr int GeneralStartupGroupGap = 16;
+constexpr int GeneralStartupGroupH = 112;
+constexpr int GeneralStartupCheckOffsetY = 24;
+constexpr int GeneralStartupHintOffsetY = 62;
+constexpr int GeneralStartupCheckW = 430;
+constexpr int GeneralStartupHintW = 700;
 constexpr int InputW = 480;
 constexpr int InputWFull = 580;
 constexpr int ComboW = 250;
@@ -103,6 +112,8 @@ constexpr COLORREF DividerColor = RGB(226, 232, 240);
 constexpr COLORREF HintTextColor = RGB(120, 130, 145);
 constexpr int RowInputY(int row) { return FirstRowY + row * RowHeight; }
 constexpr int RowLabelY(int row) { return FirstRowY + LabelYOffset + row * RowHeight; }
+constexpr int GeneralShortcutGroupY = RowInputY(0);
+constexpr int GeneralStartupGroupY = GeneralShortcutGroupY + GeneralShortcutGroupH + GeneralStartupGroupGap;
 // UiStyle constants are designed for 150% DPI (144 dpi).
 // Scale = DpiScaleForWindow * 96/144; S() converts design px to physical px.
 extern float Scale;
@@ -130,6 +141,7 @@ constexpr int IDC_CANCEL = 2010;
 constexpr int IDC_STATUS = 2011;
 constexpr int IDC_SETTINGS_TAB = 2012;
 constexpr int IDC_VAD_MODEL = 2013;
+constexpr int IDC_START_WITH_WINDOWS = 2014;
 constexpr int IDC_LLM_ENDPOINT = 2020;
 constexpr int IDC_LLM_KEY = 2021;
 constexpr int IDC_LLM_MODEL = 2022;

@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  当前版本：<code>v0.9.7</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
+  当前版本：<code>v0.9.8</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -56,7 +56,7 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 ### 3. 运行
 
 ```powershell
-.\build\VoxType.exe
+.\build\run\x64-release\VoxType.exe
 ```
 
 右键托盘图标打开 Settings，按住快捷键开始录音，松开后识别并粘贴。

@@ -73,6 +73,7 @@ Since v0.6.0, the source code is organized into multiple modules. Current source
 | `tools/doubao_ime_probe.bat` / `tools/doubao_ime_probe.cpp` | Standalone Doubao IME diagnostic probe: reuses saved credentials when available, runs a live protocol check, optionally runs a 16kHz mono WAV recognition check, and supports a real-time-ish streaming send/drain probe |
 | `src/audio/firered_vad.h` | FireRed VAD module (header-only) |
 | `src/core/input_context.h` | Input field context reading module (header-only, UIA/MSAA/WM_GETTEXT layered fallback) |
+| `src/core/startup_registration.h` / `src/core/startup_registration.cpp` | Current-user Windows Run registration, including stale Portable-path detection and repair |
 | `src/core/utils.h` | Shared utility functions (WideToUtf8, Utf8ToWide, EscapeJson, Trim) |
 
 Global variables are defined in `main.cpp` and accessed by other modules via `extern` declarations in `globals.h`.
@@ -82,6 +83,40 @@ Global variables are defined in `main.cpp` and accessed by other modules via `ex
 `onnxruntime.dll`, `sherpa-onnx-cxx-api.dll`, and `kaldi-native-fbank-core.dll` are delay-loaded via MSVC `/DELAYLOAD` linker flag. They are only loaded into memory when local ASR functions are actually called. In cloud-only mode, these DLLs are never loaded, keeping idle memory at ~12 MB.
 
 `engine.cpp` includes `TryLoadAsrDlls()` which safely checks DLL availability before calling sherpa-onnx functions, returning `false` gracefully if DLLs are missing.
+
+### Build, packaging, and mutable data
+
+`CMakeLists.txt` and the `x64-release` CMake preset are the build authority.
+`build.bat` prepares MSVC, invokes CMake/Ninja, then installs the only
+supported runnable development payload at `build/run/x64-release`.
+
+The generated `build/` root is deliberately small and validated:
+
+```text
+build/
+├─ cmake/x64-release/   CMake/Ninja cache, objects, install manifest, package staging
+├─ run/x64-release/     sole runnable development payload
+├─ packages/            verified MSI and Portable assets, preserved by --clean
+├─ artifacts/           generated package verification, test, and diagnostic reports
+├─ logs/                explicit build/test logs
+└─ README.txt           generated layout guide
+```
+
+Unexpected top-level items are reported by the layout validator rather than
+silently being deleted or included in a package.
+
+The Portable `.7z` and MSI both derive from that canonical runtime payload and
+are independently extracted and compared with its hash manifest before being
+placed in `build/packages`. The MSI is x64/per-machine, defaults to `Program
+Files\VoxType`, and uses an Advanced folder picker. A stable HKLM
+`Software\VoxType\InstallFolder` value is AppSearched before Major Upgrade so
+the user-selected directory persists across releases.
+
+Runtime assets remain alongside `VoxType.exe`. For an installed build,
+configuration, downloaded models, punctuation models, and logs instead live
+under `%LOCALAPPDATA%\VoxType`. A Portable payload has `portable.flag` and
+keeps the same mutable data beside its executable. MSI never owns or removes
+that mutable data.
 
 ### Model Preloading
 
@@ -101,9 +136,10 @@ Tray menu:
 
 ### Settings
 
-Settings is a standard Win32 window with 4 tabs:
+Settings is a standard Win32 window with 5 tabs:
 
-- `Recognition`: ASR Backend, optional Fallback backend, model, model directory, threads, VAD, VAD model, Punctuation, hotkey config.
+- `General`: recording hotkey and the optional current-user `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\VoxType` startup registration.
+- `Recognition`: ASR Backend, optional Fallback backend, model, model directory, threads, VAD, VAD model, and Punctuation.
 - `LLM`: Provider selection (Provider dropdown + [+] / [−]), API Base URL, API Key, Model, Test Connection, Debug log, Extra Params.
 - `LLM Prompt`: System Prompt editor (multi-line), Basic Fix / Deep Fix preset buttons.
 - `Cloud ASR`: Cloud provider selection and Baidu/Volcengine/Qwen/MiMo/Doubao IME provider-specific fields.
@@ -259,11 +295,16 @@ Current implementation (`PasteTextImeAware`):
 
 ## Configuration
 
-Configuration is saved to:
+Installed-build configuration is saved to:
 
 ```text
-<app-root>/config.json
+%LOCALAPPDATA%\VoxType\config.json
 ```
+
+Downloaded ASR/punctuation models and logs use sibling `models` and `log`
+directories under the same mutable-data root. A Portable build is identified by
+`<app-root>\portable.flag` and uses `<app-root>\config.json` plus its adjacent
+`models` and `log` directories instead.
 
 Current structure is a flat JSON:
 

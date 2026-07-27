@@ -23,7 +23,108 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "winmm.lib")
 
-static constexpr int kCurrentConfigVersion = 7;
+static constexpr int kCurrentConfigVersion = 9;
+
+namespace {
+
+constexpr wchar_t kPortableFlagName[] = L"portable.flag";
+
+std::wstring CurrentExecutableDirectory() {
+    for (DWORD capacity = MAX_PATH; capacity <= 32768; capacity *= 2) {
+        std::vector<wchar_t> buffer(capacity, L'\0');
+        const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), capacity);
+        if (length == 0) break;
+        if (length < capacity - 1) {
+            std::wstring path(buffer.data(), length);
+            const size_t slash = path.find_last_of(L"\\/");
+            return slash == std::wstring::npos ? std::wstring() : path.substr(0, slash);
+        }
+    }
+    return {};
+}
+
+bool PathExistsAsFile(const std::wstring& path) {
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+bool PathStartsWithIgnoreCase(const std::wstring& path, const std::wstring& prefix) {
+    if (path.size() < prefix.size()) return false;
+    for (size_t i = 0; i < prefix.size(); ++i) {
+        if (towlower(path[i]) != towlower(prefix[i])) return false;
+    }
+    return path.size() == prefix.size() ||
+        prefix.empty() ||
+        prefix.back() == L'\\' ||
+        prefix.back() == L'/' ||
+        path[prefix.size()] == L'\\' ||
+        path[prefix.size()] == L'/';
+}
+
+std::wstring ParentDirectory(const std::wstring& path) {
+    const size_t slash = path.find_last_of(L"\\/");
+    return slash == std::wstring::npos ? std::wstring() : path.substr(0, slash);
+}
+
+std::wstring DirectoryLeafName(const std::wstring& path) {
+    const size_t end = path.find_last_not_of(L"\\/");
+    if (end == std::wstring::npos) return {};
+    const size_t slash = path.find_last_of(L"\\/", end);
+    const size_t start = slash == std::wstring::npos ? 0 : slash + 1;
+    return path.substr(start, end - start + 1);
+}
+
+std::wstring DevelopmentRootConfigPath() {
+    const std::wstring runtimeDir = RuntimeAssetDir();
+    const std::wstring runDir = ParentDirectory(runtimeDir);
+    const std::wstring buildDir = ParentDirectory(runDir);
+    if (!EqualsIgnoreCase(DirectoryLeafName(runtimeDir), L"x64-release") ||
+        !EqualsIgnoreCase(DirectoryLeafName(runDir), L"run") ||
+        !EqualsIgnoreCase(DirectoryLeafName(buildDir), L"build")) {
+        return {};
+    }
+
+    const std::wstring repositoryRoot = ParentDirectory(buildDir);
+    return repositoryRoot.empty() ? std::wstring() : repositoryRoot + L"\\config.json";
+}
+
+void EnsureDirectory(const std::wstring& path) {
+    if (!path.empty()) CreateDirectoryW(path.c_str(), nullptr);
+}
+
+void MigrateLegacyConfigIfNeeded() {
+    if (IsPortableMode()) return;
+
+    const std::wstring destination = ConfigPath();
+    if (PathExistsAsFile(destination)) return;
+
+    const std::wstring adjacentConfig = RuntimeAssetDir() + L"\\config.json";
+    if (PathExistsAsFile(adjacentConfig) && CopyFileW(adjacentConfig.c_str(), destination.c_str(), TRUE)) {
+        // Preserve the original file in case the user wants to keep using an
+        // older Portable copy. DPAPI secrets remain usable for this user.
+        return;
+    }
+
+    // The canonical development payload lives at build\run\x64-release,
+    // while pre-CMake development builds kept config.json at the repository
+    // root. This is deliberately an exact layout check, not a disk scan.
+    const std::wstring developmentConfig = DevelopmentRootConfigPath();
+    if (!developmentConfig.empty() && PathExistsAsFile(developmentConfig)) {
+        CopyFileW(developmentConfig.c_str(), destination.c_str(), TRUE);
+    }
+}
+
+bool ShouldFallbackFromLegacyModelDir(const std::wstring& modelDir) {
+    if (modelDir.empty() || !ModelDirExists(modelDir)) return true;
+
+    // Portable payloads still own their adjacent models. In a normal install,
+    // a model under the current runtime directory is a legacy app-owned path,
+    // not a user-selected model directory.
+    return !IsPortableMode() &&
+        PathStartsWithIgnoreCase(modelDir, RuntimeAssetDir() + L"\\models");
+}
+
+} // namespace
 
 bool EqualsIgnoreCase(std::wstring a, std::wstring b) {
     std::transform(a.begin(), a.end(), a.begin(), [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
@@ -31,43 +132,60 @@ bool EqualsIgnoreCase(std::wstring a, std::wstring b) {
     return a == b;
 }
 
-std::wstring AppDataDir() {
+std::wstring AppRootDir() {
+    return CurrentExecutableDirectory();
+}
+
+std::wstring RuntimeAssetDir() {
+    return AppRootDir();
+}
+
+bool IsPortableMode() {
+    return PathExistsAsFile(RuntimeAssetDir() + L"\\" + kPortableFlagName);
+}
+
+std::wstring MutableDataDir() {
+    if (IsPortableMode()) {
+        return RuntimeAssetDir();
+    }
+
     PWSTR path = nullptr;
     std::wstring result;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &path))) {
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &path))) {
         result = path;
         CoTaskMemFree(path);
     }
     if (result.empty()) {
-        wchar_t fallback[MAX_PATH] = {};
-        GetModuleFileNameW(nullptr, fallback, MAX_PATH);
-        result = fallback;
-        const size_t slash = result.find_last_of(L"\\/");
-        if (slash != std::wstring::npos) result.resize(slash);
+        // The executable directory is the only safe fallback when Windows
+        // cannot resolve the current user's data folder.
+        return RuntimeAssetDir();
     }
+
     result += L"\\VoxType";
-    CreateDirectoryW(result.c_str(), nullptr);
+    EnsureDirectory(result);
     return result;
 }
 
-std::wstring AppRootDir() {
-    wchar_t modulePath[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
-    std::wstring dir = modulePath;
-    size_t slash = dir.find_last_of(L"\\/");
-    if (slash != std::wstring::npos) dir.resize(slash);
-    if (dir.size() >= 6 && dir.substr(dir.size() - 6) == L"\\build") {
-        dir.resize(dir.size() - 6);
-    }
-    return dir;
+std::wstring AppDataDir() {
+    return MutableDataDir();
+}
+
+std::wstring DownloadedModelRoot() {
+    return MutableDataDir() + L"\\models";
+}
+
+std::wstring LogDir() {
+    const std::wstring result = MutableDataDir() + L"\\log";
+    EnsureDirectory(result);
+    return result;
 }
 
 std::wstring ConfigPath() {
-    return AppRootDir() + L"\\config.json";
+    return MutableDataDir() + L"\\config.json";
 }
 
 std::wstring DefaultModelDir(const std::wstring& modelId) {
-    const std::wstring base = AppRootDir() + L"\\models\\";
+    const std::wstring base = DownloadedModelRoot() + L"\\";
     if (modelId == L"firered_aed") {
         return base + L"sherpa-onnx-fire-red-asr2-zh_en-int8-2026-02-26";
     }
@@ -84,7 +202,7 @@ bool ModelDirExists(const std::wstring& dir) {
 }
 
 bool AnyModelDirExists() {
-    const std::wstring base = AppRootDir() + L"\\models\\";
+    const std::wstring base = DownloadedModelRoot() + L"\\";
     const std::wstring dirs[] = {
         L"sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25",
         L"sherpa-onnx-fire-red-asr2-zh_en-int8-2026-02-26",
@@ -97,7 +215,7 @@ bool AnyModelDirExists() {
 }
 
 bool RunModelDownloader(HWND hwnd) {
-    std::wstring scriptPath = AppRootDir() + L"\\download_models.ps1";
+    const std::wstring scriptPath = RuntimeAssetDir() + L"\\download_models.ps1";
 
     if (GetFileAttributesW(scriptPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
         MessageBoxW(hwnd,
@@ -108,7 +226,10 @@ bool RunModelDownloader(HWND hwnd) {
         return false;
     }
 
-    std::wstring cmd = L"-ExecutionPolicy Bypass -NoExit -File \"" + scriptPath + L"\"";
+    const std::wstring aria2Path = RuntimeAssetDir() + L"\\aria2c.exe";
+    const std::wstring cmd = L"-ExecutionPolicy Bypass -NoExit -File \"" + scriptPath +
+        L"\" -Destination \"" + DownloadedModelRoot() +
+        L"\" -Aria2Path \"" + aria2Path + L"\"";
 
     SHELLEXECUTEINFOW sei = { sizeof(sei) };
     sei.fMask = SEE_MASK_NOCLOSEPROCESS;
@@ -116,7 +237,8 @@ bool RunModelDownloader(HWND hwnd) {
     sei.lpVerb = L"open";
     sei.lpFile = L"powershell.exe";
     sei.lpParameters = cmd.c_str();
-    sei.lpDirectory = AppRootDir().c_str();
+    const std::wstring workingDirectory = RuntimeAssetDir();
+    sei.lpDirectory = workingDirectory.c_str();
     sei.nShow = SW_SHOWNORMAL;
 
     if (!ShellExecuteExW(&sei)) {
@@ -325,6 +447,7 @@ void ApplyPreset(int index) {
 }
 
 void LoadConfig() {
+    MigrateLegacyConfigIfNeeded();
     std::ifstream file(ConfigPath(), std::ios::binary);
     if (!file) return;
     std::ostringstream buffer;
@@ -413,6 +536,10 @@ void LoadConfig() {
         g_config.vadMinSilence = 500;
         g_config.vadMinSpeech = 30;
         g_config.vadPadStart = 150;
+    }
+    if (g_config.configVersion < 9 &&
+        ShouldFallbackFromLegacyModelDir(g_config.modelDir)) {
+        g_config.modelDir = DefaultModelDir(g_config.modelId);
     }
     if (g_config.modelDir.empty()) {
         g_config.modelDir = DefaultModelDir(g_config.modelId);
@@ -717,7 +844,7 @@ bool AsrEngine::EnsureVad(int threads, const Config& config) {
     const std::string key = "vad|" + std::to_string(threads) + "|" + std::to_string(config.vadThreshold) + "|" + std::to_string(config.vadMinSilence) + "|" + std::to_string(config.vadMinSpeech);
     if (vad && vadKey == key) return true;
 
-    const std::wstring vadPath = AppRootDir() + L"\\models\\silero_vad.int8.onnx";
+    const std::wstring vadPath = RuntimeAssetDir() + L"\\models\\silero_vad.int8.onnx";
     if (GetFileAttributesW(vadPath.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
 
     sherpa_onnx::cxx::VadModelConfig vc;
@@ -743,7 +870,7 @@ bool AsrEngine::EnsureFireRedVad(const Config& config) {
     if (fireRedVad && fireRedVadKey == key) return true;
 
     firered_vad::FireRedVadConfig cfg;
-    cfg.modelPath = WideToUtf8(AppRootDir() + L"\\models\\fireredvad_stream_vad_with_cache.onnx");
+    cfg.modelPath = WideToUtf8(RuntimeAssetDir() + L"\\models\\fireredvad_stream_vad_with_cache.onnx");
     cfg.threshold = config.vadThreshold;
     cfg.minSilenceMs = config.vadMinSilence;
     cfg.minSpeechMs = config.vadMinSpeech;
@@ -763,8 +890,8 @@ bool AsrEngine::EnsurePunctuation(int threads) {
     const std::string key = "punct|" + std::to_string(threads);
     if (punctuation && punctKey == key) return true;
 
-    const std::wstring punctPath = AppRootDir() +
-        L"\\models\\sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8\\model.int8.onnx";
+    const std::wstring punctPath = DownloadedModelRoot() +
+        L"\\sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8\\model.int8.onnx";
     if (GetFileAttributesW(punctPath.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
 
     sherpa_onnx::cxx::OfflinePunctuationConfig pc;

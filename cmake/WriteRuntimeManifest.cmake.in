@@ -1,0 +1,42 @@
+set(_runtime_root "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}")
+if(NOT IS_DIRECTORY "${_runtime_root}")
+    message(FATAL_ERROR "VoxType runtime root does not exist: ${_runtime_root}")
+endif()
+
+file(GLOB_RECURSE _runtime_files
+    LIST_DIRECTORIES false
+    RELATIVE "${_runtime_root}"
+    "${_runtime_root}/*")
+list(SORT _runtime_files)
+
+set(_entries "")
+set(_first TRUE)
+foreach(_relative IN LISTS _runtime_files)
+    if(_relative STREQUAL "runtime-manifest.json")
+        continue()
+    endif()
+    set(_absolute "${_runtime_root}/${_relative}")
+    file(SIZE "${_absolute}" _size)
+    file(SHA256 "${_absolute}" _sha256)
+    string(REPLACE "\\" "/" _path "${_relative}")
+    string(REPLACE "\\" "\\\\" _path "${_path}")
+    string(REPLACE "\"" "\\\"" _path "${_path}")
+    if(_first)
+        set(_first FALSE)
+    else()
+        string(APPEND _entries ",\n")
+    endif()
+    string(APPEND _entries
+        "    {\"path\":\"${_path}\",\"size\":${_size},\"sha256\":\"${_sha256}\"}")
+endforeach()
+
+file(WRITE "${_runtime_root}/runtime-manifest.json"
+"{
+  \"schema_version\": 1,
+  \"product\": \"VoxType\",
+  \"version\": \"@VOXTYPE_PRODUCT_VERSION@\",
+  \"files\": [
+${_entries}
+  ]
+}
+")

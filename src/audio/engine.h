@@ -17,6 +17,14 @@ void SafeRelease(T*& value) {
 
 bool EqualsIgnoreCase(std::wstring a, std::wstring b);
 
+// Runtime assets are immutable files deployed beside the executable. Mutable
+// data lives under LocalAppData unless a Portable payload explicitly opts in.
+bool IsPortableMode();
+std::wstring RuntimeAssetDir();
+std::wstring MutableDataDir();
+std::wstring DownloadedModelRoot();
+std::wstring LogDir();
+
 std::wstring AppDataDir();
 std::wstring AppRootDir();
 std::wstring ConfigPath();

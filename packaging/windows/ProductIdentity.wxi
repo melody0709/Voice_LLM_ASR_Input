@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Stable / x64 / per-machine MSI identity for VoxType.
+  These values were created once before the first public MSI and are release
+  contract inputs. Do not regenerate or replace them in later releases.
+-->
+<Include xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <?define VoxTypeProductLineKey = "stable|x64|perMachine" ?>
+  <?define VoxTypeUpgradeCode = "6794E8B0-1020-4353-8CF2-B89FFB2ED05E" ?>
+  <?define VoxTypeProductCodeNamespace = "3FFD7F15-B4F5-4138-AD19-01B1CF932690" ?>
+  <?define VoxTypeComponentNamespace = "D09B08FE-D708-4174-B988-48124B958E8C" ?>
+</Include>

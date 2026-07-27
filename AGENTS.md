@@ -11,14 +11,22 @@ Windows 11  语音输入法工具：托盘常驻，按住快捷键录音松开�
 .\build.bat
 ```
 
-链接失败提示不能打开 `build\VoxType.exe` 时：`Get-Process VoxType -ErrorAction SilentlyContinue | Stop-Process -Force; .\build.bat`
+`CMakeLists.txt` 与 `CMakePresets.json` 是唯一编译权威；`build.bat` 负责准备 MSVC、调用 CMake/Ninja 并安装运行载荷。
 
-`CMakeLists.txt` 仅用于 clangd/IDE 索引，实际构建用 `build.bat`。
+唯一可直接运行的开发程序是 `build\run\x64-release\VoxType.exe`，不能运行 `build\cmake\x64-release\VoxType.exe` 或手工向运行目录复制文件。
+
+## `build/` 生成目录边界
+
+- `build/` 完全是可删除、gitignored 的生成输出；禁止存放源码、手工脚本、截图、输入数据、用户数据或人工备份。
+- 顶层白名单仅为 `cmake/`、`run/`、`artifacts/`、`logs/`、`packages/` 和 `README.txt`。新增顶层项必须同步更新 `build.bat`、布局校验脚本和本文档。
+- `build/cmake/x64-release/` 只放 CMake/Ninja 编译中间产物；`build/run/x64-release/` 是唯一规范运行载荷；发布包只进入 `build/packages/`。
+- 测试、诊断和显式日志分别放入 `build/artifacts/`、`build/artifacts/diagnostics/` 和 `build/logs/`。
+- `build.bat --clean` 清理 `cmake`、`run`、`artifacts`、`logs` 和布局说明，但保留已验证的 `packages/`。未知项必须由布局校验报错，不能自动删除或打包。
 
 ## 开发约定
 
 - 编辑文件优先用精确替换（SearchReplace / apply_patch），避免全文覆写。
-- C++ 新增依赖同步更新：`#pragma comment(lib)` + `build.bat` + `CMakeLists.txt`。
+- C++ 新增依赖同步更新：`#pragma comment(lib)` + `CMakeLists.txt`；若新增运行时 DLL 或资源，还要更新 `cmake/VoxTypeRuntime.cmake` 的安装清单。
 - **版本号只改 `src/app/resource.h` 的 APP_VERSION_MAJOR/MINOR/PATCH/BUILD**，再同步 `README.md` 版本和 `CHANGELOG.md` 记录。`src/app/main.cpp` / `src/app/resources.rc` 用宏自动派生。
 - sherpa-onnx `cxx-api.h` 含非 ASCII 注释，编译需 `/utf-8`。
 - UI 修改后必须编译验证，Settings 检查裁切/重叠，HUD 检查高 DPI。

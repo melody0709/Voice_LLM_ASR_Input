@@ -265,8 +265,7 @@ static void DebugPrintBatchVadTrim() {
 
 
 void WriteLlmLog(const std::wstring& asrText, const std::wstring& llmText) {
-    std::wstring logDir = AppRootDir() + L"\\log";
-    CreateDirectoryW(logDir.c_str(), nullptr);
+    const std::wstring logDir = LogDir();
 
     SYSTEMTIME st;
     GetLocalTime(&st);

@@ -4,7 +4,23 @@
 
 ## Unreleased
 
-- Nothing yet.
+## v0.9.8 (2026-07-27)
+
+### Added
+
+- **Canonical CMake/Ninja release pipeline**: `build.bat` now configures and builds the x64 Release preset, installs the exact runtime payload to `build\run\x64-release`, validates its manifest, and can produce verified Portable and MSI artifacts under `build\packages`.
+- **MSI installer with folder selection and upgrades**: The x64 per-machine installer defaults to `Program Files\VoxType`, offers an Advanced folder picker, records a user-selected directory in HKLM, and restores it before Major Upgrade removes the prior MSI. Permanent UpgradeCode/ProductCode/component identity inputs and a documented upgrade contract are now committed.
+- **Portable release format**: Portable `.7z` packages include `portable.flag`, retain configuration/models/logs beside the executable, and are re-extracted and hash-checked before publication.
+- **Start with Windows setting**: The General tab can create, update, or remove the current user's quoted `HKCU\...\Run\VoxType` entry. The registry is the source of truth, and a moved Portable copy is corrected on Save.
+
+### Changed
+
+- **Installed-data boundary**: Normal installed builds now keep `config.json`, downloaded models, punctuation models, and logs in `%LOCALAPPDATA%\VoxType`; only immutable runtime assets remain in the install directory. Existing beside-EXE `config.json` is copied once when appropriate.
+- **Release safety**: Public MSI versioning uses only `APP_VERSION_MAJOR.MINOR.PATCH`; same-version package names are never overwritten, and existing verified artifacts are reused only when their complete input digest matches.
+
+### Verification
+
+- `build.bat`, `build.bat --package-portable`, and `build.bat --package-msi` pass. Portable extraction and MSI administrative extraction both match the canonical runtime manifest.
 
 ## v0.9.7 (2026-07-12)
 

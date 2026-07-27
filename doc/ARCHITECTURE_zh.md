@@ -259,11 +259,15 @@ models/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8/model.
 
 ## 配置
 
-配置保存到：
+安装版配置保存到：
 
 ```text
-<app-root>/config.json
+%LOCALAPPDATA%\VoxType\config.json
 ```
+
+下载的 ASR/标点模型和日志分别位于同一数据根目录的 `models`、`log`。
+Portable 包通过 `<app-root>\portable.flag` 识别，并继续使用解压目录旁的
+`config.json`、`models`、`log`。
 
 当前结构是扁平 JSON：
 

@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  Current version: <code>v0.9.7</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
+  Current version: <code>v0.9.8</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -56,15 +56,43 @@ Requires Visual Studio 2022 (C++ desktop development workload).
 ### 3. Run
 
 ```powershell
-.\build\VoxType.exe
+.\build\run\x64-release\VoxType.exe
 ```
 
 Right-click the tray icon to open Settings, hold the hotkey to start recording, release to recognize and paste.
+
+### 4. Package for distribution
+
+```powershell
+.\build.bat --package
+```
+
+This creates verified assets under `build\packages`: a Portable `.7z` and an
+x64 per-machine MSI. Both originate from the same canonical runtime payload;
+the packager re-extracts and hashes each result before publishing it.
+
+- The MSI defaults to `Program Files\VoxType`. Choose **Advanced...** during
+  setup to select another directory. That selection is retained by later MSI
+  upgrades.
+- Installed builds store `config.json`, downloaded ASR/punctuation models, and
+  logs in `%LOCALAPPDATA%\VoxType`, so upgrades do not write into Program
+  Files or remove user data.
+- Portable builds include `portable.flag` and keep those files beside the
+  extracted executable instead.
+- Packages without a configured release certificate are deliberately named
+  `-unsigned`; `--require-signing` refuses to publish without the signing
+  environment variables documented in `packaging/windows/UPGRADE_CONTRACT.md`.
 
 ---
 
 <details open>
 <summary><strong>Settings Guide</strong></summary>
+
+**General tab**
+- `Start VoxType when I sign in to Windows` registers the current user's
+  Windows Run entry. It is off by default and can be safely enabled for either
+  the MSI or Portable build; saving after moving a Portable folder corrects its
+  stored executable path.
 
 **Recognition tab**
 - `ASR Backend` — Select between `Local (sherpa-onnx)`, `Volcano Engine`, `Baidu Cloud`, `Qwen ASR`, `MiMo ASR`, and `Doubao IME (Free)`

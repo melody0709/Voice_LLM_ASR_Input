@@ -3,16 +3,29 @@
 #   .\download_models.ps1              # 交互式菜单
 #   .\download_models.ps1 -Models 1,3  # 命令行选择
 #   .\download_models.ps1 -Models all  # 下载全部
+#   .\download_models.ps1 -Destination C:\Users\me\AppData\Local\VoxType\models
 
 param(
-    [string]$Models = ""
+    [string]$Models = "",
+    [string]$Destination = "",
+    [string]$Aria2Path = ""
 )
 
 $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$modelsDir = Join-Path $scriptDir "models"
-$aria2c = Join-Path $scriptDir "aria2c.exe"
+$modelsDir = if ([string]::IsNullOrWhiteSpace($Destination)) {
+    Join-Path $scriptDir "models"
+}
+else {
+    [System.IO.Path]::GetFullPath($Destination)
+}
+$aria2c = if ([string]::IsNullOrWhiteSpace($Aria2Path)) {
+    Join-Path $scriptDir "aria2c.exe"
+}
+else {
+    [System.IO.Path]::GetFullPath($Aria2Path)
+}
 
 if (!(Test-Path $modelsDir)) {
     New-Item -ItemType Directory -Path $modelsDir | Out-Null
@@ -95,8 +108,7 @@ function Download-Model {
     Write-Host "[DOWNLOAD] $($model.Name) ($($model.Size))..." -ForegroundColor Yellow
     
     if (Test-Path $aria2c) {
-        $args = "-x 4 -s 4 -c --console-log-level=notice --summary-interval=0 -d $modelsDir -o $($model.File) $($model.Url)"
-        Start-Process -FilePath $aria2c -ArgumentList $args -Wait -NoNewWindow
+        & $aria2c -x 4 -s 4 -c "--console-log-level=notice" "--summary-interval=0" -d $modelsDir -o $model.File $model.Url
         if ($LASTEXITCODE -ne 0) {
             Write-Host "[ERROR] Failed to download $($model.Name)" -ForegroundColor Red
             return $false

@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <?include ProductIdentity.wxi ?>
+  <?include "$(var.GeneratedWixDirectory)\ProductInstance.generated.wxi" ?>
+
+  <Package
+      Name="VoxType"
+      Manufacturer="melody0709"
+      Version="$(var.VoxTypeProductVersion)"
+      ProductCode="$(var.VoxTypeProductCode)"
+      UpgradeCode="$(var.VoxTypeUpgradeCode)"
+      Scope="perMachine"
+      InstallerVersion="500"
+      Compressed="yes">
+    <!-- Keep removal transactional so a failed upgrade can roll back to N-1. -->
+    <MajorUpgrade
+        Schedule="afterInstallInitialize"
+        AllowSameVersionUpgrades="no"
+        DowngradeErrorMessage="A newer version of VoxType is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+    <UIRef Id="VoxTypeInstallerUi" />
+    <Property Id="VOXTYPE_INSTALLER_INPUT_SHA256" Value="$(var.VoxTypeInstallerInputSha256)" />
+
+    <!--
+      Restore the directory selected by the preceding MSI before
+      RemoveExistingProducts. On a fresh install INSTALLFOLDER defaults to
+      Program Files\VoxType through the directory tree below.
+    -->
+    <Property Id="INSTALLFOLDER">
+      <RegistrySearch
+          Id="SearchVoxTypeInstallFolder"
+          Root="HKLM"
+          Key="Software\VoxType"
+          Name="InstallFolder"
+          Type="raw"
+          Bitness="always64" />
+    </Property>
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="VoxType">
+        <Component
+            Id="cmp_VoxTypeInstallFolderRegistry"
+            Guid="$(var.VoxTypeInstallFolderRegistryComponentGuid)"
+            Bitness="always64">
+          <RegistryValue
+              Root="HKLM"
+              Key="Software\VoxType"
+              Name="InstallFolder"
+              Type="string"
+              Value="[INSTALLFOLDER]"
+              KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="VoxTypeProgramMenuFolder" Name="VoxType">
+        <Component
+            Id="cmp_VoxTypeStartMenuShortcut"
+            Guid="$(var.VoxTypeStartMenuShortcutComponentGuid)"
+            Bitness="always64">
+          <Shortcut
+              Id="VoxTypeStartMenuShortcut"
+              Name="VoxType"
+              Target="[INSTALLFOLDER]VoxType.exe"
+              WorkingDirectory="INSTALLFOLDER" />
+          <RemoveFolder Id="RemoveVoxTypeProgramMenuFolder" On="uninstall" />
+          <RegistryValue
+              Root="HKCU"
+              Key="Software\VoxType"
+              Name="StartMenuShortcut"
+              Type="integer"
+              Value="1"
+              KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="VoxTypeFeature" Title="VoxType" Level="1">
+      <ComponentGroupRef Id="VoxTypeRuntimeFiles" />
+      <ComponentRef Id="cmp_VoxTypeInstallFolderRegistry" />
+      <ComponentRef Id="cmp_VoxTypeStartMenuShortcut" />
+    </Feature>
+  </Package>
+</Wix>

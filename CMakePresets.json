@@ -1,0 +1,34 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "x64-release",
+      "displayName": "x64 Release (Ninja)",
+      "description": "Canonical VoxType product build and runtime install source.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/cmake/x64-release",
+      "architecture": {
+        "value": "x64",
+        "strategy": "external"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "x64-release",
+      "configurePreset": "x64-release",
+      "configuration": "Release",
+      "targets": [
+        "VoxType"
+      ]
+    }
+  ]
+}

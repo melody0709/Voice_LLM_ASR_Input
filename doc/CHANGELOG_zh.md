@@ -4,7 +4,21 @@
 
 ## Unreleased
 
-- 暂无。
+## v0.9.8 (2026-07-27)
+
+### 新增
+
+- **统一构建与发布链路**：`build.bat` 现以 CMake/Ninja 为唯一构建入口，生成并校验 `build\run\x64-release` 规范运行载荷，可输出 Portable `.7z` 和 x64 MSI。
+- **可选安装目录的 MSI**：安装器默认安装到 `Program Files\VoxType`，可通过 **Advanced...** 选择其他目录；Major Upgrade 会在移除旧 MSI 前恢复该目录，因此连续升级不会回退到默认位置。
+- **开机自启动设置**：General 页增加“登录 Windows 时启动 VoxType”，使用当前用户 Run 注册表项；移动 Portable 文件夹后保存即可修复路径。
+
+### 变更
+
+- 普通安装版的配置、下载模型、标点模型和日志改存 `%LOCALAPPDATA%\VoxType`；Portable 通过 `portable.flag` 保持数据随解压目录携带。
+
+### 验证
+
+- `build.bat`、Portable 解压哈希校验、MSI 管理安装解包校验均通过。
 
 ## v0.9.7 (2026-07-12)
 

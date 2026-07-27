@@ -1,0 +1,26 @@
+<Project Sdk="WixToolset.Sdk/7.0.0">
+  <PropertyGroup>
+    <OutputType>Package</OutputType>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <Cultures>en-US</Cultures>
+    <SuppressIces>ICE60</SuppressIces>
+    <OutputName Condition="'$(VoxTypeMsiOutputName)' != ''">$(VoxTypeMsiOutputName)</OutputName>
+    <OutputPath Condition="'$(VoxTypeMsiOutputDirectory)' != ''">$(VoxTypeMsiOutputDirectory)</OutputPath>
+    <IntermediateOutputPath Condition="'$(VoxTypeWixIntermediateDirectory)' != ''">$(VoxTypeWixIntermediateDirectory)</IntermediateOutputPath>
+    <DefineConstants>GeneratedWixDirectory=$(GeneratedWixDirectory);CanonicalPayloadRoot=$(CanonicalPayloadRoot);VoxTypeInstallerInputSha256=$(VoxTypeInstallerInputSha256)</DefineConstants>
+    <EnableDefaultItems>false</EnableDefaultItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="WixToolset.UI.wixext" Version="7.0.0" />
+    <Compile Include="Package.wxs" />
+    <Compile Include="InstallerUi.wxs" />
+    <Compile Include="$(GeneratedWixDirectory)\RuntimeFiles.generated.wxs" />
+  </ItemGroup>
+  <Target Name="RequireVoxTypePackageStaging" BeforeTargets="Build">
+    <Error Condition="'$(GeneratedWixDirectory)' == ''" Text="GeneratedWixDirectory is required." />
+    <Error Condition="'$(CanonicalPayloadRoot)' == ''" Text="CanonicalPayloadRoot is required." />
+    <Error Condition="'$(VoxTypeInstallerInputSha256)' == ''" Text="VoxTypeInstallerInputSha256 is required." />
+    <Error Condition="'$(VoxTypeMsiOutputDirectory)' == ''" Text="VoxTypeMsiOutputDirectory is required." />
+    <Error Condition="'$(VoxTypeWixIntermediateDirectory)' == ''" Text="VoxTypeWixIntermediateDirectory is required." />
+  </Target>
+</Project>
