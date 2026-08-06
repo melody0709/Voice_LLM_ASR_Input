@@ -8,6 +8,7 @@ rem   build.bat                    Incremental CMake build + exact runtime insta
 rem   build.bat --package          Build and create verified MSI + Portable assets
 rem   build.bat --package-msi      Build and create a verified MSI
 rem   build.bat --package-portable Build and create a verified Portable .7z
+rem   build.bat --test             Build and run offline Qwen protocol tests
 rem   build.bat --clean            Remove generated compile/runtime/test/log trees
 rem
 rem Generated layout: cmake\x64-release, run\x64-release, packages,
@@ -18,6 +19,7 @@ set "VOXTYPE_CLEAN_ONLY=0"
 set "VOXTYPE_REBUILD=0"
 set "VOXTYPE_PACKAGE_MODE="
 set "VOXTYPE_REQUIRE_SIGNING=0"
+set "VOXTYPE_TEST_MODE=0"
 
 for %%A in (%*) do (
     if /I "%%~A"=="--clean" set "VOXTYPE_CLEAN_ONLY=1"
@@ -27,6 +29,7 @@ for %%A in (%*) do (
     if /I "%%~A"=="--package-msi" call :set_package_mode Msi
     if /I "%%~A"=="--package-portable" call :set_package_mode Portable
     if /I "%%~A"=="--require-signing" set "VOXTYPE_REQUIRE_SIGNING=1"
+    if /I "%%~A"=="--test" set "VOXTYPE_TEST_MODE=1"
     if /I "%%~A"=="--help" goto :usage
     if /I "%%~A"=="-h" goto :usage
     if /I "%%~A"=="/?" goto :usage
@@ -142,6 +145,20 @@ if errorlevel 1 exit /b !ERRORLEVEL!
 
 call :write_layout_readme
 
+if "!VOXTYPE_TEST_MODE!"=="1" (
+    echo Building offline Qwen protocol regression tests...
+    "%CMAKE_EXE%" --build --preset x64-release --target qwen_free_protocol_test
+    if errorlevel 1 exit /b !ERRORLEVEL!
+    set "VOXTYPE_TEST_EXE=%BUILD_ROOT%\artifacts\tests\qwen_free_protocol_test.exe"
+    if not exist "!VOXTYPE_TEST_EXE!" (
+        echo ERROR: Qwen protocol test executable was not produced: !VOXTYPE_TEST_EXE!
+        exit /b 1
+    )
+    echo Running offline Qwen protocol regression tests...
+    "!VOXTYPE_TEST_EXE!"
+    if errorlevel 1 exit /b !ERRORLEVEL!
+)
+
 if defined VOXTYPE_PACKAGE_MODE (
     echo Packaging !VOXTYPE_PACKAGE_MODE! from the canonical runtime payload...
     set "VOXTYPE_SIGNING_ARGUMENT="
@@ -203,5 +220,5 @@ if not exist "%BUILD_ROOT%" exit /b 0
 exit /b !ERRORLEVEL!
 
 :usage
-echo Usage: build.bat [--rebuild] [--clean] [--package ^| --package-msi ^| --package-portable] [--require-signing]
+echo Usage: build.bat [--rebuild] [--clean] [--test] [--package ^| --package-msi ^| --package-portable] [--require-signing]
 exit /b 0

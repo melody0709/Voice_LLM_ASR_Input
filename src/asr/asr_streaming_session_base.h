@@ -34,8 +34,11 @@ public:
 protected:
     void NotifyStatus(const std::wstring& status) const {
         if (!targetWindow_) return;
-        PostMessageW(targetWindow_, kHudUpdateMessage, 0,
-                     reinterpret_cast<LPARAM>(new std::wstring(status)));
+        auto* message = new std::wstring(status);
+        if (!PostMessageW(targetWindow_, kHudUpdateMessage, 0,
+                          reinterpret_cast<LPARAM>(message))) {
+            delete message;
+        }
     }
 
     void NotifyPartial(const std::wstring& text, bool isFinal) const {
@@ -44,12 +47,17 @@ protected:
         }
     }
 
-    void DispatchFinal(std::wstring text) {
+    void DispatchFinal(std::wstring text,
+                       bool bundledPostProcessApplied = false) {
         if (finalCallback_) {
-            finalCallback_(std::move(text), config_, finalUserData_);
+            finalCallback_(std::move(text), config_,
+                           bundledPostProcessApplied, finalUserData_);
             return;
         }
-        DispatchAsrFinalText(targetWindow_, std::move(text), config_, refineFn_, lastRawAsrText_);
+        AsrFinalMetadata metadata;
+        metadata.bundledPostProcessApplied = bundledPostProcessApplied;
+        DispatchAsrFinalText(targetWindow_, std::move(text), config_, refineFn_,
+                             lastRawAsrText_, metadata);
     }
 
     const Config& ConfigRef() const { return config_; }

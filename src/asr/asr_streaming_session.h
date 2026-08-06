@@ -11,7 +11,14 @@
 #include <string>
 
 using AsrPartialCallback = void(*)(const std::wstring& text, bool isFinal, void* userData);
-using AsrFinalCallback = void(*)(std::wstring text, const Config& config, void* userData);
+// bundledPostProcessApplied is true when the provider has already produced
+// the final post-processed text (for example Qwen-free's VoiceInputWrite or
+// selection rewrite response).  The main pipeline must not run its generic
+// LLM on that text a second time.
+using AsrFinalCallback = void(*)(std::wstring text,
+                                 const Config& config,
+                                 bool bundledPostProcessApplied,
+                                 void* userData);
 
 class IStreamingAsrSession {
 public:

@@ -22,6 +22,7 @@
 #include "baidu_asr.h"
 #include "wasapi_capture.h"
 #include "input_context.h"
+#include "qwen_free_postprocess.h"
 #include "resource.h"
 
 class IStreamingAsrSession;
@@ -43,6 +44,10 @@ constexpr UINT kDoubaoImeSettingsRefreshMessage = WM_APP + 8;
 constexpr UINT kHudUpdateWithOptionsMessage = WM_APP + 9;
 // Main-window only. Settings uses WM_APP + 10 locally for test results.
 constexpr UINT kAsrAttemptFinalMessage = WM_APP + 10;
+constexpr UINT kHotkeyRecordingMessage = WM_APP + 11;
+constexpr WPARAM kHotkeyRecordingStart = 1;
+constexpr WPARAM kHotkeyRecordingStop = 2;
+constexpr WPARAM kHotkeyCapsLockRecordingStop = 3;
 constexpr UINT kTrayId = 1;
 constexpr UINT_PTR kHudHideTimer = 1;
 constexpr UINT_PTR kCapsLockLongPressTimer = 2;
@@ -98,12 +103,18 @@ constexpr int FallbackComboX = 548;
 constexpr int FallbackComboW = 210;
 constexpr int SideBtnW = 92;
 constexpr int SideBtnX = 682;
-constexpr int SmallBtnW = 62;
+constexpr int SmallBtnW = 88;
 constexpr int SmallBtnX = 532;
 constexpr int ActionBtnW = 140;
 constexpr int FooterBtnW = 84;
 constexpr int FooterHeight = 78;
 constexpr int FooterMinTop = 640;
+constexpr int QwenFreeShellPathW = 400;
+constexpr int QwenFreeShellBrowseGap = 12;
+constexpr int QwenFreeOptionCheckW = 200;
+constexpr int QwenFreeOptionGap = 12;
+constexpr int QwenFreeRewriteCheckW = 280;
+constexpr int QwenFreeDebugCheckW = 150;
 constexpr COLORREF BgColor = RGB(246, 248, 251);
 constexpr COLORREF ControlBgColor = RGB(255, 255, 255);
 constexpr COLORREF TextColor = RGB(30, 41, 59);
@@ -208,6 +219,18 @@ constexpr int IDC_MIMO_TEST = 2095;
 constexpr int IDC_DOUBAO_IME_STATUS = 2100;
 constexpr int IDC_DOUBAO_IME_TEST = 2101;
 constexpr int IDC_DOUBAO_IME_RESET = 2102;
+// QwenFree (千问 IME 免费后端，A1 纯协议还原)
+constexpr int IDC_QWEN_FREE_ENABLE = 2200;
+constexpr int IDC_QWEN_FREE_POLISH = 2202;
+constexpr int IDC_QWEN_FREE_PUNCT = 2203;
+constexpr int IDC_QWEN_FREE_CORRECT = 2204;
+constexpr int IDC_QWEN_FREE_REWRITE = 2205;
+constexpr int IDC_QWEN_FREE_DEBUG = 2206;
+constexpr int IDC_QWEN_FREE_SHELL_PATH = 2207;
+constexpr int IDC_QWEN_FREE_BROWSE = 2208;
+constexpr int IDC_QWEN_FREE_STATUS = 2209;
+constexpr int IDC_QWEN_FREE_UTDID = 2210;
+constexpr int IDC_QWEN_FREE_TEST = 2211;
 
 struct Config {
     int configVersion = 0;
@@ -268,11 +291,33 @@ struct Config {
     std::wstring doubaoImeDeviceId;
     std::wstring doubaoImeCdid;
     std::wstring doubaoImeToken;
+    // === QwenFree (千问 IME 免费后端，A1 纯协议还原) ===
+    // VoiceInputWrite is one bundled post-processing request.  The punctuate
+    // and correct fields remain for config-file compatibility with earlier
+    // builds, but are normalized to the same value as qwenFreePolishEnabled.
+    bool qwenFreePolishEnabled = false;   // bundled polish / punctuation / correction
+    bool qwenFreePunctEnabled = false;    // compatibility mirror
+    bool qwenFreeCorrectEnabled = false;  // compatibility mirror
+    bool qwenFreeRewriteEnabled = false;  // 选中文本改写（需选区）
+    bool qwenFreeDebugLog = false;        // 本地 Qwen 协议诊断日志
+    std::wstring qwenFreeShellPath;       // 手动覆盖千问 IME 安装目录
+    std::wstring qwenFreeUtdidOverride;   // 调试用 UTDID 覆盖（通常留空）
     bool enableDebugMode = false;
     bool forceUnicodeInput = false;
     std::wstring audioBackend = L"wasapi";
     std::wstring audioDeviceId;
 };
+
+inline void NormalizeQwenFreePostProcessConfig(Config& config) {
+    const auto flags = qwen_free_postprocess::Normalize({
+        config.qwenFreePolishEnabled,
+        config.qwenFreePunctEnabled,
+        config.qwenFreeCorrectEnabled,
+    });
+    config.qwenFreePolishEnabled = flags.polish;
+    config.qwenFreePunctEnabled = flags.punctuate;
+    config.qwenFreeCorrectEnabled = flags.correct;
+}
 
 struct HotkeyConfig {
     bool ctrl = false;
@@ -361,6 +406,7 @@ extern std::vector<HWND> g_volcengineControls;
 extern std::vector<HWND> g_qwenControls;
 extern std::vector<HWND> g_mimoControls;
 extern std::vector<HWND> g_doubaoImeControls;
+extern std::vector<HWND> g_qwenFreeControls;
 extern std::vector<HWND> g_vadFireredControls;
 extern std::vector<HWND> g_vadSileroControls;
 extern bool g_hudIsRefining;

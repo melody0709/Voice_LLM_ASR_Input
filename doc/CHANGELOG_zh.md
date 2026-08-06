@@ -2,7 +2,149 @@
 
 > 🇬🇧 [English](../CHANGELOG.md)
 
-## Unreleased
+## v0.9.23 (2026-08-06, dev)
+
+### 变更
+
+- **Qwen 原生鉴权边界**：移除源码中的 provider 专用逆向签名材料和已知无效的通用 HMAC 回退。无法生成原生鉴权字段时，ASR/LLM 会在联网前失败，并交给统一备用后端策略处理。
+- **逆向归档边界**：脱敏、可分享的 `reverse/` 文档和工具改由目录内 `.gitignore` 精确管理；敏感证据和外部 `reverse-skill/` 技能库继续忽略。
+
+### 修复
+
+- **选区剪贴板保真**：选区捕获和改写替换会保存并恢复完整 OLE 剪贴板对象，不再丢失图片、文件、HTML、RTF 或应用私有格式。
+- **录音启动延迟**：先启动音频采集，再执行 UI Automation/`WM_COPY` 选区探测，避免目标控件响应缓慢时丢失开头语音。
+- **Qwen DLL 兼容性**：只有 SHA-256 指纹匹配已验证版本时才调用固定 `unet.dll` RVA；Settings 测试始终核对当前 Shell Path。
+- **Settings 响应性**：Qwen 设备身份状态探测移到后台线程，并抑制过期结果。
+- **Qwen 配置和线程安全**：UTDID override 使用 DPAPI 加密并迁移旧明文；运行日志使用 atomic 开关快照；删除重复的 `qwen_free_enabled` 字段。
+- **原生输出生命周期**：确认属于进程堆的签名输出缓冲会被释放；分配器归属未知时保守保留，避免错误释放破坏堆。
+- **Qwen 重放取消语义**：接收器的内部关闭不再留下外部 sticky cancel，传输恢复可以重新连接并重放 PCM。
+- **Qwen 终态/超时完整性**：空 final 不会被旧 partial 掩盖；重放只接受有文本的干净 final（或明确的干净空结果）；收包轮询的所有返回路径都会恢复配置的 WinHTTP 超时。
+- **协议解析器加固**：非法 JSON 转义和数字会被拒绝，不再暴露部分字段；重复控制字段由根路径优先于数组嵌套诊断字段。
+- **保守的 Qwen 后处理默认值**：新建或缺失字段的 Qwen IME Free 配置默认关闭 bundled LLM 润色，需用户显式开启 `Polish (auto)`。
+
+## v0.9.22 (2026-08-05, dev)
+
+### 变更
+
+- **逆向归档隐私收口**：从可分享文档和离线回归样例中移除真实 UTDID、签名样本、候选密钥和加密设备样例；原始本机证据仍保留在发布索引之外。
+- **探针状态记录**：记录原版 Shell FFI 观察结果，并明确区分未完成的本机回环探针与已确认的协议结论。
+
+### 修复
+
+- **Qwen Free 传输恢复**：provider 准备/连接已移出热键路径；临时连接、收包、异常关闭、PCM 发送、停止帧和 final 超时失败会持续缓存到松键，并通过新的 WebSocket session 有界重放完整 PCM。
+- **Qwen Free 终态完整性**：旧 partial 或 WebSocket close 不再伪装成成功 final；只有全部 PCM 已发送且收到无错误的真实 final 帧才接受重放结果。录音不少于三秒但返回空 final 时会执行一次有界重放。
+- **Qwen Free watchdog 与恢复 HUD**：finalize 超时现在覆盖原始 final、重连/重放和 bundled LLM 等待；恢复阶段显示 `Buffering`、`Reconnecting`、`Retrying`，watchdog/改写失败按运行错误处理，不再作为文本粘贴。
+- **Qwen Free WinHTTP 生命周期**：修复接收线程重复 join 竞态，并避免 50 ms 收包轮询超时同时覆盖 WebSocket 发送超时。
+- **热键分发可靠性**：右 Alt、CapsLock 长按和其他录音热键统一向主窗口投递 start/stop 命令；按键自动重复不再堆积重复 start 消息。
+- **选区改写 fallback 安全**：选区改写意图以录音开始时捕获到的选区为准；该次请求不再自动降级到 DashScope，目标窗口后续失效时只报告 `Rewrite skipped`/改写失败，不会退化成普通粘贴。
+- **恢复策略离线回归**：新增 Qwen watchdog/改写错误分类、可重试传输失败、时间戳安全的 HTTP 状态匹配和重放 clean-final 条件测试。
+
+## v0.9.21 (2026-08-05, dev)
+
+### 修复
+
+- **Qwen 选区改写终态响应解析**：当改写响应同时包含 `processing`/加载消息和 `complete` 消息时，只使用终态内容替换选区；同时支持转义响应 envelope，并安全拒绝只有 processing 状态的响应。
+
+## v0.9.20 (2026-08-05, dev)
+
+### 变更
+
+- **Qwen Free bundled 后处理设置**：`Polish (auto)` 现在是原版 `VoiceInputWrite` 响应唯一可编辑的开关；标点和纠错显示为只读的内含能力提示，不再误导为独立开关。
+- **旧配置兼容**：加载和保存时将已有的 `qwen_free_punct`、`qwen_free_correct` 归一化到 bundled 后处理开关，旧配置保持原有效行为。
+
+### 新增
+
+- **Bundled 后处理回归测试**：离线测试覆盖关闭后处理、仅旧标点配置和仅旧纠错配置的归一化行为。
+
+## v0.9.19 (2026-08-05, dev)
+
+### 修复
+
+- **Qwen 连接测试错误分类**：Settings 现在区分 ASR 握手失败和 bundled LLM 后处理失败，不再把两者都显示为 ASR 失败。
+
+## v0.9.18 (2026-08-05, dev)
+
+### 修复
+
+- **Qwen Free 待发送音频溢出**：ASR 连接阻塞导致有界 PCM 队列满载时，不再静默丢弃麦克风音频，而是进入现有的传输失败与重放路径。
+- **Qwen 连接测试错误分类**：Settings 现在区分 ASR 握手失败和 bundled LLM 后处理失败，不再把两者都显示为 ASR 失败。
+- **Portable/MSI 文档链接**：运行载荷现在包含 `doc/README_zh.md`，与根目录 README 中随包提供的中文文档链接一致。
+
+## v0.9.17 (2026-08-05, dev)
+
+### 修复
+
+- **Qwen ASR 二进制帧加固**：生产代码与测试共用原版二段长度帧编码器，并新增 PCM commit、空 PCM 控制帧、大端长度和非法缓冲区回归测试。
+
+## v0.9.16 (2026-08-05, dev)
+
+### 修复
+
+- **Qwen 错误回包隐私**：ASR 和 LLM 诊断现在只保留响应字节数及安全的结构化错误字段，不再把远端原始回包复制到 HUD 或持久化 Debug log。
+
+## v0.9.15 (2026-08-05, dev)
+
+### 修复
+
+- **Qwen ASR query 完整性**：在签名内容和最终 WebSocket URL 中补回必需的 `version=2`，保持原版 `ve → version → sign` 顺序，避免因字段缺失导致不必要的验签/升级失败。
+
+## v0.9.14 (2026-08-05, dev)
+
+### 修复
+
+- **千问 Debug log 隐私**：ASR 调试日志现在只记录回包元数据，不再写入原始 JSON，避免把识别文本复制到本地诊断文件；没有 `message` 的错误回包也会降为通用错误，并保留错误码和长度元数据。
+
+### 新增
+
+- **离线 Qwen 协议回归目标**：`build.bat --test` 现在会在 `build/artifacts/tests` 构建并运行 JSON/HMAC 测试，不改变规范运行载荷，也不需要网络或麦克风。
+
+## v0.9.13 (2026-08-05, dev)
+
+### 修复
+
+- **千问错误诊断隐私**：WebSocket 失败信息和调试日志不再包含完整签名 URL、WSG 签名或加密 UTDID；诊断仍保留非敏感的长度和传输细节。
+- **千问最终处理 watchdog**：为 ASR final 响应和 bundled LLM 后处理分别预留等待时间，避免正常但较慢的润色/改写请求被误判为流式超时。
+
+## v0.9.12 (2026-08-05, dev)
+
+### 修复
+
+- **千问协议字符串转换安全性**：修复 UTF-8 转换辅助函数少分配一个字节/字符、但 Win32 API 仍写入结尾 NUL 的问题，避免 Qwen ASR/LLM 诊断和 UTDID 处理发生越界写。
+- **千问连接测试结果语义**：Settings 探测现在检查 ASR，并在启用后处理时检查 Qwen LLM；LLM 失败不再被误报为整体连接成功。
+- **千问 LLM 响应校验**：HTTP 200 但没有任何输出文本时，现在视为无效后处理结果，并安全回退到 ASR 原文。
+- **千问选区改写首轮闭环**：新增 UI Automation/`WM_COPY` 选区捕获、`VoiceInputRewrite` 指令传递、安全替换，以及微信 `WM_CHAR` 兼容；识别期间若目标窗口、进程、焦点或选区发生变化，会放弃替换而不会操作其他控件。
+- **选区改写 fallback 安全**：Qwen Free 选区改写期间若主链路失败，不再启动普通 ASR fallback，避免把语音改写指令当作普通文本粘贴进原选区。
+
+- **流式 fallback 路由修复**：fallback 现在按后端实际类型选择原生流式或批处理 session；Qwen IME Free 作为 fallback 时不会误落入本地 ASR 默认分支，Qwen IME 传输错误也会统一参与 fallback 判断。
+- **Qwen 响应解析加固**：ASR 与 LLM 控制帧现在共用支持嵌套层级、转义字符和 Unicode 的 JSON 字段读取器，避免识别文本内部的伪字段干扰结果解析。
+- **千问 UTDID 显示隐私**：Settings 不再显示完整设备指纹，只显示首尾摘要；协议鉴权仍在内部使用完整值。
+- **架构文档同步**：补齐已交付的 Qwen IME Free A1/A2 流式链路、bundled 后处理语义、选区改写安全边界、fallback 支持和持久化配置说明。
+
+## v0.9.11 (2026-08-04, dev)
+
+### 变更
+
+- **千问 IME 免费后端切换为 A1 纯协议还原**：`qwen_free` provider 不再直接调用 `QianwenShellEmbedded.dll` ABI（路径 B），改为基于逆向得到的 WSG 签名格式和内置协议密钥从零实现 ASR WebSocket + LLM HTTP 全协议，并复用本机已安装千问 IME 的 `UTDID.dll` 缓存或注册表中的 UTDID。VoxType 现在自行执行 WASAPI 采集并把 PCM 喂给自有协议层，与 `qwen`、`volcengine`、`doubao_ime` 流式后端一致。
+- **移除路径 B ABI 加载器**：删除 `qwen_free_asr.h/.cpp`（`QwenFreeAbi` / `QwenFreeAbiLoader` 路径 B 基础设施），移除 `qwen_free_use_path_b` 配置项与 Settings 中的「Path B: ABI direct」勾选框。Settings 的「Test Connection」按钮改为探测 UTDID 获取。
+
+### 新增
+
+- **协议层模块**：`qwen_free_proto_sign.{h,cpp}`（HMAC-SHA1 + WSG 签名）、`qwen_free_proto_utdid.{h,cpp}`（通过 DLL/注册表/手动覆盖获取 UTDID）、`qwen_free_proto_asr.{h,cpp}`（WebSocket ASR）、`qwen_free_proto_llm.{h,cpp}`（HTTP LLM 润色/标点/纠错）。四者均为纯 C++，除复用 `UTDID.dll` 做设备指纹外不依赖任何千问 DLL。
+
+### 修复
+
+- **`qwen_free` 录音流水线**：不再为 `qwen_free` 跳过本地 WASAPI 采集。原路径 B 让千问 IME 在内部采集音频，导致麦克风冲突并绕过 VoxType 的 `too_short` / `no_speech` 守卫。A1 下 VoxType 自行采集音频，应用与其它流式后端相同的 VAD trim + watchdog 流程。
+- **UTDID 失败时回退到 dashscope qwen**：若 UTDID 获取失败（未安装千问 IME）且用户已配置 `qwenApiKey`，`qwen_free` 会自动回退到 dashscope `qwen` 流式后端，而不是直接报错。
+- **WebSocket 升级诊断**：`qwen_free_proto_asr` 现在在 `WinHttpWebSocketCompleteUpgrade` 之前查询 HTTP 状态码，遇到非 101 响应时读取最多 1 KB 错误体并报告 `WebSocket upgrade failed (HTTP <code>): <body>`，替代无意义的通用错误 `WinHttpWebSocketCompleteUpgrade failed: 4317`（`ERROR_WINHTTP_OPERATION_CANCELLED`）。这能暴露服务端拒绝原因，如 WSG 签名错误、UTDID 非法或缺失 `kps_wg`。
+- **WSG 签名格式修正**：基于 Ghidra 逆向 `unet.dll`（`UNetCrypt::SignWithNumber` 调用链）和已脱敏的千问 IME 进程内存签名样本，签名 content 改用 URL 出现顺序（非字典序），URL 字段名改为 `sign`（非 `sign_wg`），签名放在 URL 末尾（`version` 之后）。协议密钥确认为 HMAC-SHA1 key 用法（不拼接到 content）。
+
+## v0.9.10 (2026-08-04, dev)
+
+### 新增
+
+- **千问 IME 免费后端（逆向接入）**：新增云端 ASR provider `qwen_free`，通过千问 IME 暴露的 C ABI（`QianwenShellEmbedded.dll`）复用本机已安装千问 IME 的语音后端。无需 API Key，headless 运行，复用千问 IME 的 WSG 鉴权、ASR WebSocket 端点与 LLM 润色/标点/纠错链路。详见 [reverse/](../reverse/) 目录的逆向报告与集成蓝图。
+- **逆向工作目录**：新增 `reverse/` 目录，包含 `README.md`、`INVENTORY.md`、`PLAN.md` 与 `work/` 子目录（`FINDINGS.md`、`PROTOCOL.md`、`INTEGRATION.md` 及 dumpbin/strings/内存扫描产物）。
+- **整合进行中**：`qwen_free_asr.h/.cpp` ABI 加载器、`qwen_free_streaming_session.h/.cpp` IStreamingAsrSession 实现、`qwen_free_llm.h/.cpp` LLM 后处理骨架已挂入 `qwen_free` provider 开关之下。
 
 ## v0.9.9 (2026-07-28)
 

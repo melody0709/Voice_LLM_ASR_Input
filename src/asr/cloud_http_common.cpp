@@ -5,6 +5,8 @@
 
 namespace {
 
+constexpr size_t kMaxCloudHttpBodyBytes = 16u * 1024u * 1024u;
+
 class ScopedWinHttpHandle {
 public:
     explicit ScopedWinHttpHandle(HINTERNET handle = nullptr) : handle_(handle) {}
@@ -68,6 +70,12 @@ CloudHttpResponse SendCloudHttpRequest(const CloudHttpRequest& request) {
     void* bodyData = request.body.empty()
         ? WINHTTP_NO_REQUEST_DATA
         : const_cast<BYTE*>(request.body.data());
+    if (request.body.size() >
+        static_cast<size_t>((std::numeric_limits<DWORD>::max)())) {
+        response.winhttpError = ERROR_INSUFFICIENT_BUFFER;
+        response.failedStep = L"request body too large";
+        return response;
+    }
     DWORD bodySize = static_cast<DWORD>((std::min)(
         request.body.size(),
         static_cast<size_t>((std::numeric_limits<DWORD>::max)())));
@@ -108,6 +116,15 @@ CloudHttpResponse SendCloudHttpRequest(const CloudHttpRequest& request) {
             return response;
         }
         if (bytesAvailable == 0) break;
+
+        if (response.body.size() > kMaxCloudHttpBodyBytes ||
+            static_cast<size_t>(bytesAvailable) >
+                kMaxCloudHttpBodyBytes - response.body.size()) {
+            response.winhttpError = ERROR_WINHTTP_RESPONSE_DRAIN_OVERFLOW;
+            response.failedStep = L"response body too large";
+            response.body.clear();
+            return response;
+        }
 
         std::string chunk(bytesAvailable, '\0');
         DWORD bytesRead = 0;

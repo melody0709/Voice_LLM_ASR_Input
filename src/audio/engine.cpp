@@ -6,6 +6,8 @@
 #include "asr_streaming_session.h"
 #include "streaming_vad_trimmer.h"
 #include "utils.h"
+#include "qwen_free_postprocess.h"
+#include "asr_runtime_log.h"
 
 #include <algorithm>
 #include <cmath>
@@ -453,6 +455,7 @@ void LoadConfig() {
     std::ostringstream buffer;
     buffer << file.rdbuf();
     const std::string json = buffer.str();
+    bool migratePlaintextQwenUtdid = false;
     g_config.modelId = Utf8ToWide(ExtractJsonString(json, "model_id", WideToUtf8(g_config.modelId)));
     g_config.modelDir = Utf8ToWide(ExtractJsonString(json, "model_dir", WideToUtf8(g_config.modelDir)));
     g_config.threads = Utf8ToWide(ExtractJsonString(json, "threads", WideToUtf8(g_config.threads)));
@@ -522,6 +525,38 @@ void LoadConfig() {
     g_config.doubaoImeDeviceId = Utf8ToWide(ExtractJsonString(json, "doubao_ime_device_id", ""));
     g_config.doubaoImeCdid = Utf8ToWide(ExtractJsonString(json, "doubao_ime_cdid", ""));
     g_config.doubaoImeToken = llm::DecryptString(Utf8ToWide(ExtractJsonString(json, "doubao_ime_token", "")));
+    // QwenFree (千问 IME 免费后端，A1 纯协议还原)
+    g_config.qwenFreePolishEnabled = ExtractJsonBool(json, "qwen_free_polish", false);
+    g_config.qwenFreePunctEnabled = ExtractJsonBool(json, "qwen_free_punct", false);
+    g_config.qwenFreeCorrectEnabled = ExtractJsonBool(json, "qwen_free_correct", false);
+    // Keep the persisted key and implementation for future research, but
+    // temporarily disable selection rewrite regardless of the stored value.
+    (void)ExtractJsonBool(json, "qwen_free_rewrite", false);
+    g_config.qwenFreeRewriteEnabled = false;
+    g_config.qwenFreeDebugLog = ExtractJsonBool(json, "qwen_free_debug_log", false);
+    g_config.qwenFreeShellPath = Utf8ToWide(ExtractJsonString(json, "qwen_free_shell_path", ""));
+    {
+        const std::wstring storedUtdid = Utf8ToWide(
+            ExtractJsonString(json, "qwen_free_utdid_override", ""));
+        const std::wstring decryptedUtdid = llm::DecryptString(storedUtdid);
+        // One-time migration from versions that stored the debug identity as
+        // plaintext. Invalid encrypted data is rejected later by UTDID shape
+        // validation and is never copied into logs.
+        g_config.qwenFreeUtdidOverride = decryptedUtdid.empty()
+            ? storedUtdid : decryptedUtdid;
+        migratePlaintextQwenUtdid =
+            storedUtdid.size() == 24 && decryptedUtdid.empty() &&
+            std::all_of(storedUtdid.begin(), storedUtdid.end(), [](wchar_t ch) {
+                return (ch >= L'0' && ch <= L'9') ||
+                       (ch >= L'A' && ch <= L'Z') ||
+                       (ch >= L'a' && ch <= L'z');
+            });
+    }
+    NormalizeQwenFreePostProcessConfig(g_config);
+    asr_runtime_log::SetQwenFreeEnabled(
+        g_config.qwenFreeDebugLog &&
+        (g_config.asrBackend == L"qwen_free" ||
+         g_config.fallbackAsrBackend == L"qwen_free"));
     g_config.audioBackend = Utf8ToWide(ExtractJsonString(json, "audio_backend", WideToUtf8(g_config.audioBackend)));
     g_config.audioDeviceId = Utf8ToWide(ExtractJsonString(json, "audio_device_id", ""));
     g_config.configVersion = ExtractJsonInt(json, "config_version", 0);
@@ -560,7 +595,8 @@ void LoadConfig() {
         }
     }
 
-    if (g_config.configVersion < kCurrentConfigVersion) {
+    if (g_config.configVersion < kCurrentConfigVersion ||
+        migratePlaintextQwenUtdid) {
         g_config.configVersion = kCurrentConfigVersion;
         SaveConfig();
     }
@@ -568,6 +604,11 @@ void LoadConfig() {
 
 void SaveConfig() {
     SaveCurrentProvider();
+    NormalizeQwenFreePostProcessConfig(g_config);
+    asr_runtime_log::SetQwenFreeEnabled(
+        g_config.qwenFreeDebugLog &&
+        (g_config.asrBackend == L"qwen_free" ||
+         g_config.fallbackAsrBackend == L"qwen_free"));
     std::ofstream file(ConfigPath(), std::ios::binary | std::ios::trunc);
     file << "{\n"
          << "  \"config_version\": " << g_config.configVersion << ",\n"
@@ -629,6 +670,14 @@ void SaveConfig() {
          << "  \"doubao_ime_device_id\": \"" << EscapeJson(g_config.doubaoImeDeviceId) << "\",\n"
          << "  \"doubao_ime_cdid\": \"" << EscapeJson(g_config.doubaoImeCdid) << "\",\n"
          << "  \"doubao_ime_token\": \"" << EscapeJson(llm::EncryptString(g_config.doubaoImeToken)) << "\",\n"
+         << "  \"qwen_free_polish\": " << (g_config.qwenFreePolishEnabled ? 1 : 0) << ",\n"
+         << "  \"qwen_free_punct\": " << (g_config.qwenFreePunctEnabled ? 1 : 0) << ",\n"
+         << "  \"qwen_free_correct\": " << (g_config.qwenFreeCorrectEnabled ? 1 : 0) << ",\n"
+         << "  \"qwen_free_rewrite\": " << (g_config.qwenFreeRewriteEnabled ? 1 : 0) << ",\n"
+         << "  \"qwen_free_debug_log\": " << (g_config.qwenFreeDebugLog ? 1 : 0) << ",\n"
+         << "  \"qwen_free_shell_path\": \"" << EscapeJson(g_config.qwenFreeShellPath) << "\",\n"
+         << "  \"qwen_free_utdid_override\": \""
+         << EscapeJson(llm::EncryptString(g_config.qwenFreeUtdidOverride)) << "\",\n"
          << "  \"audio_backend\": \"" << EscapeJson(g_config.audioBackend) << "\",\n"
          << "  \"audio_device_id\": \"" << EscapeJson(g_config.audioDeviceId) << "\"\n"
          << "}\n";

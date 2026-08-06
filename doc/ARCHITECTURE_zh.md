@@ -11,7 +11,7 @@ flowchart LR
     User["用户长按快捷键"] --> Frontend["VoxType.exe<br/>Win32 托盘前端"]
     Frontend --> Recorder["WASAPI 录音<br/>48kHz→16kHz 重采样"]
     Recorder --> Engine["AsrEngine (C++)<br/>sherpa-onnx-cxx-api"]
-    Recorder --> Cloud["云端 ASR worker<br/>火山 / 百度 / Qwen / MiMo / 豆包输入法"]
+    Recorder --> Cloud["云端 ASR worker<br/>火山 / 百度 / Qwen / MiMo / 豆包输入法 / 千问 IME Free"]
     Engine --> VAD["VAD<br/>Silero / FireRed"]
     VAD --> ASR["sherpa-onnx ASR<br/>FireRed/SenseVoice"]
     ASR --> Punct["CT-Transformer 标点"]
@@ -32,7 +32,7 @@ flowchart LR
 - 监听全局快捷键。
 - 采集麦克风音频。
 - 通过 `AsrEngine` 直接调用 sherpa-onnx C++ API 完成本地 VAD、ASR、标点。
-- 可选将音频发送到云端 ASR 后端：百度、火山引擎、Qwen ASR、MiMo ASR 或实验性豆包输入法 ASR。
+- 可选将音频发送到云端 ASR 后端：百度、火山引擎、Qwen ASR、MiMo ASR、实验性豆包输入法 ASR 或逆向还原的千问 IME Free。
 - 将最终文本注入当前应用。
 
 `AsrEngine` 内部缓存 `OfflineRecognizer`、`VoiceActivityDetector`、`OfflinePunctuation`，同一模型不会重复加载。
@@ -67,6 +67,10 @@ flowchart LR
 | `src/asr/baidu_asr.h` | 百度智能云 ASR 模块（header-only） |
 | `src/asr/volcengine_asr.h` | 火山引擎（豆包）ASR 模块（header-only，WebSocket） |
 | `src/asr/qwen_asr.h` / `src/asr/qwen_asr.cpp` | Qwen ASR realtime WebSocket 客户端 |
+| `src/asr/qwen_free_streaming_session.h` / `src/asr/qwen_free_streaming_session.cpp` | 千问 IME Free 流式 session：本地 PCM、可重放 final、bundled LLM 后处理和（当前禁用的）选区改写实验安全校验 |
+| `src/asr/qwen_free_proto_asr.h` / `src/asr/qwen_free_proto_asr.cpp` | 千问 IME Free ASR WebSocket 协议：UTDID/WSG query、长度前缀 PCM/JSON 帧、partial/final 解析和连接诊断 |
+| `src/asr/qwen_free_proto_llm.h` / `src/asr/qwen_free_proto_llm.cpp` | 千问 IME Free `VoiceInputWrite` / `VoiceInputRewrite` HTTP 协议及响应校验 |
+| `src/asr/qwen_free_proto_sign.*`、`qwen_free_proto_unet.*`、`qwen_free_proto_utdid.*` | 千问 IME Free WSG 签名、native `unet.dll` 尝试及 A1 回退、本机 UTDID 获取 |
 | `src/asr/mimo_asr.h` / `src/asr/mimo_asr.cpp` | 小米 MiMo ASR 批量客户端（`mimo-v2.5-asr`，通过 `/chat/completions` 上传 WAV） |
 | `src/asr/doubao_ime_asr.h` / `src/asr/doubao_ime_asr.cpp` | 实验性豆包输入法客户端：设备注册、token bootstrap、Opus 编码、手写 protobuf over WebSocket |
 | `src/asr/doubao_ime_streaming_session.h` / `src/asr/doubao_ime_streaming_session.cpp` | 豆包输入法 `IStreamingAsrSession` 封装：pending PCM buffer、replay retry、partial HUD、凭据写回 |
@@ -101,12 +105,13 @@ flowchart LR
 
 ### Settings
 
-Settings 是普通 Win32 窗口，目前分 4 个 tab：
+Settings 是普通 Win32 窗口，目前分 5 个 tab：
 
+- `General`: 录音快捷键，以及可选的当前用户 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\VoxType` 开机启动注册。
 - `Recognition`: ASR Backend、可选 Fallback 后端、模型、模型目录、线程、VAD、VAD 模型、Punctuation、快捷键配置。
 - `LLM`: 供应商选择（Provider dropdown + [+] / [−]）、API Base URL、API Key、Model、Test Connection、Debug log、Extra Params。
 - `LLM Prompt`: System Prompt 编辑（多行）、Basic Fix / Deep Fix 预设按钮。
-- `Cloud ASR`: 云端供应商选择、百度/火山引擎/Qwen/MiMo/豆包输入法专属字段。
+- `Cloud ASR`: 云端供应商选择、百度/火山引擎/Qwen/MiMo/豆包输入法/千问 IME Free 专属字段。
 
 打开 Settings 时：
 
@@ -204,16 +209,17 @@ Settings 是普通 Win32 窗口，目前分 4 个 tab：
 - **百度智能云** 通过 `BaiduAsrSession` 走 batch-style REST 流程。
 - **火山引擎** 保留已验证的 WebSocket 协议实现于 `src/asr/volcengine_asr.h`；`main.cpp` 只在外围编排 replay retry、watchdog 和 HUD 分发。
 - **Qwen ASR** 通过 `src/asr/qwen_asr.h/.cpp` 接入 DashScope `qwen3-asr-flash-realtime`。主录音链路在录音期间持续发送 PCM chunk，独立线程接收 partial/final 事件；产品层固定 Manual turn detection（`turn_detection: null`），松开后发送 `input_audio_buffer.commit` + `session.finish`。
+- **千问 IME Free** 通过 `src/asr/qwen_free_proto_*` 和 `src/asr/qwen_free_streaming_session.cpp` 接入本机千问 IME 的逆向协议。VoxType 自己采集 WASAPI PCM，获取本机 UTDID，并只对 SHA-256 指纹匹配的兼容 `unet.dll` 调用版本相关 WSG FFI；原生鉴权不可用时会在联网前失败并进入统一 fallback。连接成功后发送 `0xf00` PCM commit 和最终 stop 帧，并可选调用 `VoiceInputWrite` HTTP 后处理。该后端绕过本地 VAD，保留完整 PCM 交给服务端分段；`Punctuate` 与 `Correct` 是 bundled 响应的兼容开关，不是独立请求；`Rewrite selection` 目前仅保留为禁用的实验协议路径，配置加载/保存会强制关闭，待兼容字段与原版同场景请求/响应完成对照后再重新评审。
 - **MiMo ASR** 通过 `src/asr/mimo_asr.h/.cpp` 接入小米 MiMo `mimo-v2.5-asr`。它是批量云端后端：16k/16-bit/mono PCM 可先经 VAD trim，再封装为 WAV，通过 `{baseUrl}/chat/completions` 上传。
 - **豆包输入法** 通过 `src/asr/doubao_ime_asr.h/.cpp` 和 `src/asr/doubao_ime_streaming_session.cpp` 接入非官方输入法端点 `frontier-audio-ime-ws.doubao.com`，不是火山引擎官方 `openspeech.bytedance.com` 协议。客户端会注册输入法风格设备、获取 `asr_config.app_key`、使用 vendored static `libopus` 编码 20ms PCM，并通过 WinHTTP WebSocket 发送手写 protobuf 消息（`StartTask`、`StartSession`、`TaskRequest`、`FinishSession`）。凭据写回由主线程完成；auth/token 错误会清凭据重试，瞬态启动失败会在 PCM 继续缓冲时重试，abort 会关闭 bootstrap/WebSocket 活跃句柄以避免卡死。由于输入法服务可能在一次热键按住期间发出多个云端 VAD final segment，或因文本过长清空/重启 partial 窗口，streaming session 会维护“已提交前缀 + 当前 partial 窗口”、跨 WebSocket 事件累计 final 文本；`FinishSession` 之前的 final 不会结束松手后的 final 等待。HUD 展示是 Doubao 专属的 UI 层逻辑：三行文本区以内直接显示 live partial，超过后清空前文显示，只从当前最后一句重新开始；清屏后的新页会继续正常累积，直到再次超过三行正文才会再次清屏，最终上屏完整文本不受影响。
 
-开启 `Enable VAD` 时，Qwen 和火山引擎流式后端会先通过 `StreamingVadTrimmer` 做本地 VAD trim 再上传，批量云端后端使用 `BatchVadTrimmer` 后再上传。Doubao IME 刻意绕过本地 VAD，直接将原始 PCM 编码为 Opus 上传。参与 VAD 的路径会输出 provider-independent PCM bytes，各 provider session 再按自己的协议重新切 chunk。云端 replay buffer、自适应 finalize timeout、空 final retry 和结果分类等公共策略由 `cloud_asr_common.*` 和 `asr_result.*` 复用。
+开启 `Enable VAD` 时，Qwen ASR 和火山引擎流式后端会先通过 `StreamingVadTrimmer` 做本地 VAD trim 再上传，批量云端后端使用 `BatchVadTrimmer` 后再上传。千问 IME Free 和 Doubao IME 刻意绕过本地 VAD：前者上传完整 PCM，后者将原始 PCM 编码为 Opus，均依赖服务端自身分段。参与 VAD 的路径会输出 provider-independent PCM bytes，各 provider session 再按自己的协议重新切 chunk。云端 replay buffer、自适应 finalize timeout、空 final retry 和结果分类等公共策略由 `cloud_asr_common.*` 和 `asr_result.*` 复用。
 
 当前验证状态：跨事件云端 VAD 分段累计修复后，豆包输入法 live protocol probe、16kHz mono WAV 识别 probe、`--streaming` 发送/drain probe 已通过，`.\build.bat` 和 `git diff --check` 已通过；`git diff --check` 仅有既有 CRLF 提示。长录音热键实测复核、断网 watchdog 和额外 DPI 检查仍需人工桌面冒烟。
 
 ### ASR Fallback 编排与诊断
 
-Fallback 采用串行策略：primary 先完成自己的 retry/replay，只有最终结果分类为 `OperationalError` 才会用同一段 16kHz/s16le/mono 原始 PCM 启动已配置的 fallback。`Too short`、`No speech detected`、主动取消、stale attempt、未启用/与 primary 相同的 fallback，以及 primary 可用文本都不会触发 fallback。火山引擎可作为 primary，但有意不作为 fallback target；Local、百度、Qwen、MiMo 和 Doubao IME recorded request 可作为 fallback。
+Fallback 采用串行策略：primary 先完成自己的 retry/replay，只有最终结果分类为 `OperationalError` 才会用同一段 16kHz/s16le/mono 原始 PCM 启动已配置的 fallback。`Too short`、`No speech detected`、主动取消、stale attempt、未启用/与 primary 相同的 fallback，以及 primary 可用文本都不会触发 fallback。火山引擎可作为 primary，但有意不作为 fallback target；Local、百度、Qwen、MiMo、Doubao IME recorded request 和千问 IME Free 可作为 fallback。
 
 `main.cpp` 维护单调递增的 recognition-attempt context，保存 primary config、录音/final 状态、原始 PCM 和 fallback claim。Streaming callback 只向主窗口投递消息。如果 provider 在热键松开前已经耗尽重试并回报 final failure，该结果先保存在 attempt context；松手后先保存完整 PCM、执行 too-short/VAD no-speech 门控，再恢复同一 completion 路径。这样既不会拿不完整音频提前 fallback，也不会因当时尚无 PCM 而绕过 fallback。Watchdog 和 provider callback 通过同一个 final-claim guard 竞争，fallback worker 在 side effect 和 dispatch 前再次检查 attempt id。
 
@@ -292,6 +298,12 @@ Portable 包通过 `<app-root>\portable.flag` 识别，并继续使用解压目�
   "qwen_model": "qwen3-asr-flash-realtime",
   "qwen_language": "",
   "qwen_chunk_ms": 100,
+  "qwen_free_polish": false,
+  "qwen_free_punct": false,
+  "qwen_free_correct": false,
+  "qwen_free_rewrite": false,
+  "qwen_free_debug_log": false,
+  "qwen_free_shell_path": "",
   "mimo_base_url": "https://token-plan-ams.xiaomimimo.com/v1",
   "mimo_model": "mimo-v2.5-asr",
   "mimo_language": "auto",
@@ -301,13 +313,18 @@ Portable 包通过 `<app-root>\portable.flag` 识别，并继续使用解压目�
 }
 ```
 
+对于 Qwen IME Free，`qwen_free_polish` 是 bundled `VoiceInputWrite` 后处理的
+唯一主开关。旧版本的 `qwen_free_punct` 和 `qwen_free_correct` 仅为配置文件
+兼容键，加载和保存时会统一归一化为相同值。
+
 - `llm_provider`：当前选中的供应商名称。
 - `llm_providers_json`：JSON 字符串，存储所有供应商的 endpoint、api_key（DPAPI 加密）、model。
 - `llm_prompt`：自定义 System Prompt（留空使用内置默认）。
 - `enable_llm_debug`：开启后记录 ASR 前后对比到 `log/llm_refine_YYYYMMDD.log`。
-- `asr_backend`：当前 ASR 后端（`local`、`baidu`、`volcengine`、`qwen`、`mimo` 或 `doubao_ime`）。
-- `fallback_asr_backend`：可选串行 fallback（`none`、`local`、`baidu`、`qwen`、`mimo` 或 `doubao_ime`），必须与 `asr_backend` 不同；火山引擎不是 fallback target。
+- `asr_backend`：当前 ASR 后端（`local`、`baidu`、`volcengine`、`qwen`、`mimo`、`doubao_ime` 或 `qwen_free`）。
+- `fallback_asr_backend`：可选串行 fallback（`none`、`local`、`baidu`、`qwen`、`mimo`、`doubao_ime` 或 `qwen_free`），必须与 `asr_backend` 不同；火山引擎不是 fallback target。
 - `qwen_*`：Qwen ASR 连接、模型、语言和 chunk 配置。Turn detection 固定 Manual，不再持久化。
+- `qwen_free_*`：千问 IME Free 启用状态、bundled `VoiceInputWrite` 后处理开关、实验性选区改写、本地协议诊断和可选 shell 目录覆盖。UTDID 通常自动获取，不放入普通示例配置。
 - `mimo_*`：MiMo ASR API key、OpenAI-compatible Base URL、模型和语言（`auto`、`zh`、`en`）；`mimo_api_key` 使用 DPAPI 加密。
 - `doubao_ime_*`：实验性 Doubao IME device id、cdid 和 DPAPI 加密 token；程序可自动注册，也可从 Settings 重置。
 
@@ -315,7 +332,7 @@ Portable 包通过 `<app-root>\portable.flag` 识别，并继续使用解压目�
 
 ### 流式演进
 
-Qwen、火山引擎和豆包输入法已经支持录音期间的云端 partial HUD。本地 ASR、百度和 MiMo 仍是录完后 finalize。后续方向是把 streaming 能力变成明确的 session trait，减少 `main.cpp` 中的 provider-specific orchestration：
+Qwen、千问 IME Free、火山引擎和豆包输入法已经支持录音期间的云端 partial HUD。本地 ASR、百度和 MiMo 仍是录完后 finalize。后续方向是把 streaming 能力变成明确的 session trait，减少 `main.cpp` 中的 provider-specific orchestration：
 
 ```mermaid
 flowchart LR

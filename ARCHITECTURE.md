@@ -11,7 +11,7 @@ flowchart LR
     User["User holds hotkey"] --> Frontend["VoxType.exe<br/>Win32 tray frontend"]
     Frontend --> Recorder["WASAPI recording<br/>48kHz→16kHz resample"]
     Recorder --> Engine["AsrEngine (C++)<br/>sherpa-onnx-cxx-api"]
-    Recorder --> Cloud["Cloud ASR worker<br/>Volcengine / Baidu / Qwen / MiMo / Doubao IME"]
+    Recorder --> Cloud["Cloud ASR worker<br/>Volcengine / Baidu / Qwen / MiMo / Doubao IME / Qwen IME Free"]
     Engine --> VAD["VAD<br/>Silero / FireRed"]
     VAD --> ASR["sherpa-onnx ASR<br/>FireRed/SenseVoice"]
     ASR --> Punct["CT-Transformer punctuation"]
@@ -32,7 +32,7 @@ Single process. Responsibilities:
 - Listen for global hotkeys.
 - Capture microphone audio.
 - Call sherpa-onnx C++ API directly via `AsrEngine` for local VAD, ASR, and punctuation.
-- Optionally route audio to cloud ASR backends: Baidu, Volcengine, Qwen ASR, MiMo ASR, or experimental Doubao IME ASR.
+- Optionally route audio to cloud ASR backends: Baidu, Volcengine, Qwen ASR, MiMo ASR, experimental Doubao IME ASR, or the reverse-engineered Qwen IME Free backend.
 - Inject final text into the current application.
 
 `AsrEngine` internally caches `OfflineRecognizer`, `VoiceActivityDetector`, and `OfflinePunctuation`. The same model is not loaded repeatedly.
@@ -67,6 +67,10 @@ Since v0.6.0, the source code is organized into multiple modules. Current source
 | `src/asr/baidu_asr.h` | Baidu Cloud ASR module (header-only) |
 | `src/asr/volcengine_asr.h` | Volcengine (豆包) ASR module (header-only, WebSocket) |
 | `src/asr/qwen_asr.h` / `src/asr/qwen_asr.cpp` | Qwen ASR realtime WebSocket client |
+| `src/asr/qwen_free_streaming_session.h` / `src/asr/qwen_free_streaming_session.cpp` | Qwen IME Free streaming session: local PCM capture, replay-safe finalization, bundled LLM post-processing, and selection-rewrite safety |
+| `src/asr/qwen_free_proto_asr.h` / `src/asr/qwen_free_proto_asr.cpp` | Qwen IME Free ASR WebSocket protocol: UTDID/WSG query, length-prefixed PCM/JSON frames, partial/final parsing, and connection diagnostics |
+| `src/asr/qwen_free_proto_llm.h` / `src/asr/qwen_free_proto_llm.cpp` | Qwen IME Free `VoiceInputWrite` / `VoiceInputRewrite` HTTP protocol and response validation |
+| `src/asr/qwen_free_proto_sign.*`, `qwen_free_proto_unet.*`, `qwen_free_proto_utdid.*` | Generic HMAC test primitive, fingerprint-gated native `unet.dll` WSG signing, and local UTDID acquisition |
 | `src/asr/mimo_asr.h` / `src/asr/mimo_asr.cpp` | Xiaomi MiMo ASR batch client (`mimo-v2.5-asr`, WAV upload over `/chat/completions`) |
 | `src/asr/doubao_ime_asr.h` / `src/asr/doubao_ime_asr.cpp` | Experimental Doubao IME client: device registration, token bootstrap, Opus encoding, and handwritten protobuf over WebSocket |
 | `src/asr/doubao_ime_streaming_session.h` / `src/asr/doubao_ime_streaming_session.cpp` | Doubao IME `IStreamingAsrSession` wrapper with pending PCM buffer, replay retry, partial HUD, and credential writeback |
@@ -142,7 +146,7 @@ Settings is a standard Win32 window with 5 tabs:
 - `Recognition`: ASR Backend, optional Fallback backend, model, model directory, threads, VAD, VAD model, and Punctuation.
 - `LLM`: Provider selection (Provider dropdown + [+] / [−]), API Base URL, API Key, Model, Test Connection, Debug log, Extra Params.
 - `LLM Prompt`: System Prompt editor (multi-line), Basic Fix / Deep Fix preset buttons.
-- `Cloud ASR`: Cloud provider selection and Baidu/Volcengine/Qwen/MiMo/Doubao IME provider-specific fields.
+- `Cloud ASR`: Cloud provider selection and Baidu/Volcengine/Qwen/MiMo/Doubao IME/Qwen IME Free provider-specific fields.
 
 When Settings is opened:
 
@@ -195,7 +199,7 @@ A borderless capsule HUD is displayed at the bottom center during recording. The
 - Win32 window size uses the current window DPI to convert DIP to physical pixels, avoiding text clipping on high DPI.
 - The recording callback calculates PCM RMS for each audio buffer, normalizes it, and drives the volume bars.
 - Volume bars use attack/release smoothing, redrawn via a ~33ms timer during recording.
-- Displays `Listening...`, `Recognizing...`, final text, or error status. Volcengine, Qwen ASR, and Doubao IME can post partial text to the HUD from their receive/drain threads.
+- Displays `Listening...`, `Recognizing...`, final text, or error status. Volcengine, Qwen ASR, Qwen IME Free, and Doubao IME can post partial text to the HUD from their receive/drain threads.
 
 ### VAD
 
@@ -240,16 +244,17 @@ Cloud backends are optional. Recognition runs remotely, and local punctuation is
 - **Baidu Cloud** uses a batch-style REST flow through `BaiduAsrSession`.
 - **Volcengine** keeps its proven WebSocket protocol implementation in `src/asr/volcengine_asr.h`; `main.cpp` only wraps orchestration, replay retry, watchdog, and HUD dispatch around it.
 - **Qwen ASR** uses DashScope `qwen3-asr-flash-realtime` through `src/asr/qwen_asr.h/.cpp`. The main recording path sends PCM chunks while recording, drains partial/final events on a separate thread, uses Manual turn detection (`turn_detection: null`), and sends `input_audio_buffer.commit` + `session.finish` after release.
+- **Qwen IME Free** uses the locally installed Qianwen IME's reverse-engineered protocol through `src/asr/qwen_free_proto_*` and `src/asr/qwen_free_streaming_session.cpp`. VoxType captures WASAPI PCM itself, acquires the local UTDID, verifies `unet.dll` against an explicit SHA-256 allowlist before calling its version-dependent WSG FFI, connects to the Qianwen ASR WebSocket, sends `0xf00` PCM commits plus the final stop frame, and optionally calls the bundled `VoiceInputWrite` HTTP post-processing endpoint. Missing or incompatible native authentication fails before network I/O and enters normal fallback orchestration. `Punctuate` and `Correct` are compatibility switches for that bundled response rather than independent requests. The `Rewrite selection` implementation remains an experimental, disabled protocol path: config load/save currently force it off until the compatibility-derived request mapping is confirmed against an original-client same-scenario capture.
 - **MiMo ASR** uses Xiaomi MiMo `mimo-v2.5-asr` through `src/asr/mimo_asr.h/.cpp`. It is a batch cloud backend: captured 16k/16-bit/mono PCM is optionally VAD-trimmed, wrapped as WAV, base64 encoded as `data:audio/wav;base64,...`, and posted to `{baseUrl}/chat/completions`.
 - **Doubao IME** uses the unofficial input-method endpoint `frontier-audio-ime-ws.doubao.com` through `src/asr/doubao_ime_asr.h/.cpp` and `src/asr/doubao_ime_streaming_session.cpp`. It is not the Volcengine official `openspeech.bytedance.com` protocol. The client registers a Doubao IME-style device, retrieves `asr_config.app_key`, encodes 20ms PCM frames with vendored static `libopus`, and sends handwritten protobuf messages (`StartTask`, `StartSession`, `TaskRequest`, `FinishSession`) over WinHTTP WebSocket. Credentials are written back to config on the main thread; token/auth failures clear credentials, transient startup failures retry while PCM keeps buffering, and abort closes active bootstrap/WebSocket handles to avoid blocking shutdown/watchdog paths. Because the IME service may emit cloud-side VAD final segments or clear/restart its partial text window during one hotkey hold, the streaming session tracks a committed prefix plus the active partial window and accumulates final text across WebSocket events; pre-`FinishSession` final events do not complete the post-stop wait. The HUD display is Doubao-specific and UI-only: partials are shown live while they fit within three body lines, then the HUD clears previous display text and restarts from the current last sentence; the cleared page accumulates normally until it exceeds three body lines again, and the full final paste text is unchanged.
 
 Current verification status: the Doubao IME silent protocol probe, WAV recognition probe, and `--streaming` send/drain probe have passed against the live endpoint after the cross-event cloud-VAD accumulation fix; `.\build.bat` and `git diff --check` have passed, with only existing CRLF warnings from `git diff --check`. Tray-level manual long-recording retest, network interruption/watchdog recovery, and additional DPI passes still need manual smoke testing.
 
-When `Enable VAD` is on, Qwen and Volcengine streaming backends run audio through `StreamingVadTrimmer` before upload, while batch cloud backends use `BatchVadTrimmer` after recording and before the request. Doubao IME intentionally bypasses local VAD and uploads raw PCM encoded as Opus. The local VAD paths share `VadTrimCore`, trimming head/tail silence while preserving middle pauses. Common cloud behavior such as replay buffer, adaptive finalize timeout, empty final retry, and result classification is shared through `cloud_asr_common.*` and `asr_result.*` where applicable.
+When `Enable VAD` is on, Qwen ASR and Volcengine streaming backends run audio through `StreamingVadTrimmer` before upload, while batch cloud backends use `BatchVadTrimmer` after recording and before the request. Qwen IME Free and Doubao IME intentionally bypass local VAD and upload their raw PCM (Qwen IME Free) or Opus (Doubao IME) streams because each service performs its own segmentation. The local VAD paths share `VadTrimCore`, trimming head/tail silence while preserving middle pauses. Common cloud behavior such as replay buffer, adaptive finalize timeout, empty final retry, and result classification is shared through `cloud_asr_common.*` and `asr_result.*` where applicable.
 
 ### ASR Fallback Orchestration and Diagnostics
 
-Fallback is serial: the primary backend completes its own retry/replay policy first, and only a final `OperationalError` can start the configured fallback with the same raw 16kHz/s16le/mono PCM. `Too short`, `No speech detected`, cancellation, stale attempts, a disabled/same-as-primary fallback, and usable primary text never trigger fallback. Volcengine is supported as a primary backend but is intentionally not offered as a fallback target; Local, Baidu, Qwen, MiMo, and recorded Doubao IME are valid fallback targets.
+Fallback is serial: the primary backend completes its own retry/replay policy first, and only a final `OperationalError` can start the configured fallback with the same raw 16kHz/s16le/mono PCM. `Too short`, `No speech detected`, cancellation, stale attempts, a disabled/same-as-primary fallback, and usable primary text never trigger fallback. Volcengine is supported as a primary backend but is intentionally not offered as a fallback target; Local, Baidu, Qwen, MiMo, recorded Doubao IME, and Qwen IME Free are valid fallback targets.
 
 `main.cpp` owns a monotonically increasing recognition-attempt context containing the primary config, recording/final state, raw PCM, and fallback claim. Streaming callbacks only post a main-window message. If a streaming provider exhausts retries and posts a final failure before the hotkey is released, that final is retained in the attempt context; release stores the complete PCM, applies too-short/VAD no-speech gates, and then resumes the same completion path. This prevents early provider failure from either running fallback on partial audio or bypassing fallback because PCM was not yet available. Watchdog and provider callbacks race through one final-claim guard, and fallback workers recheck the attempt id before side effects and dispatch.
 
@@ -329,6 +334,12 @@ Current structure is a flat JSON:
   "qwen_model": "qwen3-asr-flash-realtime",
   "qwen_language": "",
   "qwen_chunk_ms": 100,
+  "qwen_free_polish": false,
+  "qwen_free_punct": false,
+  "qwen_free_correct": false,
+  "qwen_free_rewrite": false,
+  "qwen_free_debug_log": false,
+  "qwen_free_shell_path": "",
   "mimo_base_url": "https://token-plan-ams.xiaomimimo.com/v1",
   "mimo_model": "mimo-v2.5-asr",
   "mimo_language": "auto",
@@ -338,13 +349,19 @@ Current structure is a flat JSON:
 }
 ```
 
+For Qwen IME Free, `qwen_free_polish` is the canonical bundled
+`VoiceInputWrite` post-processing switch. The legacy
+`qwen_free_punct` and `qwen_free_correct` keys are retained for config-file
+compatibility and are normalized to the same value at load/save time.
+
 - `llm_provider`: Currently selected provider name.
 - `llm_providers_json`: JSON string storing all providers' endpoint, api_key (DPAPI encrypted), and model.
 - `llm_prompt`: Custom System Prompt (leave empty to use built-in default).
 - `enable_llm_debug`: When enabled, records before/after ASR comparison to `log/llm_refine_YYYYMMDD.log`.
-- `asr_backend`: Active ASR backend (`local`, `baidu`, `volcengine`, `qwen`, `mimo`, or `doubao_ime`).
-- `fallback_asr_backend`: Optional serial fallback (`none`, `local`, `baidu`, `qwen`, `mimo`, or `doubao_ime`); it must differ from `asr_backend`. Volcengine is not a fallback target.
+- `asr_backend`: Active ASR backend (`local`, `baidu`, `volcengine`, `qwen`, `mimo`, `doubao_ime`, or `qwen_free`).
+- `fallback_asr_backend`: Optional serial fallback (`none`, `local`, `baidu`, `qwen`, `mimo`, `doubao_ime`, or `qwen_free`); it must differ from `asr_backend`. Volcengine is not a fallback target.
 - `qwen_*`: Qwen ASR connection/model/language/chunk settings. Turn detection is fixed to Manual and is not persisted.
+- `qwen_free_*`: Qwen IME Free bundled `VoiceInputWrite` post-processing switches, experimental selection rewrite, local protocol diagnostics, and optional shell-directory override. Backend enablement is derived from `asr_backend` / `fallback_asr_backend`; the optional UTDID diagnostic override is DPAPI-encrypted.
 - `mimo_*`: Xiaomi MiMo ASR API key, OpenAI-compatible Base URL, model, and language (`auto`, `zh`, `en`). The API key is DPAPI-encrypted in `mimo_api_key`.
 - `doubao_ime_*`: Experimental Doubao IME device id, cdid, and DPAPI-encrypted token. These are auto-registered and can be reset from Settings.
 
@@ -352,7 +369,7 @@ Current structure is a flat JSON:
 
 ### Streaming Evolution
 
-Qwen, Volcengine, and Doubao IME already support cloud partial HUD while recording. Local ASR, Baidu, and MiMo still use a record-then-finalize flow. The future direction is to make streaming capability a first-class session trait instead of keeping provider-specific orchestration in `main.cpp`:
+Qwen, Qwen IME Free, Volcengine, and Doubao IME already support cloud partial HUD while recording. Local ASR, Baidu, and MiMo still use a record-then-finalize flow. The future direction is to make streaming capability a first-class session trait instead of keeping provider-specific orchestration in `main.cpp`:
 
 ```mermaid
 flowchart LR

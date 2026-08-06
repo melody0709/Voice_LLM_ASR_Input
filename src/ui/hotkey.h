@@ -4,6 +4,7 @@
 
 bool IsModifierKey(UINT vk);
 UINT NormalizedKeyFromWParam(WPARAM wParam);
+UINT NormalizedKeyFromKeyMessage(WPARAM wParam, LPARAM lParam);
 std::wstring KeyName(UINT key);
 std::wstring HotkeyToString(const HotkeyConfig& hotkey);
 HotkeyConfig HotkeyFromString(const std::wstring& text);

@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  Current version: <code>v0.9.9</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
+  Current version: <code>v0.9.23</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -31,7 +31,7 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 - **Real-time HUD** — Bottom floating capsule window during recording, 5 volume bars responding to sound
 - **Dual VAD Options** — Silero VAD (lightweight) / FireRed VAD (high precision F1 97.57), intelligently skips silence
 - **LLM Correction (Optional)** — Supports DeepSeek / OpenRouter / SiliconFlow and other providers, one-click configuration
-- **Cloud ASR (Optional)** — Supports Volcano Engine (Doubao), Baidu Cloud, Qwen ASR (`qwen3-asr-flash-realtime`), Xiaomi MiMo ASR (`mimo-v2.5-asr`), and experimental Doubao IME ASR as alternative backends, with optional fallback ASR
+- **Cloud ASR (Optional)** — Supports Volcano Engine (Doubao), Baidu Cloud, Qwen ASR (`qwen3-asr-flash-realtime`), Xiaomi MiMo ASR (`mimo-v2.5-asr`), experimental Doubao IME ASR, and reverse-engineered Qianwen IME (`qwen_free`, requires local Qianwen IME install) as alternative backends, with optional fallback ASR
 
 ## Quick Start
 
@@ -52,6 +52,13 @@ Interactive menu for model selection, auto-downloads and extracts to `models/` d
 ```
 
 Requires Visual Studio 2022 (C++ desktop development workload).
+
+To run the offline Qwen protocol regression test (JSON parsing, HMAC signing,
+and ASR binary framing; no network or microphone required):
+
+```powershell
+.\build.bat --test
+```
 
 ### 3. Run
 
@@ -95,8 +102,8 @@ the packager re-extracts and hashes each result before publishing it.
   stored executable path.
 
 **Recognition tab**
-- `ASR Backend` — Select between `Local (sherpa-onnx)`, `Volcano Engine`, `Baidu Cloud`, `Qwen ASR`, `MiMo ASR`, and `Doubao IME (Free)`
-- `Fallback` — Optional backup ASR backend: `Local`, `Baidu Cloud`, `Qwen ASR`, `MiMo ASR`, or `Doubao IME (Free)`. If the primary backend ends in an operational failure such as timeout, network error, auth/config error, or model load error, VoxType retries the same raw PCM with the fallback backend before showing the final result. `Too short` and `No speech detected` do not trigger fallback.
+- `ASR Backend` — Select between `Local (sherpa-onnx)`, `Volcano Engine`, `Baidu Cloud`, `Qwen ASR`, `MiMo ASR`, `Doubao IME (Free)`, and `Qwen IME (Free)`
+- `Fallback` — Optional backup ASR backend: `Local`, `Baidu Cloud`, `Qwen ASR`, `MiMo ASR`, `Doubao IME (Free)`, or `Qwen IME (Free)`. If the primary backend ends in an operational failure such as timeout, network error, auth/config error, or model load error, VoxType retries the same raw PCM with the fallback backend before showing the final result. `Too short` and `No speech detected` do not trigger fallback.
 - `ASR model` — Speech recognition model (only for Local backend):
   - `FireRedASR2 CTC` — Fast, suitable for daily input
   - `FireRedASR2 AED` — Better quality, more accurate for long sentences
@@ -129,7 +136,7 @@ the packager re-extracts and hashes each result before publishing it.
 - `Basic Fix` / `Deep Fix` — Preset buttons, one-click fill for different correction intensity System Prompts
 
 **Cloud ASR tab**
-- `Provider` — Select between `Volcano Engine (Doubao)`, `Baidu Cloud`, `Qwen ASR (DashScope)`, `MiMo ASR (Xiaomi)`, and `Doubao IME (Free)`, controls below update dynamically
+- `Provider` — Select between `Volcano Engine (Doubao)`, `Baidu Cloud`, `Qwen ASR (DashScope)`, `MiMo ASR (Xiaomi)`, `Doubao IME (Free)`, and `Qwen IME (Free)`, controls below update dynamically
 - **Baidu Cloud**: `API Key` / `Secret Key` (DPAPI encrypted) + `Language Model` (Mandarin/English/Cantonese/Sichuanese) + `Test Connection`
 - **Volcano Engine (Doubao)**: `API Key` (DPAPI encrypted) + `ASR Mode` + `Model Version` + `Language` + `Test Connection`
   - ASR Mode: `bigmodel_nostream` (recommended, highest accuracy) / `bigmodel_async` (best latency) / `bigmodel` (real-time partial)
@@ -145,9 +152,16 @@ the packager re-extracts and hashes each result before publishing it.
   - Default model: `mimo-v2.5-asr`; audio is uploaded as WAV via `/chat/completions`
 - **Doubao IME (Free)**: no API key field. The experimental provider registers a Doubao IME-style device, stores device credentials with DPAPI-encrypted token, encodes PCM to Opus, and uses the unofficial `frontier-audio-ime-ws.doubao.com` WebSocket protocol. Availability and terms are not guaranteed.
   - Doubao IME bypasses local VAD and relies on the IME service's own segmentation. Partial HUD updates and final text are accumulated across cloud-side segments during one hotkey hold, so long recordings are pasted as one combined result after release. When selected as Fallback, Doubao IME replays the same raw PCM through a recorded request and writes refreshed credentials back to the saved config.
-  - Streaming partial HUD for Qwen, Volcano Engine, and Doubao IME is display-only clear-page: it shows live text within three body lines, then clears previous HUD text and restarts from the current last sentence; the new page keeps accumulating until it exceeds three body lines again, while the final paste text stays complete.
+  - Streaming partial HUD for Qwen, Qwen IME Free, Volcano Engine, and Doubao IME is display-only clear-page: it shows live text within three body lines, then clears previous HUD text and restarts from the current last sentence; the new page keeps accumulating until it exceeds three body lines again, while the final paste text stays complete.
   - Diagnostic probe: run `.\tools\doubao_ime_probe.bat` to compile a small console probe that reuses saved Doubao IME credentials when available, performs a live protocol check, and when the bundled sample wav exists, performs a real speech recognition check. Add `--streaming` to send WAV frames with a live drain thread and validate partial/final streaming behavior; add `--fresh` to force temporary re-registration.
-- Cloud ASR backends handle recognition remotely; when VAD is enabled, Qwen and Volcano Engine use local streaming VAD trim, batch cloud backends use batch VAD trim before upload, and Doubao IME uploads raw PCM/Opus without local VAD. Local punctuation models are still bypassed for cloud backends
+- **Qwen IME (Free)**: no API key field. Replays the reverse-engineered Qianwen IME protocol while VoxType captures WASAPI audio locally. Authentication uses the native signer from an explicitly verified `unet.dll`; unknown DLL fingerprints are rejected instead of calling version-dependent RVAs or sending a known-invalid HMAC fallback. UTDID is acquired from the local Qianwen IME cache/registry, and a configured debug override is stored with Windows DPAPI. Optional bundled LLM post-processing (`VoiceInputWrite`) replays the Qianwen IME HTTP endpoint. The current runtime still requires compatible Qianwen IME components; if initialization fails, the normal fallback ASR policy applies. Availability and terms are not guaranteed.
+  - When selected as Fallback, Qwen IME Free is replayed through its native streaming session with the same recorded PCM; it is not treated as a local batch backend.
+  - `Shell install path override` — optional manual override of the Qianwen IME install directory (auto-detected from `C:\Program Files\QianwenIME` by default).
+  - A UTDID override remains a config-only diagnostic escape hatch; it is not exposed as a normal Settings field and is DPAPI-encrypted when persisted.
+  - `Test Connection` checks UTDID acquisition and the ASR WebSocket handshake; when bundled post-processing is enabled, it also sends a small LLM probe and reports LLM failure separately.
+  - `Polish (auto)` is the single switch for the bundled `VoiceInputWrite` post-processing path. `Punctuation included` and `Correction included` are read-only indicators because the original endpoint returns them in the same response, not as independent HTTP requests. The experimental `Rewrite selection` code path is retained for protocol research, but is currently disabled in Settings and forcibly turned off during config load/save. Its request-field mapping remains compatibility-derived and requires matching original-client request/response evidence before it can be enabled as a supported feature.
+  - `Debug log` enables local Qwen protocol diagnostics; it does not change the recognition result.
+- Cloud ASR backends handle recognition remotely; when VAD is enabled, Qwen and Volcano Engine use local streaming VAD trim, batch cloud backends use batch VAD trim before upload, and Qwen IME Free/Doubao IME upload full raw PCM/Opus without local VAD because their services perform segmentation. Local punctuation models are still bypassed for cloud backends
 
 </details>
 

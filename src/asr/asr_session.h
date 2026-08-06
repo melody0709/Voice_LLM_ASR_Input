@@ -25,6 +25,9 @@ struct AsrSessionResult {
     std::wstring providerName;
     AsrSessionBackend backend = AsrSessionBackend::Local;
     bool isStreaming = false;
+    // True when a streaming provider's own bundled post-processing already
+    // produced the text returned in `text`.
+    bool bundledPostProcessApplied = false;
     double cloudApiMs = 0.0;
     double vadMs = 0.0;
     size_t pcmBytes = 0;

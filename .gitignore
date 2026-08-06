@@ -15,6 +15,8 @@ runtime/
 __pycache__/
 .serena/
 release/
+/reverse/
+/reverse-skill/
 # 忽略 models 下所有内容，除了两个小 VAD 模型
 models/*
 !models/silero_vad.int8.onnx

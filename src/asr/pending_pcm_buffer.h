@@ -21,7 +21,8 @@ public:
     bool Append(const BYTE* data, size_t bytes) {
         if (!data || bytes == 0) return false;
         std::lock_guard<std::mutex> lock(mutex_);
-        if (maxBytes_ > 0 && data_.size() + bytes > maxBytes_) {
+        if (maxBytes_ > 0 &&
+            (data_.size() > maxBytes_ || bytes > maxBytes_ - data_.size())) {
             overflowed_ = true;
             return false;
         }

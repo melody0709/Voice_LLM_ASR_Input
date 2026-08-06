@@ -10,6 +10,11 @@
 #include "doubao_ime_asr.h"
 #include "mimo_asr.h"
 #include "qwen_asr.h"
+#include "qwen_free_proto_asr.h"
+#include "qwen_free_proto_llm.h"
+#include "qwen_free_postprocess.h"
+#include "qwen_free_proto_unet.h"
+#include "qwen_free_proto_utdid.h"
 #include "volcengine_asr.h"
 
 #include <algorithm>
@@ -131,6 +136,26 @@ struct DoubaoImeTestMessage {
 std::atomic<uint64_t> g_doubaoImeTestGeneration{0};
 constexpr UINT kDoubaoImeTestResultMessage = WM_APP + 11;
 
+struct QwenFreeTestMessage {
+    qwen_free_proto_asr::TestResult result;
+    uint64_t generation = 0;
+    bool asrOk = false;
+    bool llmOk = false;
+    std::wstring llmMessage;
+    DWORD llmElapsedMs = 0;
+};
+
+std::atomic<uint64_t> g_qwenFreeTestGeneration{0};
+constexpr UINT kQwenFreeTestResultMessage = WM_APP + 12;
+
+struct QwenFreeStatusMessage {
+    uint64_t generation = 0;
+    std::wstring text;
+};
+
+std::atomic<uint64_t> g_qwenFreeStatusGeneration{0};
+constexpr UINT kQwenFreeStatusResultMessage = WM_APP + 13;
+
 struct BackendOption {
     const wchar_t* id;
     const wchar_t* label;
@@ -145,6 +170,7 @@ constexpr BackendOption kBackendOptions[] = {
     {L"qwen", L"Qwen ASR", true, true},
     {L"mimo", L"MiMo ASR", true, true},
     {L"doubao_ime", L"Doubao IME (Free)", true, true},
+    {L"qwen_free", L"Qwen IME (Free)", true, true},
 };
 
 constexpr int kBackendOptionCount = static_cast<int>(sizeof(kBackendOptions) / sizeof(kBackendOptions[0]));
@@ -258,6 +284,43 @@ void RefreshDoubaoImeStatus(HWND hwnd) {
     if (status) {
         SetWindowTextW(status, DoubaoImeCredentialStatusText().c_str());
     }
+}
+
+std::wstring QwenFreeStatusText(const std::wstring& utdidOverride,
+                                const std::wstring& shellPath) {
+    // A1 协议还原：检测千问 IME 安装目录 + 尝试获取 UTDID。
+    // UTDID 是 ASR/LLM 鉴权的关键设备指纹，无法本地生成。
+    // 状态栏只显示摘要，避免把完整设备指纹暴露在截图或用户反馈中。
+    const auto maskUtdid = [](const std::string& utdid) {
+        if (utdid.size() <= 8) return std::wstring(L"(redacted)");
+        return std::wstring(utdid.begin(), utdid.begin() + 4) + L"..." +
+               std::wstring(utdid.end() - 4, utdid.end());
+    };
+    auto r = qwen_free_proto_utdid::GetUtdid(utdidOverride, shellPath);
+    if (!r.ok) {
+        return L"UTDID unavailable: " + r.error;
+    }
+    return L"UTDID OK (" + r.source + L"): " + maskUtdid(r.utdid);
+}
+
+void RefreshQwenFreeStatus(HWND hwnd) {
+    HWND status = GetDlgItem(hwnd, IDC_QWEN_FREE_STATUS);
+    if (!status) return;
+
+    SetWindowTextW(status, L"Checking Qwen device identity...");
+    const uint64_t generation =
+        g_qwenFreeStatusGeneration.fetch_add(1, std::memory_order_relaxed) + 1;
+    const std::wstring utdidOverride = g_config.qwenFreeUtdidOverride;
+    const std::wstring shellPath = g_config.qwenFreeShellPath;
+    std::thread([hwnd, generation, utdidOverride, shellPath]() {
+        auto* message = new QwenFreeStatusMessage;
+        message->generation = generation;
+        message->text = QwenFreeStatusText(utdidOverride, shellPath);
+        if (!PostMessageW(hwnd, kQwenFreeStatusResultMessage, 0,
+                          reinterpret_cast<LPARAM>(message))) {
+            delete message;
+        }
+    }).detach();
 }
 
 void SetClipboardText(const std::wstring& text) {
@@ -404,6 +467,110 @@ void PasteTextImeAware(const std::wstring& text) {
     }
 }
 
+bool ReplaceSelectionTextImeAware(const SelectionContext& selection,
+                                  const std::wstring& text,
+                                  std::wstring* error) {
+    if (error) error->clear();
+    if (text.empty()) {
+        if (error) *error = L"empty replacement";
+        return false;
+    }
+    if (!selection.Usable()) {
+        if (error) *error = L"selection target unavailable";
+        return false;
+    }
+    if (!selection_context::IsSameForegroundWindow(selection)) {
+        if (error) *error = L"selection target is no longer foreground";
+        return false;
+    }
+    if (!selection_context::VerifyCurrentSelection(selection)) {
+        if (error) *error = L"selection changed while recognizing";
+        return false;
+    }
+
+    if (!IsWindow(selection.focusWindow)) {
+        if (error) *error = L"selection focus control unavailable";
+        return false;
+    }
+    HWND focus = selection.focusWindow;
+
+    DWORD currentProcessId = 0;
+    GetWindowThreadProcessId(selection.targetWindow, &currentProcessId);
+    if (selection.processId != 0 && currentProcessId != selection.processId) {
+        if (error) *error = L"selection target process changed";
+        return false;
+    }
+    if (selection_context::TopLevelWindow(focus) != selection.targetWindow) {
+        if (error) *error = L"selection focus control changed window";
+        return false;
+    }
+
+    // A user click during recognition must not redirect a rewrite to another
+    // editor in the same application window.
+    GUITHREADINFO guiInfo = {};
+    guiInfo.cbSize = sizeof(guiInfo);
+    const DWORD targetThread = GetWindowThreadProcessId(selection.targetWindow, nullptr);
+    if (GetGUIThreadInfo(targetThread, &guiInfo) &&
+        selection.focusWindow && guiInfo.hwndFocus &&
+        guiInfo.hwndFocus != selection.focusWindow) {
+        if (error) *error = L"focus changed while recognizing";
+        return false;
+    }
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(selection.targetWindow, &pid);
+    wchar_t processName[MAX_PATH] = {};
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (process) {
+        DWORD size = MAX_PATH;
+        QueryFullProcessImageNameW(process, 0, processName, &size);
+        CloseHandle(process);
+    }
+    const bool isWeChat = wcsstr(processName, L"WeChat") ||
+                          wcsstr(processName, L"wechat") ||
+                          wcsstr(processName, L"Weixin") ||
+                          wcsstr(processName, L"weixin");
+    if (isWeChat) {
+        // WeChat's Qt editor can reject clipboard paste and Ctrl+V.  WM_CHAR
+        // replaces the current selection with the first character and appends
+        // the remaining characters without touching the clipboard.
+        for (wchar_t ch : text) {
+            if (!PostMessageW(focus, WM_CHAR, ch, 0)) {
+                if (error) *error = L"WeChat WM_CHAR failed";
+                return false;
+            }
+            Sleep(1);
+        }
+        return true;
+    }
+
+    selection_context::ClipboardSnapshot previousClipboard;
+    if (!previousClipboard.Readable()) {
+        if (error) *error = L"clipboard snapshot unavailable";
+        return false;
+    }
+    if (!selection_context::SetClipboardText(text)) {
+        if (error) *error = L"clipboard unavailable";
+        return false;
+    }
+
+    DWORD_PTR result = 0;
+    if (SendMessageTimeoutW(focus, WM_PASTE, 0, 0,
+                            SMTO_ABORTIFHUNG | SMTO_BLOCK,
+                            2000, &result)) {
+        return true;
+    }
+
+    // Some controls do not implement WM_PASTE but accept simulated Ctrl+V.
+    // Allow the target queue to consume Ctrl+V before the RAII snapshot
+    // restores every original clipboard format.
+    ImeStateGuard guard;
+    guard.Disable();
+    SendCtrlV();
+    Sleep(100);
+    return true;
+}
+
 bool IsCapsLockOn() {
     return (GetKeyState(VK_CAPITAL) & 0x0001) != 0;
 }
@@ -464,6 +631,10 @@ void AddDoubaoImeControl(HWND hwnd) {
     if (hwnd) g_doubaoImeControls.push_back(hwnd);
 }
 
+void AddQwenFreeControl(HWND hwnd) {
+    if (hwnd) g_qwenFreeControls.push_back(hwnd);
+}
+
 void AddVadFireredControl(HWND hwnd) {
     if (hwnd) g_vadFireredControls.push_back(hwnd);
 }
@@ -484,6 +655,7 @@ void ShowCloudSubPage(HWND hwnd, int providerIdx) {
     for (HWND c : g_qwenControls) ShowWindow(c, providerIdx == 2 ? SW_SHOW : SW_HIDE);
     for (HWND c : g_mimoControls) ShowWindow(c, providerIdx == 3 ? SW_SHOW : SW_HIDE);
     for (HWND c : g_doubaoImeControls) ShowWindow(c, providerIdx == 4 ? SW_SHOW : SW_HIDE);
+    for (HWND c : g_qwenFreeControls) ShowWindow(c, providerIdx == 5 ? SW_SHOW : SW_HIDE);
 }
 
 void ShowSettingsPage(HWND hwnd, int page) {
@@ -510,6 +682,7 @@ void ShowSettingsPage(HWND hwnd, int page) {
         for (HWND c : g_qwenControls) ShowWindow(c, SW_HIDE);
         for (HWND c : g_mimoControls) ShowWindow(c, SW_HIDE);
         for (HWND c : g_doubaoImeControls) ShowWindow(c, SW_HIDE);
+        for (HWND c : g_qwenFreeControls) ShowWindow(c, SW_HIDE);
     }
     InvalidateRect(hwnd, nullptr, TRUE);
 }
@@ -545,6 +718,13 @@ void LayoutSettingsWindow(HWND hwnd) {
 }
 
 void HideSettingsWindow(HWND hwnd) {
+    // Detached status/test workers may finish after the Settings page is
+    // hidden or reopened. Invalidate both generations before changing the
+    // visible window state so stale results cannot re-enable controls or
+    // overwrite a newer page.
+    g_qwenFreeTestGeneration.fetch_add(1, std::memory_order_relaxed);
+    g_qwenFreeStatusGeneration.fetch_add(1, std::memory_order_relaxed);
+    EnableWindow(GetDlgItem(hwnd, IDC_QWEN_FREE_TEST), TRUE);
     ShowWindow(hwnd, SW_HIDE);
     InstallKeyboardHook();
 }
@@ -564,6 +744,13 @@ HWND CreateCombo(HWND parent, int id, int x, int y, int w, int h) {
 
 HWND CreateButton(HWND parent, int id, int x, int y, int w, int h, const wchar_t* text) {
     HWND hwnd = CreateWindowW(L"BUTTON", text, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                              x, y, w, h, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_instance, nullptr);
+    ApplyUiFont(hwnd);
+    return hwnd;
+}
+
+HWND CreateCheckBox(HWND parent, int id, int x, int y, int w, int h, const wchar_t* text) {
+    HWND hwnd = CreateWindowW(L"BUTTON", text, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                               x, y, w, h, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_instance, nullptr);
     ApplyUiFont(hwnd);
     return hwnd;
@@ -729,11 +916,14 @@ void LoadSettingsControls(HWND hwnd) {
     ComboBox_AddString(cloudProviderCombo, L"Qwen ASR (DashScope)");
     ComboBox_AddString(cloudProviderCombo, L"MiMo ASR (Xiaomi)");
     ComboBox_AddString(cloudProviderCombo, L"Doubao IME (Free)");
+    ComboBox_AddString(cloudProviderCombo, L"Qwen IME (Free)");
+
     int cloudIdx = 0;
     if (g_config.cloudProvider == L"baidu") cloudIdx = 1;
     else if (g_config.cloudProvider == L"qwen") cloudIdx = 2;
     else if (g_config.cloudProvider == L"mimo") cloudIdx = 3;
     else if (g_config.cloudProvider == L"doubao_ime") cloudIdx = 4;
+    else if (g_config.cloudProvider == L"qwen_free") cloudIdx = 5;
     ComboBox_SetCurSel(cloudProviderCombo, cloudIdx);
     g_cloudProviderIdx = cloudIdx;
 
@@ -789,6 +979,21 @@ void LoadSettingsControls(HWND hwnd) {
     SetWindowTextW(GetDlgItem(hwnd, IDC_MIMO_BASE_URL), g_config.mimoBaseUrl.c_str());
     SetWindowTextW(GetDlgItem(hwnd, IDC_MIMO_MODEL), g_config.mimoModel.c_str());
     RefreshDoubaoImeStatus(hwnd);
+    // QwenFree 回填
+    SetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_FREE_SHELL_PATH), g_config.qwenFreeShellPath.c_str());
+    const auto qwenPostProcess = qwen_free_postprocess::Normalize({
+        g_config.qwenFreePolishEnabled,
+        g_config.qwenFreePunctEnabled,
+        g_config.qwenFreeCorrectEnabled,
+    });
+    Button_SetCheck(GetDlgItem(hwnd, IDC_QWEN_FREE_POLISH), qwenPostProcess.polish ? BST_CHECKED : BST_UNCHECKED);
+    Button_SetCheck(GetDlgItem(hwnd, IDC_QWEN_FREE_PUNCT), qwenPostProcess.punctuate ? BST_CHECKED : BST_UNCHECKED);
+    Button_SetCheck(GetDlgItem(hwnd, IDC_QWEN_FREE_CORRECT), qwenPostProcess.correct ? BST_CHECKED : BST_UNCHECKED);
+    HWND qwenRewrite = GetDlgItem(hwnd, IDC_QWEN_FREE_REWRITE);
+    Button_SetCheck(qwenRewrite, BST_UNCHECKED);
+    EnableWindow(qwenRewrite, FALSE);
+    Button_SetCheck(GetDlgItem(hwnd, IDC_QWEN_FREE_DEBUG), g_config.qwenFreeDebugLog ? BST_CHECKED : BST_UNCHECKED);
+    RefreshQwenFreeStatus(hwnd);
 
     HWND qwenLangCombo = GetDlgItem(hwnd, IDC_QWEN_LANGUAGE);
     for (const auto& lang : kQwenLanguages) {
@@ -903,6 +1108,10 @@ void SaveSettingsControls(HWND hwnd) {
     // a startup registration failure must not commit any of the UI changes.
     if (!SaveStartupRegistrationControl(hwnd)) return;
 
+    g_qwenFreeTestGeneration.fetch_add(1, std::memory_order_relaxed);
+    g_qwenFreeStatusGeneration.fetch_add(1, std::memory_order_relaxed);
+    EnableWindow(GetDlgItem(hwnd, IDC_QWEN_FREE_TEST), TRUE);
+
     bool fallbackAdjusted = false;
     g_config.modelId = ModelIdFromIndex(ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_MODEL)));
 
@@ -1003,6 +1212,7 @@ void SaveSettingsControls(HWND hwnd) {
         else if (cloudIdx == 2) g_config.cloudProvider = L"qwen";
         else if (cloudIdx == 3) g_config.cloudProvider = L"mimo";
         else if (cloudIdx == 4) g_config.cloudProvider = L"doubao_ime";
+        else if (cloudIdx == 5) g_config.cloudProvider = L"qwen_free";
         else g_config.cloudProvider = L"volcengine";
     }
     wchar_t baiduApiKey[256] = {};
@@ -1052,6 +1262,20 @@ void SaveSettingsControls(HWND hwnd) {
     {
         int langIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_MIMO_LANGUAGE));
         g_config.mimoLanguage = MimoLanguageCodeFromIndex(langIdx);
+    }
+
+    // QwenFree (千问 IME 免费后端，A1 纯协议还原)
+    g_config.qwenFreePolishEnabled = Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_FREE_POLISH)) == BST_CHECKED;
+    g_config.qwenFreePunctEnabled = g_config.qwenFreePolishEnabled;
+    g_config.qwenFreeCorrectEnabled = g_config.qwenFreePolishEnabled;
+    // Keep the setting/API for future research, but do not activate the
+    // currently disabled selection-rewrite path.
+    g_config.qwenFreeRewriteEnabled = false;
+    g_config.qwenFreeDebugLog = Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_FREE_DEBUG)) == BST_CHECKED;
+    {
+        wchar_t qpath[1024] = {};
+        GetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_FREE_SHELL_PATH), qpath, 1024);
+        g_config.qwenFreeShellPath = qpath;
     }
 
     {
@@ -1502,6 +1726,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         g_qwenControls.clear();
         g_mimoControls.clear();
         g_doubaoImeControls.clear();
+        g_qwenFreeControls.clear();
         g_vadFireredControls.clear();
         g_vadSileroControls.clear();
 
@@ -1840,6 +2065,61 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                               L"Experimental unofficial Doubao IME endpoint. No API key is required.");
         AddDoubaoImeControl(control);
 
+        // === QwenFree (千问 IME 免费后端) ===
+        // Row 0: Test Connection (right-aligned, 与 doubao_ime 一致)
+        AddQwenFreeControl(CreateButton(hwnd, IDC_QWEN_FREE_TEST, S(500), S(UiStyle::RowInputY(0)), S(UiStyle::ActionBtnW), S(UiStyle::ActionBtnH), L"Test Connection"));
+        // Row 1: Shell path label + edit + browse
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(1)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Shell Path");
+        AddQwenFreeControl(control);
+        HWND qwenFreePath = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                                             S(UiStyle::InputLeft), S(UiStyle::RowInputY(1)), S(UiStyle::QwenFreeShellPathW), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_FREE_SHELL_PATH)), g_instance, nullptr);
+        ApplyUiFont(qwenFreePath);
+        AddQwenFreeControl(qwenFreePath);
+        AddQwenFreeControl(CreateButton(hwnd, IDC_QWEN_FREE_BROWSE,
+                                         S(UiStyle::InputLeft + UiStyle::QwenFreeShellPathW + UiStyle::QwenFreeShellBrowseGap),
+                                         S(UiStyle::RowInputY(1)) - S(1), S(UiStyle::SmallBtnW), S(UiStyle::BtnH), L"Browse..."));
+        // Row 2: Status
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(2)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Status");
+        AddQwenFreeControl(control);
+        HWND qwenFreeStatus = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE,
+                                              S(UiStyle::InputLeft), S(UiStyle::RowInputY(2)) + S(4),
+                                              S(500), S(UiStyle::LabelH), hwnd,
+                                              reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_FREE_STATUS)),
+                                              g_instance, nullptr);
+        ApplyUiFont(qwenFreeStatus);
+        AddQwenFreeControl(qwenFreeStatus);
+        // Row 3: Qwen VoiceInputWrite 后处理选项。
+        // 原版 VoiceInputWrite 会将标点、纠错和整理作为同一轮后处理；
+        // 因此这里保留兼容配置，但不要暗示它们已经是三个独立请求。
+        AddQwenFreeControl(CreateCheckBox(hwnd, IDC_QWEN_FREE_POLISH,
+                                          S(UiStyle::ContentLeft), S(UiStyle::RowInputY(3)),
+                                          S(UiStyle::QwenFreeOptionCheckW), S(UiStyle::CheckH), L"Polish (auto)"));
+        HWND qwenPunct = CreateCheckBox(hwnd, IDC_QWEN_FREE_PUNCT,
+                                        S(UiStyle::ContentLeft + UiStyle::QwenFreeOptionCheckW + UiStyle::QwenFreeOptionGap),
+                                        S(UiStyle::RowInputY(3)), S(UiStyle::QwenFreeOptionCheckW), S(UiStyle::CheckH), L"Punctuation included");
+        EnableWindow(qwenPunct, FALSE);
+        AddQwenFreeControl(qwenPunct);
+        HWND qwenCorrect = CreateCheckBox(hwnd, IDC_QWEN_FREE_CORRECT,
+                                          S(UiStyle::ContentLeft + (UiStyle::QwenFreeOptionCheckW + UiStyle::QwenFreeOptionGap) * 2),
+                                          S(UiStyle::RowInputY(3)), S(UiStyle::QwenFreeOptionCheckW), S(UiStyle::CheckH), L"Correction included");
+        EnableWindow(qwenCorrect, FALSE);
+        AddQwenFreeControl(qwenCorrect);
+        // Row 4: More options
+        HWND qwenRewrite = CreateCheckBox(hwnd, IDC_QWEN_FREE_REWRITE,
+                                          S(UiStyle::ContentLeft), S(UiStyle::RowInputY(4)),
+                                          S(UiStyle::QwenFreeRewriteCheckW), S(UiStyle::CheckH), L"Rewrite selection (experimental)");
+        Button_SetCheck(qwenRewrite, BST_UNCHECKED);
+        EnableWindow(qwenRewrite, FALSE);
+        AddQwenFreeControl(qwenRewrite);
+        AddQwenFreeControl(CreateCheckBox(hwnd, IDC_QWEN_FREE_DEBUG,
+                                          S(UiStyle::ContentLeft + UiStyle::QwenFreeRewriteCheckW + UiStyle::QwenFreeOptionGap),
+                                          S(UiStyle::RowInputY(4)), S(UiStyle::QwenFreeDebugCheckW), S(UiStyle::CheckH), L"Debug log"));
+        // Row 5: hint label (与 doubao_ime 的提示行风格一致)
+        control = CreateLabel(hwnd, S(UiStyle::InputLeft), S(UiStyle::RowInputY(5)), S(560), S(UiStyle::LabelH),
+                              L"VoiceInputWrite bundles punctuation and correction; only Polish is configurable. Selection rewrite is temporarily disabled.");
+        AddQwenFreeControl(control);
+
+
         control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(1)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"API Key (X-Api-Key)");
         AddVolcengineControl(control);
         HWND volcApiKey = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD,
@@ -2078,6 +2358,17 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             if (btn) SetWindowTextW(btn, g_llmKeyVisible ? L"Hide" : L"Show");
             return 0;
         }
+        case IDC_QWEN_FREE_POLISH:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                const bool enabled =
+                    Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_FREE_POLISH)) == BST_CHECKED;
+                Button_SetCheck(GetDlgItem(hwnd, IDC_QWEN_FREE_PUNCT),
+                                enabled ? BST_CHECKED : BST_UNCHECKED);
+                Button_SetCheck(GetDlgItem(hwnd, IDC_QWEN_FREE_CORRECT),
+                                enabled ? BST_CHECKED : BST_UNCHECKED);
+                return 0;
+            }
+            break;
         case IDC_LLM_PRESET_COMBO:
             if (HIWORD(wParam) == CBN_SELCHANGE) {
                 int sel = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_LLM_PRESET_COMBO));
@@ -2379,6 +2670,94 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             RefreshDoubaoImeStatus(hwnd);
             SetStatus(hwnd, L"Doubao IME credentials reset.");
             return 0;
+        case IDC_QWEN_FREE_BROWSE: {
+            wchar_t buffer[MAX_PATH] = {};
+            BROWSEINFOW bi{};
+            bi.hwndOwner = hwnd;
+            bi.pszDisplayName = buffer;
+            bi.lpszTitle = L"Select Qianwen IME voice directory (qianwen_shell_*)";
+            bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_USENEWUI;
+            LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
+            if (pidl) {
+                wchar_t pathBuffer[MAX_PATH] = {};
+                if (SHGetPathFromIDListW(pidl, pathBuffer)) {
+                    SetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_FREE_SHELL_PATH), pathBuffer);
+                }
+                CoTaskMemFree(pidl);
+            }
+            return 0;
+        }
+        case IDC_QWEN_FREE_TEST: {
+            const uint64_t generation =
+                g_qwenFreeTestGeneration.fetch_add(1, std::memory_order_relaxed) + 1;
+            EnableWindow(GetDlgItem(hwnd, IDC_QWEN_FREE_TEST), FALSE);
+            wchar_t shellPathBuffer[1024] = {};
+            GetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_FREE_SHELL_PATH), shellPathBuffer, 1024);
+            const std::wstring shellPath = shellPathBuffer;
+            const std::wstring utdidOverride = g_config.qwenFreeUtdidOverride;
+            // Test the values currently visible in Settings.  The user may
+            // intentionally probe a changed checkbox state before pressing
+            // Save; using g_config here would silently test the previous
+            // persisted state and could skip (or unexpectedly add) the LLM
+            // probe.
+            const bool llmRequired =
+                Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_FREE_POLISH)) == BST_CHECKED ||
+                Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_FREE_REWRITE)) == BST_CHECKED;
+            SetStatus(hwnd, llmRequired
+                ? L"Testing Qianwen IME (Free) UTDID, ASR and LLM..."
+                : L"Testing Qianwen IME (Free) UTDID and ASR...");
+            std::thread([hwnd, generation, shellPath, utdidOverride, llmRequired]() {
+                auto* msg = new QwenFreeTestMessage;
+                msg->generation = generation;
+                auto utdid = qwen_free_proto_utdid::GetUtdid(utdidOverride, shellPath);
+                if (!utdid.ok) {
+                    msg->result.message = L"UTDID acquisition failed: " + utdid.error;
+                } else {
+                    std::wstring unetError;
+                    if (!qwen_free_proto_unet::Initialize(shellPath, unetError)) {
+                        msg->result.message =
+                            L"Native signer initialization failed: " + unetError;
+                    } else {
+                        qwen_free_proto_asr::AsrConfig cfg;
+                        cfg.utdid = utdid.utdid;
+                        msg->result = qwen_free_proto_asr::TestConnection(cfg);
+                        msg->asrOk = msg->result.ok;
+                    }
+                    if (msg->result.ok) {
+                        if (llmRequired) {
+                            qwen_free_proto_llm::LlmConfig llmCfg;
+                            llmCfg.utdid = utdid.utdid;
+                            llmCfg.shellPath = shellPath;
+                            const auto llm = qwen_free_proto_llm::PolishText(
+                                llmCfg, L"连接测试", 0.0, 0);
+                            msg->llmOk = llm.ok;
+                            msg->llmElapsedMs = llm.elapsedMs;
+                            msg->llmMessage = llm.ok
+                                ? L"LLM OK (" + std::to_wstring(llm.elapsedMs) + L"ms)"
+                                : L"LLM unavailable: " +
+                                  (llm.error.empty() ? L"unknown error" : llm.error);
+                            if (!msg->llmOk) {
+                                // ASR 已通过，但启用的后处理不可用；不要把整体探测误报成 OK。
+                                msg->result.ok = false;
+                            }
+                        } else {
+                            msg->llmOk = true;
+                            msg->llmMessage = L"LLM skipped (post-processing disabled)";
+                        }
+                        msg->result.message = L"UTDID OK (" + utdid.source + L"); " +
+                                              msg->result.message + L" (" +
+                                              std::to_wstring(msg->result.elapsedMs) + L"ms); " +
+                                              msg->llmMessage;
+                    }
+                }
+                if (!PostMessageW(hwnd, kQwenFreeTestResultMessage,
+                                  msg->result.ok ? 0 : 1,
+                                  reinterpret_cast<LPARAM>(msg))) {
+                    delete msg;
+                }
+            }).detach();
+            return 0;
+        }
         default:
             break;
         }
@@ -2404,6 +2783,39 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                             MB_ICONERROR | MB_OK);
             }
             SetStatus(hwnd, shortMsg.c_str());
+        }
+        return 0;
+    }
+    case kQwenFreeTestResultMessage: {
+        std::unique_ptr<QwenFreeTestMessage> msg(reinterpret_cast<QwenFreeTestMessage*>(lParam));
+        if (!msg || msg->generation !=
+                        g_qwenFreeTestGeneration.load(std::memory_order_relaxed)) {
+            return 0;
+        }
+        EnableWindow(GetDlgItem(hwnd, IDC_QWEN_FREE_TEST), TRUE);
+        RefreshQwenFreeStatus(hwnd);
+        if (msg->result.ok) {
+            SetStatus(hwnd, msg->result.message);
+        } else {
+            const std::wstring detail = !msg->result.message.empty()
+                ? msg->result.message
+                : L"Qwen IME ASR connection failed.";
+            const bool llmFailure = msg->asrOk && !msg->llmOk;
+            SetStatus(hwnd, llmFailure
+                ? L"Connection failed: Qwen IME (Free) LLM"
+                : L"Connection failed: Qwen IME (Free) ASR");
+            MessageBoxW(hwnd, detail.c_str(), L"Connection Test Failed", MB_ICONERROR | MB_OK);
+        }
+        return 0;
+    }
+    case kQwenFreeStatusResultMessage: {
+        std::unique_ptr<QwenFreeStatusMessage> message(
+            reinterpret_cast<QwenFreeStatusMessage*>(lParam));
+        if (message &&
+            message->generation ==
+                g_qwenFreeStatusGeneration.load(std::memory_order_relaxed)) {
+            HWND status = GetDlgItem(hwnd, IDC_QWEN_FREE_STATUS);
+            if (status) SetWindowTextW(status, message->text.c_str());
         }
         return 0;
     }
@@ -2455,6 +2867,11 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             LayoutSettingsWindow(hwnd);
             InvalidateRect(hwnd, nullptr, TRUE);
         }
+        return 0;
+    case WM_DESTROY:
+        g_qwenFreeTestGeneration.fetch_add(1, std::memory_order_relaxed);
+        g_qwenFreeStatusGeneration.fetch_add(1, std::memory_order_relaxed);
+        if (g_settingsWindow == hwnd) g_settingsWindow = nullptr;
         return 0;
     case WM_CLOSE:
         HideSettingsWindow(hwnd);

@@ -1,12 +1,16 @@
 #pragma once
 
 #include "globals.h"
+#include "selection_context.h"
 
 void SetStatus(HWND hwnd, const std::wstring& text);
 void SetClipboardText(const std::wstring& text);
 void SendCtrlV();
 void SendUnicodeText(const std::wstring& text);
 void PasteTextImeAware(const std::wstring& text);
+bool ReplaceSelectionTextImeAware(const SelectionContext& selection,
+                                  const std::wstring& text,
+                                  std::wstring* error = nullptr);
 bool IsCapsLockOn();
 void SendCapsLockTap();
 void RestoreCapsLockState();

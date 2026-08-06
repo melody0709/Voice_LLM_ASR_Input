@@ -2,7 +2,148 @@
 
 > 🇨🇳 [中文版](doc/CHANGELOG_zh.md)
 
-## Unreleased
+## v0.9.23 (2026-08-06, dev)
+
+### Changed
+
+- **Qwen native authentication boundary**: Removed embedded provider-specific signing material and the known-invalid generic-HMAC fallback. ASR/LLM now fail before network I/O when native authentication cannot be produced, allowing normal fallback orchestration to take over.
+- **Reverse archive boundary**: Shareable, redacted `reverse/` notes and tools are now tracked through the archive's own ignore rules, while sensitive evidence and the external `reverse-skill/` library remain ignored.
+
+### Fixed
+
+- **Selection clipboard preservation**: Selection capture and rewrite replacement retain and restore the complete OLE clipboard data object, preserving images, files, HTML, RTF, and private formats.
+- **Recording startup latency**: Audio capture starts before UI Automation/`WM_COPY` selection probing, preventing a slow target control from clipping the beginning of speech.
+- **Qwen DLL compatibility**: Version-dependent `unet.dll` RVAs are called only for the verified SHA-256 fingerprint. Settings tests always validate the currently entered Shell Path and report when another module is already active.
+- **Settings responsiveness**: Qwen device-identity status probing now runs off the UI thread with stale-result suppression.
+- **Qwen config/thread safety**: UTDID overrides are DPAPI-encrypted with plaintext migration, runtime logging uses an atomic enable snapshot, and the redundant `qwen_free_enabled` field was removed.
+- **Native output lifetime**: Native signer buffers are released when confirmed to belong to the process heap; unknown allocator ownership is left untouched to avoid heap corruption.
+- **Qwen replay cancellation**: Internal receiver shutdown no longer leaves the external sticky-cancel flag set, so transport recovery can reconnect and replay PCM.
+- **Qwen final/timeout integrity**: Empty finals cannot be hidden by an older partial, replay accepts only a non-empty clean final (or an explicitly clean empty result), and receive polling restores the configured WinHTTP timeout before every return path.
+- **Protocol parser hardening**: Invalid JSON escapes/numbers are rejected instead of exposing partial fields; duplicate root control flags take precedence over array-nested diagnostics.
+- **Conservative Qwen post-processing default**: New or incomplete Qwen IME Free configs leave bundled LLM polishing disabled until the user explicitly enables `Polish (auto)`.
+
+## v0.9.22 (2026-08-05, dev)
+
+### Changed
+
+- **Reverse-engineering archive privacy**: Redacted real UTDID values, signature samples, candidate keys, and encrypted device samples from shareable documentation and offline regression fixtures; original local evidence remains outside the published index.
+- **Probe status documentation**: Recorded the original Shell FFI observations and clearly separated incomplete local-loopback probes from confirmed protocol conclusions.
+
+### Fixed
+
+- **Qwen Free transport recovery**: Provider setup/connect now runs off the hotkey path; transient connect, receive, close, PCM-send, stop, and final-timeout failures buffer until key release and replay the complete bounded PCM recording through one fresh WebSocket session.
+- **Qwen Free terminal-result integrity**: A stale partial or WebSocket close can no longer masquerade as a successful final; replay is accepted only after all PCM is sent and a clean final frame is received. Empty finals from recordings of at least three seconds receive one bounded replay attempt.
+- **Qwen Free watchdog and HUD recovery**: Finalization time now reserves the original final wait, reconnect/replay wait, and bundled LLM wait; recovery exposes `Buffering`, `Reconnecting`, and `Retrying` HUD states, while watchdog/rewrite failures are classified as operational errors instead of pasted text.
+- **Qwen Free WinHTTP lifecycle**: Fixed the receiver-thread join race and stopped the 50 ms receive-poll timeout from also becoming the WebSocket send timeout.
+- **Hotkey dispatch reliability**: Right Alt, CapsLock long press, and other configured recording hotkeys now post start/stop commands to the main window; repeated keydown events no longer flood duplicate start commands.
+- **Selection-rewrite fallback safety**: Selection-rewrite intent is now fixed from the selection captured at recording start. Automatic DashScope fallback is suppressed for that attempt, and a target window that later disappears is reported as `Rewrite skipped`/rewrite failure instead of degrading to ordinary paste.
+- **Recovery-policy regressions**: Added offline coverage for Qwen watchdog/rewrite error classification, retryable transport failures, timestamp-safe HTTP status matching, and clean replay-final requirements.
+
+## v0.9.21 (2026-08-05, dev)
+
+### Fixed
+
+- **Qwen selection-rewrite terminal response parsing**: Rewrite responses that contain both `processing`/loading and `complete` messages now use only terminal content for selection replacement; escaped response envelopes are also handled, and processing-only responses are rejected safely.
+
+## v0.9.20 (2026-08-05, dev)
+
+### Changed
+
+- **Qwen Free bundled post-processing settings**: `Polish (auto)` is now the single editable switch for the original `VoiceInputWrite` response. Punctuation and correction are shown as read-only included capabilities instead of misleading independent toggles.
+- **Legacy configuration compatibility**: Existing `qwen_free_punct` and `qwen_free_correct` values are normalized to the bundled post-processing switch during load/save, so older configurations keep their effective behavior.
+
+### Added
+
+- **Bundled post-processing regression coverage**: Offline tests now verify disabled, punctuation-only, and correction-only legacy configurations are normalized correctly.
+
+## v0.9.19 (2026-08-05, dev)
+
+### Fixed
+
+- **Qwen connection-test error classification**: Settings now distinguishes an ASR handshake failure from a bundled LLM post-processing failure instead of labeling both as an ASR failure.
+
+## v0.9.18 (2026-08-05, dev)
+
+### Fixed
+
+- **Qwen Free pending-audio overflow**: A stalled ASR connection no longer silently drops microphone audio after the bounded pending-PCM queue fills; the overflow now enters the existing transport-failure/replay path.
+- **Qwen connection-test error classification**: Settings now distinguishes an ASR handshake failure from a bundled LLM post-processing failure instead of labeling both as an ASR failure.
+- **Portable/MSI documentation link**: The runtime payload now includes `doc/README_zh.md`, matching the Chinese README link shipped at the payload root.
+
+## v0.9.17 (2026-08-05, dev)
+
+### Fixed
+
+- **Qwen ASR binary framing hardening**: Shared the production/test encoder for the original two length-prefixed WebSocket segments and added regression coverage for PCM commits, empty-PCM control frames, big-endian lengths, and invalid buffers.
+
+## v0.9.16 (2026-08-05, dev)
+
+### Fixed
+
+- **Qwen error-body privacy**: ASR and LLM diagnostics now retain only response byte counts plus safe structured error fields; raw remote bodies are no longer copied into HUD text or persistent debug logs.
+
+## v0.9.15 (2026-08-05, dev)
+
+### Fixed
+
+- **Qwen ASR query completeness**: Restored the required `version=2` field in both the signed query content and the final WebSocket URL, preserving the original `ve → version → sign` order and preventing avoidable authentication/upgrade rejection.
+
+## v0.9.14 (2026-08-05, dev)
+
+### Fixed
+
+- **Qwen debug-log privacy**: ASR debug logs now record response metadata instead of raw JSON, preventing recognized speech from being copied into local diagnostics; error responses without a message are reduced to a generic error plus code/size metadata.
+
+### Added
+
+- **Offline Qwen protocol regression target**: `build.bat --test` now builds and runs JSON/HMAC tests under `build/artifacts/tests` without changing the canonical runtime payload.
+
+## v0.9.13 (2026-08-05, dev)
+
+### Fixed
+
+- **Qwen error-diagnostic privacy**: WebSocket failure messages and debug logs no longer include the signed URL, WSG signature, or encrypted UTDID; diagnostics retain only non-sensitive lengths and transport details.
+- **Qwen finalization watchdog**: Reserved time for both the ASR final response and bundled LLM post-processing, preventing a slow healthy polish/rewrite request from being aborted as a streaming timeout.
+
+## v0.9.12 (2026-08-05, dev)
+
+### Fixed
+
+- **Qwen protocol string conversion safety**: Fixed UTF-8 conversion helpers that allocated one byte/character less than the Win32 conversion API was told to write, preventing an out-of-bounds NUL write in Qwen ASR/LLM diagnostics and UTDID handling.
+- **Qwen connection-test result semantics**: The Settings probe now checks ASR and, when post-processing is enabled, Qwen LLM as well; an LLM failure is no longer reported as an overall successful connection test.
+- **Qwen LLM response validation**: A HTTP 200 response without output text is now treated as an invalid post-processing result and safely falls back to the raw ASR text.
+- **Qwen selection rewrite first closed loop**: Added UI Automation/`WM_COPY` selection capture, `VoiceInputRewrite` instruction routing, safe selection replacement, and WeChat `WM_CHAR` compatibility. If the target window, process, focus, or selection changes while recognition is running, replacement is skipped instead of touching another control.
+- **Selection rewrite fallback safety**: When a Qwen Free rewrite attempt has a live selection, ordinary ASR fallback is suppressed so a spoken rewrite instruction cannot be pasted as plain text into the selected content.
+- **Streaming fallback routing**: Fallback now chooses the backend's native streaming or batch session. `Qwen IME (Free)` can be used as a real fallback target instead of silently entering the local-ASR default branch, and Qwen IME transport errors are classified consistently for fallback decisions.
+- **Qwen response parsing hardening**: ASR and LLM control-frame parsing now shares a nesting-aware JSON string/boolean reader with escape and Unicode handling, avoiding false field matches inside quoted transcript content.
+- **Qwen UTDID display privacy**: Settings now masks the device fingerprint and shows only a short summary; the complete value remains internal for protocol authentication.
+- **Architecture documentation sync**: Documented the shipped Qwen IME Free A1/A2 streaming path, bundled post-processing semantics, selection-rewrite safety boundary, fallback support, and persisted settings.
+
+## v0.9.11 (2026-08-04, dev)
+
+### Changed
+
+- **Qianwen IME free backend switched to A1 pure protocol replay**: The `qwen_free` provider no longer calls `QianwenShellEmbedded.dll` ABI directly (Path B); instead it implements the full ASR WebSocket + LLM HTTP protocol from scratch using the reverse-engineered WSG signing format and an embedded protocol secret, and reuses UTDID from the locally installed Qianwen IME's `UTDID.dll` cache or registry. VoxType now performs WASAPI capture locally and feeds PCM chunks to its own protocol layer, just like the `qwen`, `volcengine`, and `doubao_ime` streaming backends.
+- **Path B ABI loader removed**: Deleted `qwen_free_asr.h/.cpp` (the `QwenFreeAbi` / `QwenFreeAbiLoader` Path B infrastructure). Removed the `qwen_free_use_path_b` config field and the "Path B: ABI direct" checkbox from Settings. The Settings "Test Connection" button now probes UTDID acquisition instead of ABI loading.
+
+### Added
+
+- **Protocol layer modules**: `qwen_free_proto_sign.{h,cpp}` (HMAC-SHA1 + WSG sign), `qwen_free_proto_utdid.{h,cpp}` (UTDID acquisition via DLL/registry/override), `qwen_free_proto_asr.{h,cpp}` (WebSocket ASR), `qwen_free_proto_llm.{h,cpp}` (HTTP LLM polish/punctuate/correct). All four are pure C++ with no Qianwen DLL dependency except `UTDID.dll` for device fingerprint reuse.
+
+### Fixed
+
+- **`qwen_free` recording pipeline**: Stop skipping local WASAPI capture for `qwen_free`. The previous Path B path let Qianwen IME capture audio internally, which caused microphone conflicts and bypassed VoxType's `too_short` / `no_speech` guards. With A1, VoxType captures audio itself and applies the same VAD trim + watchdog flow used by other streaming backends.
+- **Fallback to dashscope qwen on UTDID failure**: If UTDID acquisition fails (no Qianwen IME installed) and the user has configured `qwenApiKey`, `qwen_free` now auto-falls back to the dashscope `qwen` streaming backend instead of hard-failing.
+- **WebSocket upgrade diagnostics**: `qwen_free_proto_asr` now queries the HTTP status code before `WinHttpWebSocketCompleteUpgrade` and, on a non-101 response, reads up to 1 KB of the error body and reports `WebSocket upgrade failed (HTTP <code>): <body>` instead of the unhelpful generic `WinHttpWebSocketCompleteUpgrade failed: 4317` (`ERROR_WINHTTP_OPERATION_CANCELLED`). This surfaces server-side rejection reasons such as bad WSG signature, invalid UTDID, or missing `kps_wg`.
+- **WSG signature format corrected**: Based on Ghidra reverse-engineering of `unet.dll` (`UNetCrypt::SignWithNumber` call chain) and a redacted signature sample captured from the Qianwen IME process, the signing content now uses URL-appearance order (not alphabetical), the URL field name is `sign` (not `sign_wg`), and the signature is placed at the URL end (after `version`). The embedded secret is used as the HMAC-SHA1 key, not appended to the content.
+
+## v0.9.10 (2026-08-04, dev)
+
+### Added
+
+- **Qianwen IME free backend (reverse engineering)**: Added a new cloud ASR provider `qwen_free` that reuses the locally installed Qianwen IME's voice backend via its public C ABI (`QianwenShellEmbedded.dll`). No API key required; works headless and reuses Qianwen IME's WSG auth, ASR WebSocket endpoint, and LLM polish/punctuate/correct pipeline. See [reverse/](reverse/) for the reverse-engineering report and integration blueprint.
+- **Reverse-engineering workspace**: `reverse/` directory with `README.md`, `INVENTORY.md`, `PLAN.md`, and `work/` containing `FINDINGS.md`, `PROTOCOL.md`, `INTEGRATION.md` plus all dumpbin/strings/memory-scan artifacts.
+- **In-progress integration**: `qwen_free_asr.h/.cpp` ABI loader, `qwen_free_streaming_session.h/.cpp` IStreamingAsrSession implementation, and `qwen_free_llm.h/.cpp` LLM post-processing scaffold integrated behind the `qwen_free` provider switch.
 
 ## v0.9.9 (2026-07-28)
 

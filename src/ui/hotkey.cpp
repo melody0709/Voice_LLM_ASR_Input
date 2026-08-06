@@ -19,7 +19,12 @@ bool IsModifierKey(UINT vk) {
 }
 
 UINT NormalizedKeyFromWParam(WPARAM wParam) {
+    return NormalizedKeyFromKeyMessage(wParam, 0);
+}
+
+UINT NormalizedKeyFromKeyMessage(WPARAM wParam, LPARAM lParam) {
     UINT vk = static_cast<UINT>(wParam);
+    if (vk == VK_MENU && (lParam & (1LL << 24)) != 0) return VK_RMENU;
     UINT ch = MapVirtualKeyW(vk, MAPVK_VK_TO_CHAR);
     if (ch != 0) {
         UINT key = ch & 0xFFFF;
@@ -34,6 +39,8 @@ std::wstring KeyName(UINT key) {
     if (key >= L'0' && key <= L'9') return std::wstring(1, static_cast<wchar_t>(key));
     if (key >= VK_F1 && key <= VK_F24) return L"F" + std::to_wstring(key - VK_F1 + 1);
     switch (key) {
+    case VK_LMENU: return L"LeftAlt";
+    case VK_RMENU: return L"RightAlt";
     case VK_CAPITAL: return L"CapsLock";
     case VK_SPACE: return L"Space";
     case VK_TAB: return L"Tab";
@@ -91,6 +98,8 @@ HotkeyConfig HotkeyFromString(const std::wstring& text) {
         else if (EqualsIgnoreCase(token, L"Alt")) hotkey.alt = true;
         else if (EqualsIgnoreCase(token, L"Shift")) hotkey.shift = true;
         else if (EqualsIgnoreCase(token, L"Win") || EqualsIgnoreCase(token, L"Windows")) hotkey.win = true;
+        else if (EqualsIgnoreCase(token, L"LeftAlt") || EqualsIgnoreCase(token, L"LAlt")) hotkey.key = VK_LMENU;
+        else if (EqualsIgnoreCase(token, L"RightAlt") || EqualsIgnoreCase(token, L"RAlt")) hotkey.key = VK_RMENU;
         else if (EqualsIgnoreCase(token, L"CapsLock")) hotkey.key = VK_CAPITAL;
         else if (EqualsIgnoreCase(token, L"Space")) hotkey.key = VK_SPACE;
         else if (EqualsIgnoreCase(token, L"Tab")) hotkey.key = VK_TAB;
@@ -126,8 +135,18 @@ HotkeyConfig CurrentConfiguredHotkey() {
 }
 
 bool ModifiersMatch(const HotkeyConfig& hotkey) {
-    const bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-    const bool alt = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+    // On layouts with AltGr, Windows synthesizes Ctrl while the right Alt
+    // key is held.  A side-Alt hotkey is still a standalone key binding, so
+    // that synthetic Ctrl must not make the modifier comparison fail.
+    const bool standaloneSideAlt =
+        (hotkey.key == VK_LMENU || hotkey.key == VK_RMENU) &&
+        !hotkey.ctrl && !hotkey.alt && !hotkey.shift && !hotkey.win;
+    const bool ctrl = standaloneSideAlt
+        ? false
+        : (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+    const bool alt = standaloneSideAlt
+        ? false
+        : ((GetAsyncKeyState(VK_MENU) & 0x8000) != 0);
     const bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
     const bool win = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 || (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
     return ctrl == hotkey.ctrl && alt == hotkey.alt && shift == hotkey.shift && win == hotkey.win;
@@ -149,11 +168,17 @@ void StartCapsLockHotkeyPress() {
     if (g_mainWindow) SetTimer(g_mainWindow, kCapsLockLongPressTimer, kCapsLockLongPressMs, nullptr);
 }
 
+void PostHotkeyRecordingCommand(WPARAM command) {
+    if (g_mainWindow) {
+        PostMessageW(g_mainWindow, kHotkeyRecordingMessage, command, 0);
+    }
+}
+
 void ActivateCapsLockLongPress() {
     if (g_activeHotkeyKey != VK_CAPITAL || !g_capsLockHotkeyPending || g_capsLockLongPressActive) return;
     g_capsLockHotkeyPending = false;
     g_capsLockLongPressActive = true;
-    StartRecordingSession();
+    PostHotkeyRecordingCommand(kHotkeyRecordingStart);
 }
 
 void FinishCapsLockHotkeyPress() {
@@ -165,8 +190,7 @@ void FinishCapsLockHotkeyPress() {
     ResetCapsLockHotkeyState();
 
     if (wasLongPress) {
-        StopRecordingSession();
-        RestoreCapsLockState();
+        PostHotkeyRecordingCommand(kHotkeyCapsLockRecordingStop);
     } else if (wasShortPress) {
         SendCapsLockTap();
     }
@@ -179,14 +203,24 @@ LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wParam, LPARAM lParam) {
         if (event && event->vkCode == VK_CAPITAL && (event->flags & LLKHF_INJECTED)) {
             return CallNextHookEx(g_keyboardHook, code, wParam, lParam);
         }
-        if (event && event->vkCode == hotkey.key && (ModifiersMatch(hotkey) || g_activeHotkeyKey == event->vkCode)) {
+        const bool rightAltMatch = event && hotkey.key == VK_RMENU &&
+            (event->vkCode == VK_RMENU ||
+             (event->vkCode == VK_MENU && (event->flags & LLKHF_EXTENDED) != 0));
+        const bool leftAltMatch = event && hotkey.key == VK_LMENU &&
+            (event->vkCode == VK_LMENU ||
+             (event->vkCode == VK_MENU && (event->flags & LLKHF_EXTENDED) == 0));
+        const bool keyMatch = event &&
+            (event->vkCode == hotkey.key || rightAltMatch || leftAltMatch);
+        if (keyMatch && (ModifiersMatch(hotkey) || g_activeHotkeyKey == hotkey.key)) {
             if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
                 if (hotkey.key == VK_CAPITAL) {
                     StartCapsLockHotkeyPress();
                     return 1;
                 }
-                g_activeHotkeyKey = event->vkCode;
-                StartRecordingSession();
+                if (g_activeHotkeyKey != hotkey.key) {
+                    g_activeHotkeyKey = hotkey.key;
+                    PostHotkeyRecordingCommand(kHotkeyRecordingStart);
+                }
                 return 1;
             }
             if (wParam == WM_KEYUP || wParam == WM_SYSKEYUP) {
@@ -195,7 +229,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wParam, LPARAM lParam) {
                     return 1;
                 }
                 g_activeHotkeyKey = 0;
-                StopRecordingSession();
+                PostHotkeyRecordingCommand(kHotkeyRecordingStop);
                 return 1;
             }
         }
@@ -251,7 +285,7 @@ LRESULT CALLBACK HotkeyEditWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         SetFocus(hwnd);
         return 0;
     case WM_KEYDOWN:
-    case WM_SYSKEYDOWN:
+    case WM_SYSKEYDOWN: {
         if (!state) break;
         if (wParam == VK_ESCAPE) {
             state->hotkey = state->original;
@@ -266,20 +300,27 @@ LRESULT CALLBACK HotkeyEditWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             InvalidateRect(hwnd, nullptr, TRUE);
             return 0;
         }
-        if (IsModifierKey(static_cast<UINT>(wParam))) return 0;
+        const bool altKey = wParam == VK_MENU;
+        const bool rightAlt = altKey && (lParam & (1LL << 24)) != 0;
+        if (IsModifierKey(static_cast<UINT>(wParam)) && !altKey) return 0;
         {
             HotkeyConfig hotkey;
-            hotkey.ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-            hotkey.alt = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
-            hotkey.shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
-            hotkey.win = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 || (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
-            hotkey.key = NormalizedKeyFromWParam(wParam);
+            if (altKey) {
+                hotkey.key = rightAlt ? VK_RMENU : VK_LMENU;
+            } else {
+                hotkey.ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+                hotkey.alt = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+                hotkey.shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+                hotkey.win = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 || (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
+                hotkey.key = NormalizedKeyFromKeyMessage(wParam, lParam);
+            }
             state->hotkey = hotkey;
             state->capturing = false;
             InvalidateRect(hwnd, nullptr, TRUE);
             SetFocus(GetParent(hwnd));
         }
         return 0;
+    }
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);

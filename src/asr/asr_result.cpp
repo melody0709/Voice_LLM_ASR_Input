@@ -1,15 +1,12 @@
 #include "asr_result.h"
 
+#include "asr_result_policy.h"
 #include "engine.h"
 
 #include <algorithm>
 #include <cwctype>
 
 namespace {
-
-bool StartsWith(const std::wstring& text, const wchar_t* prefix) {
-    return text.rfind(prefix, 0) == 0;
-}
 
 bool Contains(const std::wstring& text, const wchar_t* needle) {
     return text.find(needle) != std::wstring::npos;
@@ -19,24 +16,6 @@ std::wstring Lower(std::wstring text) {
     std::transform(text.begin(), text.end(), text.begin(),
                    [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
     return text;
-}
-
-bool LooksLikeOperationalPrefix(const std::wstring& text) {
-    return StartsWith(text, L"ASR failed:")
-        || StartsWith(text, L"Fallback failed:")
-        || StartsWith(text, L"Baidu ASR error:")
-        || StartsWith(text, L"Baidu ASR failed:")
-        || StartsWith(text, L"Qwen ASR error:")
-        || StartsWith(text, L"Qwen ASR failed:")
-        || StartsWith(text, L"MiMo ASR error:")
-        || StartsWith(text, L"MiMo ASR failed:")
-        || StartsWith(text, L"Doubao IME ASR error:")
-        || StartsWith(text, L"Doubao IME ASR failed:")
-        || StartsWith(text, L"Doubao IME error:")
-        || StartsWith(text, L"VolcEngine timeout")
-        || StartsWith(text, L"VolcEngine connect failed")
-        || StartsWith(text, L"VolcEngine error")
-        || StartsWith(text, L"[VolcEngine error:");
 }
 
 AsrFailureReason ClassifyFailureReason(const std::wstring& text) {
@@ -84,7 +63,7 @@ AsrResultClassification ClassifyAsrResult(const std::wstring& text) {
     if (text == L"Too short") {
         return {AsrResultKind::TooShort, AsrFailureReason::None};
     }
-    if (LooksLikeOperationalPrefix(text)) {
+    if (asr_result_policy::LooksLikeOperationalPrefix(text)) {
         return {AsrResultKind::OperationalError, ClassifyFailureReason(text)};
     }
     if (Lower(text) == L"aborted" || Lower(text) == L"cancelled" || Lower(text) == L"canceled") {
@@ -139,6 +118,7 @@ std::wstring AsrBackendDisplayName(const Config& config) {
     if (config.asrBackend == L"qwen") return L"Qwen ASR";
     if (config.asrBackend == L"mimo") return L"MiMo ASR";
     if (config.asrBackend == L"doubao_ime") return L"Doubao IME";
+    if (config.asrBackend == L"qwen_free") return L"Qwen IME (Free)";
     return ModelDisplayName(config.modelId);
 }
 
@@ -148,6 +128,7 @@ const char* AsrBackendDebugName(const std::wstring& asrBackend) {
     if (asrBackend == L"qwen") return "Qwen";
     if (asrBackend == L"mimo") return "MiMo";
     if (asrBackend == L"doubao_ime") return "DoubaoIME";
+    if (asrBackend == L"qwen_free") return "QwenIMEFree";
     return "Local";
 }
 
@@ -158,6 +139,7 @@ const char* AsrBackendLogName(const std::wstring& asrBackend) {
     if (asrBackend == L"qwen") return "qwen";
     if (asrBackend == L"mimo") return "mimo";
     if (asrBackend == L"doubao_ime") return "doubao_ime";
+    if (asrBackend == L"qwen_free") return "qwen_free";
     if (asrBackend == L"none" || asrBackend.empty()) return "none";
     return "unknown";
 }
@@ -165,7 +147,7 @@ const char* AsrBackendLogName(const std::wstring& asrBackend) {
 bool IsSupportedFallbackBackend(const std::wstring& backend) {
     return backend == L"local" || backend == L"baidu" ||
            backend == L"qwen" || backend == L"mimo" ||
-           backend == L"doubao_ime";
+           backend == L"doubao_ime" || backend == L"qwen_free";
 }
 
 bool IsFallbackAsrEnabled(const Config& config) {

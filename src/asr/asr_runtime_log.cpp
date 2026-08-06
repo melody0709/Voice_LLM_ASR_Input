@@ -15,6 +15,7 @@ constexpr ULONGLONG kMaxLogBytes = 5ull * 1024ull * 1024ull;
 constexpr int kArchiveCount = 2;
 
 std::mutex g_logMutex;
+std::atomic<bool> g_qwenFreeLogEnabled{false};
 
 std::wstring TempLogPath(const wchar_t* fileName) {
     wchar_t tempPath[MAX_PATH] = {};
@@ -76,11 +77,25 @@ void WriteNamedVLocked(const wchar_t* fileName, const char* format, va_list args
 } // namespace
 
 bool Enabled() {
-    return g_enableDebugMode.load(std::memory_order_relaxed);
+    if (g_enableDebugMode.load(std::memory_order_relaxed)) return true;
+    return g_qwenFreeLogEnabled.load(std::memory_order_relaxed);
+}
+
+void SetQwenFreeEnabled(bool enabled) {
+    g_qwenFreeLogEnabled.store(enabled, std::memory_order_relaxed);
 }
 
 void Write(const char* format, ...) {
     if (!Enabled() || !format) return;
+    std::lock_guard<std::mutex> lock(g_logMutex);
+    va_list args;
+    va_start(args, format);
+    WriteNamedVLocked(L"voxtype_asr_runtime.log", format, args);
+    va_end(args);
+}
+
+void WriteIf(bool enabled, const char* format, ...) {
+    if ((!enabled && !Enabled()) || !format) return;
     std::lock_guard<std::mutex> lock(g_logMutex);
     va_list args;
     va_start(args, format);

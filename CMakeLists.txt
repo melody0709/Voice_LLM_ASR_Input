@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.20)
 
 project(VoxType LANGUAGES CXX RC)
 
+enable_testing()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -49,6 +51,11 @@ add_executable(VoxType WIN32
     src/asr/mimo_asr.cpp
     src/asr/qwen_asr.cpp
     src/asr/qwen_streaming_session.cpp
+    src/asr/qwen_free_streaming_session.cpp
+    src/asr/qwen_free_proto_utdid.cpp
+    src/asr/qwen_free_proto_asr.cpp
+    src/asr/qwen_free_proto_llm.cpp
+    src/asr/qwen_free_proto_unet.cpp
     src/asr/volcengine_net_diag.cpp
     src/asr/volcengine_streaming_session.cpp
     src/core/startup_registration.cpp
@@ -83,6 +90,9 @@ target_link_libraries(VoxType PRIVATE
     gdi32
     shell32
     ole32
+    oleaut32
+    oleacc
+    uiautomationcore
     comctl32
     d2d1
     dwrite
@@ -111,3 +121,22 @@ endif()
 
 include("${CMAKE_SOURCE_DIR}/cmake/VoxTypeRuntime.cmake")
 voxtype_install_runtime(VoxType)
+
+# Offline protocol regression target.  It deliberately links only the pure
+# JSON/HMAC pieces, writes outside the runtime payload, and is built only when
+# explicitly requested by build.bat --test. The generic HMAC implementation
+# is not linked into the production VoxType executable.
+add_executable(qwen_free_protocol_test
+    tests/qwen_free_protocol_test.cpp
+    src/asr/qwen_free_proto_sign.cpp
+)
+target_include_directories(qwen_free_protocol_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/asr"
+)
+if(MSVC)
+    target_compile_options(qwen_free_protocol_test PRIVATE /O2 /EHsc /utf-8)
+endif()
+set_target_properties(qwen_free_protocol_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/../../artifacts/tests"
+)
+add_test(NAME qwen_free_protocol_test COMMAND qwen_free_protocol_test)

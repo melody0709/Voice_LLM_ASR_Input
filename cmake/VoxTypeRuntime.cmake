@@ -17,6 +17,7 @@ function(voxtype_install_runtime target)
         "${_src}/dll/aria2c.exe"
         "${_src}/download_models.ps1"
         "${_src}/README.md"
+        "${_src}/doc/README_zh.md"
         "${_src}/doc/volcengine_asr_guide_zh.md"
     )
     foreach(_required IN LISTS _runtime_files)
@@ -33,6 +34,7 @@ function(voxtype_install_runtime target)
         set(_runtime_root "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}")
         file(REMOVE_RECURSE
             "${_runtime_root}/models"
+            "${_runtime_root}/doc"
             "${_runtime_root}/docs")
         file(REMOVE
             "${_runtime_root}/VoxType.exe"
@@ -70,6 +72,9 @@ function(voxtype_install_runtime target)
     install(FILES "${_src}/doc/volcengine_asr_guide_zh.md"
         DESTINATION "docs"
         COMPONENT Runtime)
+    install(FILES "${_src}/doc/README_zh.md"
+        DESTINATION "doc"
+        COMPONENT Runtime)
 
     set(_manifest_script "${CMAKE_CURRENT_BINARY_DIR}/WriteRuntimeManifest.cmake")
     configure_file(
@@ -78,4 +83,3 @@ function(voxtype_install_runtime target)
         @ONLY)
     install(SCRIPT "${_manifest_script}" COMPONENT Runtime)
 endfunction()
-
