@@ -112,9 +112,11 @@ inline bool IsSuccessBusinessCode(const std::string& code) {
 
 inline bool IsSuccessfulStatus(std::string status) {
     status = LowerAscii(std::move(status));
-    return status == "success" || status == "complete" || status == "ok" ||
+    return status == "success" || status == "complete" ||
+           status == "completed" || status == "ok" ||
            status == "finished" || status == "succeed" ||
-           status == "true" || status == "1" || status == "200";
+           status == "done" || status == "final" || status == "true" ||
+           status == "0" || status == "1" || status == "200";
 }
 
 inline std::string ExtractStructuredErrorText(const std::string& body) {
@@ -125,6 +127,68 @@ inline std::string ExtractStructuredErrorText(const std::string& body) {
     return {};
 }
 
+inline bool IsMeaningfulErrorFieldAtPath(
+    const std::string& body,
+    std::initializer_list<const char*> path) {
+    const qwen_free_json::ValueKind kind =
+        qwen_free_json::GetValueKindAtPath(body, path);
+    switch (kind) {
+    case qwen_free_json::ValueKind::String:
+        return !qwen_free_json::ExtractStringAtPath(body, path).empty();
+    case qwen_free_json::ValueKind::Number: {
+        const std::string value =
+            qwen_free_json::ExtractNumberTextAtPath(body, path);
+        return !value.empty() && value != "0" && value != "0.0";
+    }
+    case qwen_free_json::ValueKind::Bool:
+        return qwen_free_json::ExtractBoolAtPath(body, path);
+    case qwen_free_json::ValueKind::Object:
+    case qwen_free_json::ValueKind::Array:
+        return true;
+    case qwen_free_json::ValueKind::Null:
+    case qwen_free_json::ValueKind::Missing:
+    case qwen_free_json::ValueKind::Invalid:
+        return false;
+    }
+    return false;
+}
+
+inline bool ReadSuccessField(const std::string& body,
+                             bool& present,
+                             bool& success) {
+    present = false;
+    success = false;
+    const std::initializer_list<const char*> rootPath = {"success"};
+    const std::initializer_list<const char*> dataPath = {"data", "success"};
+    for (const auto path : {rootPath, dataPath}) {
+        const qwen_free_json::ValueKind kind =
+            qwen_free_json::GetValueKindAtPath(body, path);
+        if (kind == qwen_free_json::ValueKind::Missing) continue;
+        present = true;
+        if (kind == qwen_free_json::ValueKind::Bool) {
+            success = qwen_free_json::ExtractBoolAtPath(body, path);
+            return true;
+        }
+        if (kind == qwen_free_json::ValueKind::Number) {
+            const std::string value =
+                qwen_free_json::ExtractNumberTextAtPath(body, path);
+            success = value == "1" || value == "1.0";
+            return true;
+        }
+        if (kind == qwen_free_json::ValueKind::String) {
+            const std::string value = LowerAscii(
+                qwen_free_json::ExtractStringAtPath(body, path));
+            success = value == "true" || value == "1" ||
+                      value == "yes" || value == "ok";
+            return true;
+        }
+        // null/object/array is present but not a success scalar. Keep the
+        // conservative failure result and let the caller reject the envelope.
+        return true;
+    }
+    return false;
+}
+
 inline bool HasExplicitErrorEnvelope(const std::string& body) {
     const std::string code = ExtractBusinessCode(body);
     if (!code.empty() && !IsSuccessBusinessCode(code)) return true;
@@ -132,30 +196,21 @@ inline bool HasExplicitErrorEnvelope(const std::string& body) {
     for (const char* key : {"error", "error_msg", "error_message"}) {
         // Error fields are not always strings; the service has returned
         // envelopes such as {"error":{"code":...,"message":...}}.
-        if (qwen_free_json::HasKey(body, key)) return true;
+        // Empty strings and null fields are common on successful responses
+        // (for example error_msg=""), so only meaningful values count.
+        if (IsMeaningfulErrorFieldAtPath(body, {key}) ||
+            IsMeaningfulErrorFieldAtPath(body, {"data", key})) {
+            return true;
+        }
     }
 
     // `success` appears as bool, numeric 1/0, or a string in different
     // command envelopes.  Treat unknown present values conservatively as an
     // error instead of accepting a response with no output text.
-    if (qwen_free_json::HasKey(body, "success")) {
-        const std::string successText = LowerAscii(
-            qwen_free_json::ExtractString(body, "success"));
-        if (!successText.empty()) {
-            if (successText == "true" || successText == "1" ||
-                successText == "yes" || successText == "ok") {
-                return false;
-            }
-            return true;
-        }
-
-        const std::string successNumber =
-            qwen_free_json::ExtractNumberText(body, "success");
-        if (!successNumber.empty()) {
-            return successNumber != "1" && successNumber != "1.0";
-        }
-
-        return !qwen_free_json::ExtractBool(body, "success");
+    bool successPresent = false;
+    bool success = false;
+    if (ReadSuccessField(body, successPresent, success) && successPresent) {
+        return !success;
     }
     return false;
 }
@@ -164,19 +219,10 @@ inline bool HasExplicitErrorEnvelope(const std::string& body) {
 // successful HTTP-200 envelope.  Let the response parser promote that shape
 // to the same explicit-success state used by status=success.
 inline bool IsSuccessfulEnvelope(const std::string& body) {
-    if (HasKey(body, "success")) {
-        const std::string successText = LowerAscii(
-            qwen_free_json::ExtractString(body, "success"));
-        if (!successText.empty()) {
-            return successText == "true" || successText == "1" ||
-                   successText == "yes" || successText == "ok";
-        }
-        const std::string successNumber =
-            qwen_free_json::ExtractNumberText(body, "success");
-        if (!successNumber.empty()) {
-            return successNumber == "1" || successNumber == "1.0";
-        }
-        return qwen_free_json::ExtractBool(body, "success");
+    bool present = false;
+    bool success = false;
+    if (ReadSuccessField(body, present, success) && present) {
+        return success;
     }
     return IsSuccessBusinessCode(ExtractBusinessCode(body));
 }

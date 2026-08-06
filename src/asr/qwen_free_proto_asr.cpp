@@ -2,14 +2,16 @@
 
 #include "asr_runtime_log.h"
 #include "globals.h"
+#include "qwen_free_asr_json.h"
 #include "qwen_free_diagnostics.h"
-#include "qwen_free_json.h"
 #include "qwen_free_proto_unet.h"
+#include "qwen_free_proto_utdid.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <sstream>
 
@@ -21,102 +23,9 @@ namespace {
 
 constexpr size_t kAudioCommitBytes = 0xf00;
 constexpr DWORD kReceivePollSliceMs = 50;
+constexpr DWORD kStartHandshakeTimeoutMs = 3000;
 constexpr size_t kMaxAsrFrameBytes = 4u * 1024u * 1024u;
 constexpr size_t kMaxReceivePayloadBytes = 4u * 1024u * 1024u;
-
-// 简单 JSON 字符串字段提取（与 qwen_free_streaming_session.cpp 中实现一致）。
-// 不引入 json 库，仅解析控制帧。
-std::string ExtractJsonString(const std::string& json, const std::string& key) {
-    return qwen_free_json::ExtractString(json, key);
-}
-
-bool ExtractJsonBool(const std::string& json, const std::string& key) {
-    return qwen_free_json::ExtractBool(json, key);
-}
-
-std::string ExtractAction(const std::string& json) {
-    std::string action = qwen_free_json::ExtractStringAtPath(json, {"eventType"});
-    if (action.empty()) action = qwen_free_json::ExtractStringAtPath(json, {"data", "eventType"});
-    if (action.empty()) action = ExtractJsonString(json, "action");
-    if (action.empty()) action = ExtractJsonString(json, "event");
-    if (action.empty()) {
-        action = qwen_free_json::ExtractStringAtPath(json, {"data", "content", "action"});
-    }
-    if (action.empty()) action = ExtractJsonString(json, "type");
-    return action;
-}
-
-bool ExtractJsonBoolAny(const std::string& json,
-                        const char* first,
-                        const char* second,
-                        const char* third,
-                        const char* fourth) {
-    const char* keys[] = {first, second, third, fourth};
-    for (const char* key : keys) {
-        if (!key) continue;
-        // A present false field is meaningful.  Check the protocol's
-        // preferred paths with presence-aware reads so an unrelated nested
-        // `true` (for example in an array of diagnostic messages) cannot
-        // override a root-level `isFinal:false`.
-        const std::initializer_list<const char*> paths[] = {
-            {key}, {"data", key}, {"data", "content", key}
-        };
-        for (const auto path : paths) {
-            if (qwen_free_json::HasFieldAtPath(json, path)) {
-                if (qwen_free_json::ExtractBoolAtPath(json, path)) return true;
-                const std::string numeric =
-                    qwen_free_json::ExtractNumberTextAtPath(json, path);
-                if (numeric == "1" || numeric == "1.0") return true;
-                const std::string text =
-                    qwen_free_json::ExtractStringAtPath(json, path);
-                return text == "true" || text == "1" || text == "yes";
-            }
-        }
-        // Compatibility fallback for provider envelopes that place the flag
-        // under an otherwise unknown object path.  At this point none of the
-        // preferred paths contained the field, so a true generic candidate
-        // is safe to accept.
-        if (ExtractJsonBool(json, key)) return true;
-    }
-    return false;
-}
-
-bool IsFinalTranscript(const std::string& json) {
-    if (ExtractJsonBoolAny(json, "isFinal", "is_final", "isEnd", "is_end")) {
-        return true;
-    }
-
-    // Qwen IME puts the ASR state in data.content.type rather than using an
-    // is_final boolean.  ExtractJsonString searches nested objects too, which
-    // keeps this parser independent of the response field order.
-    std::string type = qwen_free_json::ExtractStringAtPath(
-        json, {"data", "content", "type"});
-    if (type.empty()) type = qwen_free_json::ExtractStringAtPath(json, {"data", "type"});
-    if (type.empty()) type = ExtractJsonString(json, "type");
-    return type == "final" || type == "completed";
-}
-
-std::string ExtractTranscript(const std::string& json) {
-    std::string value = qwen_free_json::ExtractStringAtPath(
-        json, {"data", "content", "text"});
-    if (!value.empty()) return value;
-    value = qwen_free_json::ExtractStringAtPath(json, {"data", "text"});
-    if (!value.empty()) return value;
-    value = qwen_free_json::ExtractStringAtPath(json, {"data", "transcript"});
-    if (!value.empty()) return value;
-    value = qwen_free_json::ExtractStringAtPath(json, {"text"});
-    if (!value.empty()) return value;
-    value = qwen_free_json::ExtractStringAtPath(json, {"transcript"});
-    if (!value.empty()) return value;
-    static constexpr const char* kKeys[] = {
-        "text", "transcript", "sentence", "result", "output", "content"
-    };
-    for (const char* key : kKeys) {
-        std::string text = ExtractJsonString(json, key);
-        if (!text.empty()) return text;
-    }
-    return {};
-}
 
 std::wstring Utf8ToWide(const std::string& s) {
     if (s.empty()) return {};
@@ -143,6 +52,33 @@ int HexValue(char c) {
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
     if (c >= 'A' && c <= 'F') return c - 'A' + 10;
     return -1;
+}
+
+std::string JsonEscape(const std::string& value) {
+    std::string escaped;
+    escaped.reserve(value.size() + 8);
+    for (const unsigned char c : value) {
+        switch (c) {
+        case '"': escaped += "\\\""; break;
+        case '\\': escaped += "\\\\"; break;
+        case '\b': escaped += "\\b"; break;
+        case '\f': escaped += "\\f"; break;
+        case '\n': escaped += "\\n"; break;
+        case '\r': escaped += "\\r"; break;
+        case '\t': escaped += "\\t"; break;
+        default:
+            if (c < 0x20u) {
+                char buffer[7];
+                std::snprintf(buffer, sizeof(buffer), "\\u%04x",
+                              static_cast<unsigned int>(c));
+                escaped += buffer;
+            } else {
+                escaped.push_back(static_cast<char>(c));
+            }
+            break;
+        }
+    }
+    return escaped;
 }
 
 // unet 的 EncryptWithNumber 返回原始密文的 hex 展开；原版 /ws query 的
@@ -220,6 +156,15 @@ bool QwenFreeProtoAsrSession::ResetCancellation() {
         return false;
     }
     closeRequested_.store(false, std::memory_order_release);
+    return true;
+}
+
+bool QwenFreeProtoAsrSession::ResetCancellationForNewSession() {
+    std::lock_guard<std::mutex> lock(operationMutex_);
+    if (closing_ || activeOperations_ != 0) return false;
+    cancelRequested_.store(false, std::memory_order_release);
+    closeRequested_.store(false, std::memory_order_release);
+    operationCv_.notify_all();
     return true;
 }
 
@@ -338,8 +283,12 @@ bool QwenFreeProtoAsrSession::Connect(const AsrConfig& cfg, std::wstring& out_er
         return false;
     }
     cfg_ = cfg;
-    if (cfg_.utdid.empty() || cfg_.utdid.size() != 24) {
-        out_error = L"invalid utdid (expect 24 chars; received " +
+    // The production signer accepts only the initialized 24-character
+    // base62 device identity.  Keep debug URL overrides usable with synthetic
+    // test identities, but never send a malformed UTDID to the real service.
+    if (cfg_.debugUrlOverride.empty() &&
+        !qwen_free_proto_utdid::IsValidUtdid(cfg_.utdid)) {
+        out_error = L"invalid utdid (expect 24 initialized base62 chars; received " +
                     std::to_wstring(cfg_.utdid.size()) + L" chars)";
         return false;
     }
@@ -362,12 +311,17 @@ bool QwenFreeProtoAsrSession::Connect(const AsrConfig& cfg, std::wstring& out_er
         if (!initError.empty()) out_error += L": " + initError;
         return false;
     }
+    AsrWebSocketEndpoint endpoint;
+    if (!ParseAsrWebSocketUrl(url, endpoint)) {
+        out_error = L"invalid Qwen ASR WebSocket URL";
+        return false;
+    }
     // The URL and signed query contain the device fingerprint, encrypted
     // UTDID and WSG signature.  Keep only lengths in diagnostics; the exact
     // values are neither needed for normal troubleshooting nor safe to show
     // in HUD/MessageBox output or debug logs.
-    LogErr(L"connect", L"request prepared host=" + cfg.host +
-           L" path=" + cfg.path +
+    LogErr(L"connect", L"request prepared host=" + endpoint.host +
+           L" path=" + (cfg.debugUrlOverride.empty() ? cfg.path : L"<debug override>") +
            L" unet=" + std::to_wstring(qwen_free_proto_unet::IsReady() ? 1 : 0) +
            L" sign_content_len=" + std::to_wstring(signContent.size()) +
            L" sign_wg_len=" + std::to_wstring(signWg.size()) +
@@ -395,7 +349,8 @@ bool QwenFreeProtoAsrSession::Connect(const AsrConfig& cfg, std::wstring& out_er
                        static_cast<int>(cfg_.recvTimeoutMs));
 
     // 3. WinHTTP connect（host:port）。
-    HINTERNET connection = WinHttpConnect(session, cfg_.host.c_str(), kAsrPort, 0);
+    HINTERNET connection = WinHttpConnect(
+        session, endpoint.host.c_str(), endpoint.port, 0);
     hConnect_.store(connection);
     if (!connection) {
         out_error = L"WinHttpConnect failed: " + std::to_wstring(GetLastError());
@@ -405,25 +360,10 @@ bool QwenFreeProtoAsrSession::Connect(const AsrConfig& cfg, std::wstring& out_er
     // 4. 创建 WebSocket 升级请求。
     //    WinHttpOpenRequest 使用 GET，路径+query 不含 host。
     //    url 是完整 wss://host/path?query，提取 path?query 部分。
-    std::wstring pathQuery;
-    std::wstring schemeSep = L"://";
-    size_t schemeEnd = url.find(schemeSep);
-    if (schemeEnd != std::wstring::npos) {
-        size_t hostStart = schemeEnd + schemeSep.size();
-        size_t pathStart = url.find(L'/', hostStart);
-        if (pathStart != std::wstring::npos) {
-            pathQuery = url.substr(pathStart);
-        } else {
-            pathQuery = L"/";
-        }
-    } else {
-        pathQuery = url;
-    }
-
     HINTERNET hReq = WinHttpOpenRequest(
-        connection, L"GET", pathQuery.c_str(),
+        connection, L"GET", endpoint.pathAndQuery.c_str(),
         nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
-        WINHTTP_FLAG_SECURE);
+        endpoint.secure ? WINHTTP_FLAG_SECURE : 0);
     if (!hReq) {
         out_error = L"WinHttpOpenRequest failed: " + std::to_wstring(GetLastError());
         return false;
@@ -537,7 +477,7 @@ bool QwenFreeProtoAsrSession::SendStart(std::wstring& out_error) {
         "\"ctcHotwordType\":2,\"format\":\"pcm\",\"modelType\":4,"
         "\"promptType\":2,\"sampleRate\":16000,"
         "\"type\":\"manualStreamStop\",\"vadStrategy\":2},"
-        "\"eventId\":\"" + channelId_ +
+        "\"eventId\":\"" + JsonEscape(channelId_) +
         "_0\",\"eventType\":\"user.session.start\"}";
     {
         std::lock_guard<std::mutex> lock(identifiersMutex_);
@@ -549,34 +489,58 @@ bool QwenFreeProtoAsrSession::SendStart(std::wstring& out_error) {
     receivePayload_.clear();
     if (!SendFrame(nullptr, 0, json, out_error)) return false;
 
-    // The server allocates these identifiers in the start response.  A commit
-    // sent before this response leaves a WebSocket connected but no ASR round.
-    AsrFrame started = RecvFrame(3000);
-    if (IsCancellationRequested()) {
-        out_error = L"Qwen ASR session start cancelled";
-        return false;
-    }
-    if (started.type != FrameType::Started || started.sessionId.empty() ||
-        started.roundId.empty()) {
-        if (started.type == FrameType::Error) {
-            out_error = started.errorMsg.empty()
+    // The server allocates these identifiers in the start response. Some
+    // gateways emit a partial/control frame first, so keep pumping until both
+    // IDs arrive instead of treating the first non-error object as a Partial
+    // and waiting for a later audio commit that can never be valid.
+    const ULONGLONG deadline =
+        GetTickCount64() + static_cast<ULONGLONG>(kStartHandshakeTimeoutMs);
+    for (;;) {
+        if (IsCancellationRequested()) {
+            out_error = L"Qwen ASR session start cancelled";
+            return false;
+        }
+
+        std::string sessionId;
+        std::string roundId;
+        {
+            std::lock_guard<std::mutex> lock(identifiersMutex_);
+            sessionId = sessionId_;
+            roundId = roundId_;
+        }
+        if (!sessionId.empty() && !roundId.empty()) return true;
+
+        const ULONGLONG now = GetTickCount64();
+        if (now >= deadline) {
+            out_error = L"timed out waiting for user.session.start response";
+            return false;
+        }
+        const DWORD remaining = static_cast<DWORD>(
+            (std::min<ULONGLONG>)(deadline - now,
+                                   static_cast<ULONGLONG>(kStartHandshakeTimeoutMs)));
+        const AsrFrame received = RecvFrame(remaining);
+        if (received.type == FrameType::Error) {
+            out_error = received.errorMsg.empty()
                 ? L"server returned an ASR start error"
-                : started.errorMsg;
+                : received.errorMsg;
             // RecvFrame sanitizes structured codes before exposing them. Keep
             // the code in the start error so retry policy can distinguish
             // auth/signature failures (for example D30112) from transport
             // failures.
-            if (!started.errorCode.empty()) {
-                out_error += L" (code=" + started.errorCode + L")";
+            if (!received.errorCode.empty()) {
+                out_error += L" (code=" + received.errorCode + L")";
             }
-        } else if (started.type == FrameType::Closed) {
-            out_error = L"server closed before user.session.start response";
-        } else {
-            out_error = L"missing sessionId/roundId in user.session.start response";
+            return false;
         }
-        return false;
+        if (received.type == FrameType::Closed) {
+            out_error = L"server closed before user.session.start response";
+            return false;
+        }
+        if (received.type == FrameType::Timeout && GetTickCount64() >= deadline) {
+            out_error = L"timed out waiting for user.session.start response";
+            return false;
+        }
     }
-    return true;
 }
 
 bool QwenFreeProtoAsrSession::SendPcm(const void* pcm, size_t bytes,
@@ -623,10 +587,10 @@ bool QwenFreeProtoAsrSession::SendStop(std::wstring& out_error) {
         return false;
     }
     const std::string json =
-        "{\"data\":{\"roundId\":\"" + roundId +
-        "\",\"sessionId\":\"" + sessionId +
+        "{\"data\":{\"roundId\":\"" + JsonEscape(roundId) +
+        "\",\"sessionId\":\"" + JsonEscape(sessionId) +
         "\",\"type\":\"manualStreamStop\"},\"eventId\":\"" +
-        channelId_ + "_" + std::to_string(eventSequence_++) +
+        JsonEscape(channelId_) + "_" + std::to_string(eventSequence_++) +
         "\",\"eventType\":\"user.audio.stop\"}";
     return SendFrame(nullptr, 0, json, out_error);
 }
@@ -694,9 +658,10 @@ bool QwenFreeProtoAsrSession::SendCommit(const void* pcm,
     }
     const std::string json =
         "{\"data\":{\"bitDepth\":16,\"channel\":\"mono\","
-        "\"format\":\"pcm\",\"roundId\":\"" + roundId +
-        "\",\"sampleRate\":16000,\"sessionId\":\"" + sessionId +
-        "\",\"type\":\"manualStreamStop\"},\"eventId\":\"" + channelId_ +
+        "\"format\":\"pcm\",\"roundId\":\"" + JsonEscape(roundId) +
+        "\",\"sampleRate\":16000,\"sessionId\":\"" + JsonEscape(sessionId) +
+        "\",\"type\":\"manualStreamStop\"},\"eventId\":\"" +
+        JsonEscape(channelId_) +
         "_" + std::to_string(eventSequence_++) +
         "\",\"eventType\":\"user.audio.commit\"}";
     return SendFrame(pcm, bytes, json, out_error);
@@ -841,75 +806,29 @@ AsrFrame QwenFreeProtoAsrSession::RecvFrame(DWORD timeoutMs) {
             static_cast<int>(cfg_.recvTimeoutMs));
     }
 
-    if (!qwen_free_json::IsValidDocument(json)) {
-        frame.type = FrameType::Error;
-        frame.errorCode = L"malformed_json";
-        frame.errorMsg = L"Qwen ASR returned malformed JSON";
-        LogErr(L"recv", frame.errorMsg +
-               L" payload_bytes=" + std::to_wstring(json.size()));
-        return frame;
-    }
-
-    const std::string action = ExtractAction(json);
-    std::string sessionId = qwen_free_json::ExtractStringAtPath(
-        json, {"data", "sessionId"});
-    if (sessionId.empty()) sessionId = ExtractJsonString(json, "sessionId");
-    std::string roundId = qwen_free_json::ExtractStringAtPath(
-        json, {"data", "roundId"});
-    if (roundId.empty()) roundId = ExtractJsonString(json, "roundId");
-    const std::string transcript = ExtractTranscript(json);
-    const bool isFinal = IsFinalTranscript(json);
+    frame = ParseAsrResponseJson(json);
     LogErr(L"recv_json", L"action=" +
-           Utf8ToWide(action.empty() ? std::string("<empty>") : action) +
+           (frame.action.empty() ? std::wstring(L"<empty>") : frame.action) +
            L" bytes=" + std::to_wstring(json.size()) +
-           L" text_bytes=" + std::to_wstring(transcript.size()) +
-           L" final=" + std::to_wstring(isFinal ? 1 : 0) +
-           L" session_id=" + std::to_wstring(sessionId.empty() ? 0 : 1) +
-           L" round_id=" + std::to_wstring(roundId.empty() ? 0 : 1));
-    if (!sessionId.empty() || !roundId.empty()) {
-        std::lock_guard<std::mutex> lock(identifiersMutex_);
-        if (!sessionId.empty()) sessionId_ = sessionId;
-        if (!roundId.empty()) roundId_ = roundId;
-    }
-    frame.sessionId = Utf8ToWide(sessionId);
-    frame.roundId = Utf8ToWide(roundId);
-
-    if (action == "user.session.start" || action == "started" ||
-        action == "asr_started") {
-        frame.type = FrameType::Started;
-        return frame;
-    }
-
-    if (action == "error" || action == "asr_error" ||
-        action.find(".error") != std::string::npos) {
-        frame.type = FrameType::Error;
-        std::string errorCode = ExtractJsonString(json, "code");
-        if (errorCode.empty()) {
-            errorCode = qwen_free_json::ExtractNumberText(json, "code");
-        }
-        if (qwen_free_diagnostics::IsSafeStructuredField(errorCode)) {
-            frame.errorCode = Utf8ToWide(errorCode);
-        }
-        const std::string errorMessage = ExtractJsonString(json, "message");
-        if (qwen_free_diagnostics::IsSafeStructuredField(errorMessage)) {
-            frame.errorMsg = Utf8ToWide(errorMessage);
-        }
-        if (frame.errorMsg.empty()) {
-            frame.errorMsg = L"server returned an ASR error";
-        }
+           L" text_bytes=" + std::to_wstring(frame.text.size()) +
+           L" final=" + std::to_wstring(
+               frame.type == FrameType::Final ? 1 : 0) +
+           L" session_id=" + std::to_wstring(frame.sessionId.empty() ? 0 : 1) +
+           L" round_id=" + std::to_wstring(frame.roundId.empty() ? 0 : 1));
+    if (frame.type == FrameType::Error) {
         LogErr(L"recv_error", L"code=" +
                (frame.errorCode.empty() ? L"<empty>" : frame.errorCode) +
                L" message_wlen=" + std::to_wstring(frame.errorMsg.size()) +
                L" payload_bytes=" + std::to_wstring(json.size()));
-        return frame;
     }
-
-    frame.text = Utf8ToWide(transcript);
-    if (action == "completed" || action == "asr_completed" ||
-        action == "asr.final" || isFinal) {
-        frame.type = FrameType::Final;
-    } else {
-        frame.type = FrameType::Partial;
+    if (!frame.sessionId.empty() || !frame.roundId.empty()) {
+        std::lock_guard<std::mutex> lock(identifiersMutex_);
+        if (!frame.sessionId.empty()) {
+            sessionId_ = WideToUtf8(frame.sessionId);
+        }
+        if (!frame.roundId.empty()) {
+            roundId_ = WideToUtf8(frame.roundId);
+        }
     }
     return frame;
 }

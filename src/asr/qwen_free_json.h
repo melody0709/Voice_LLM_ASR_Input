@@ -14,6 +14,20 @@
 // be mistaken for a control field.
 namespace qwen_free_json {
 
+// Value kind is exposed for the few protocol envelopes where the difference
+// between `error:null`, `error:""`, and `error:{...}` changes the state
+// machine.  The parser remains intentionally small and dependency-free.
+enum class ValueKind {
+    Missing,
+    String,
+    Number,
+    Bool,
+    Null,
+    Object,
+    Array,
+    Invalid,
+};
+
 namespace detail {
 
 inline void SkipWhitespace(const std::string& json, size_t& pos) {
@@ -156,6 +170,7 @@ struct RawCandidate {
 // distinguish object/array/null fields from a missing field.
 struct ValueCandidate {
     std::vector<std::string> path;
+    ValueKind kind = ValueKind::Invalid;
 };
 
 inline bool IsValueDelimiter(char c) {
@@ -220,7 +235,19 @@ inline bool ParseValue(const std::string& json,
     if (recursionDepth > kMaxJsonDepth) return false;
     SkipWhitespace(json, pos);
     if (pos >= json.size()) return false;
-    if (values && !path.empty()) values->push_back({path});
+    if (values && !path.empty()) {
+        ValueKind kind = ValueKind::Invalid;
+        switch (json[pos]) {
+        case '"': kind = ValueKind::String; break;
+        case '{': kind = ValueKind::Object; break;
+        case '[': kind = ValueKind::Array; break;
+        case 't':
+        case 'f': kind = ValueKind::Bool; break;
+        case 'n': kind = ValueKind::Null; break;
+        default: kind = ValueKind::Number; break;
+        }
+        values->push_back({path, kind});
+    }
 
     if (json[pos] == '"') {
         std::string value;
@@ -530,6 +557,23 @@ inline bool HasValueAtPath(const std::string& json,
         if (detail::PathEquals(candidate.path, path)) return true;
     }
     return false;
+}
+
+inline ValueKind GetValueKindAtPath(
+    const std::string& json,
+    std::initializer_list<const char*> path) {
+    if (json.empty() || path.size() == 0) return ValueKind::Missing;
+    std::vector<detail::StringCandidate> strings;
+    std::vector<detail::BoolCandidate> bools;
+    std::vector<detail::RawCandidate> raws;
+    std::vector<detail::ValueCandidate> values;
+    if (!detail::ParseDocument(json, strings, bools, raws, &values)) {
+        return ValueKind::Invalid;
+    }
+    for (const auto& candidate : values) {
+        if (detail::PathEquals(candidate.path, path)) return candidate.kind;
+    }
+    return ValueKind::Missing;
 }
 
 // True when any value in a valid document uses the requested key, including

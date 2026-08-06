@@ -54,6 +54,102 @@ constexpr const char*    kDefaultVe       = "0.1.0";
 constexpr int            kDefaultVersion   = 2;
 constexpr INTERNET_PORT  kAsrPort         = INTERNET_DEFAULT_HTTPS_PORT;
 
+// A debug endpoint is intentionally a complete ws:// or wss:// URL rather
+// than a separately configurable host/path pair.  Parse it once so WinHTTP
+// connects to the override host and port (and uses plaintext only for ws://)
+// instead of accidentally retaining the production endpoint settings.
+struct AsrWebSocketEndpoint {
+    std::wstring host;
+    std::wstring pathAndQuery = L"/";
+    INTERNET_PORT port = INTERNET_DEFAULT_HTTPS_PORT;
+    bool secure = true;
+};
+
+inline bool ParseAsrWebSocketUrl(const std::wstring& url,
+                                 AsrWebSocketEndpoint& endpoint) {
+    endpoint = {};
+    const std::size_t schemeEnd = url.find(L"://");
+    if (schemeEnd == std::wstring::npos || schemeEnd == 0) return false;
+
+    std::wstring scheme = url.substr(0, schemeEnd);
+    for (wchar_t& c : scheme) {
+        if (c >= L'A' && c <= L'Z') c = static_cast<wchar_t>(c - L'A' + L'a');
+    }
+    if (scheme == L"wss") {
+        endpoint.secure = true;
+        endpoint.port = INTERNET_DEFAULT_HTTPS_PORT;
+    } else if (scheme == L"ws") {
+        endpoint.secure = false;
+        endpoint.port = INTERNET_DEFAULT_HTTP_PORT;
+    } else {
+        return false;
+    }
+
+    const std::size_t authorityStart = schemeEnd + 3;
+    if (authorityStart >= url.size() ||
+        url.find_first_of(L" \t\r\n#", authorityStart) != std::wstring::npos) {
+        return false;
+    }
+    const std::size_t pathStart = url.find_first_of(L"/?", authorityStart);
+    const std::wstring authority = pathStart == std::wstring::npos
+        ? url.substr(authorityStart)
+        : url.substr(authorityStart, pathStart - authorityStart);
+    if (authority.empty() || authority.find(L'@') != std::wstring::npos) {
+        return false;
+    }
+
+    const auto parsePort = [](const std::wstring& text,
+                              INTERNET_PORT& port) -> bool {
+        if (text.empty()) return false;
+        unsigned long value = 0;
+        for (const wchar_t c : text) {
+            if (c < L'0' || c > L'9') return false;
+            const unsigned long digit = static_cast<unsigned long>(c - L'0');
+            if (value > (65535ul - digit) / 10ul) return false;
+            value = value * 10ul + digit;
+        }
+        if (value == 0) return false;
+        port = static_cast<INTERNET_PORT>(value);
+        return true;
+    };
+
+    std::wstring portText;
+    bool hasExplicitPort = false;
+    if (authority.front() == L'[') {
+        const std::size_t closing = authority.find(L']');
+        if (closing == std::wstring::npos || closing == 1) return false;
+        endpoint.host = authority.substr(1, closing - 1);
+        const std::wstring suffix = authority.substr(closing + 1);
+        if (!suffix.empty()) {
+            if (suffix.front() != L':') return false;
+            hasExplicitPort = true;
+            portText = suffix.substr(1);
+        }
+    } else {
+        const std::size_t colon = authority.rfind(L':');
+        if (colon == std::wstring::npos) {
+            endpoint.host = authority;
+        } else {
+            // Unbracketed IPv6 is ambiguous with a port and is rejected.
+            if (authority.find(L':') != colon) return false;
+            endpoint.host = authority.substr(0, colon);
+            hasExplicitPort = true;
+            portText = authority.substr(colon + 1);
+        }
+    }
+    if (endpoint.host.empty()) return false;
+    if (hasExplicitPort && !parsePort(portText, endpoint.port)) return false;
+
+    if (pathStart == std::wstring::npos) {
+        endpoint.pathAndQuery = L"/";
+    } else if (url[pathStart] == L'?') {
+        endpoint.pathAndQuery = L"/" + url.substr(pathStart);
+    } else {
+        endpoint.pathAndQuery = url.substr(pathStart);
+    }
+    return !endpoint.pathAndQuery.empty();
+}
+
 // The ASR service is sensitive to both query order and the placement of the
 // final sign field.  Keep the unsigned query construction in one small,
 // dependency-free helper so the production path and offline regression test
@@ -156,6 +252,7 @@ enum class FrameType {
 
 struct AsrFrame {
     FrameType type = FrameType::Closed;
+    std::wstring action;      // normalized control/event name, when present
     std::wstring text;        // transcript text（Partial/Final 时）
     std::wstring sessionId;   // session_id（Started 时）
     std::wstring roundId;     // roundId（Started/commit ack 时）
@@ -202,6 +299,12 @@ public:
     // 为下一轮 worker-owned 连接清除内部 Close() wakeup 标志。外部
     // RequestCancel() 是 sticky，不能被重连路径清掉。
     bool ResetCancellation();
+
+    // Explicitly start a new logical recording on the same session object.
+    // This is only called after the previous worker/receiver has been joined;
+    // unlike replay ResetCancellation(), it is allowed to clear the external
+    // Abort cancellation that intentionally remains sticky for one session.
+    bool ResetCancellationForNewSession();
 
     bool IsCancellationRequested() const {
         return cancelRequested_.load(std::memory_order_acquire) ||

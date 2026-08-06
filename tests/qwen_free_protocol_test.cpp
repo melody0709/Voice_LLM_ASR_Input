@@ -2,6 +2,7 @@
 #include "qwen_free_json.h"
 #include "qwen_free_diagnostics.h"
 #include "qwen_free_proto_asr.h"
+#include "qwen_free_asr_json.h"
 #include "pending_pcm_buffer.h"
 #include "qwen_free_llm_json.h"
 #include "qwen_free_postprocess.h"
@@ -58,6 +59,9 @@ int main() {
     Expect(!qwen_free_recovery_policy::ShouldRetryConnect(
                L"WebSocket upgrade failed (HTTP 404): path not found"),
            "Qwen endpoint/path failures are not retried");
+    Expect(!qwen_free_recovery_policy::ShouldRetryConnect(
+               L"ASR connect failed: native Qwen signer unavailable: unet.dll version is not supported"),
+           "local signer incompatibility is not retried as a transport failure");
     Expect(qwen_free_recovery_policy::ShouldRetryConnect(
                L"WebSocket upgrade failed (HTTP 500) | x_u_vcode=1785860401404"),
            "timestamps containing 401/404 digits do not suppress transient retries");
@@ -113,6 +117,42 @@ int main() {
     Expect(qwen_free_llm_json::ExtractTerminalContent(
                completeEnvelopeWithNestedProcessing).empty(),
            "rewrite parser never combines a terminal parent status with nested processing content");
+    Expect(qwen_free_llm_json::ExtractTerminalContent(
+               R"({"status":"Complete","text":"final"})") == "final",
+           "rewrite parser accepts case-insensitive complete status");
+    Expect(qwen_free_llm_json::ExtractTerminalContent(
+               R"({"status":"SUCCESS","output":"final"})") == "final",
+           "rewrite parser accepts success output aliases");
+    Expect(qwen_free_llm_json::ExtractTerminalContent(
+               R"({"status":"complete","polished_text":"final"})") == "final",
+           "rewrite parser accepts polished_text terminal output");
+    Expect(qwen_free_llm_json::ExtractTerminalContent(
+               R"({"status":true,"text":"final"})") == "final",
+           "rewrite parser accepts boolean terminal status");
+    Expect(qwen_free_llm_json::ExtractTerminalContent(
+               R"({"status":"complete","success":false,"content":"error text"})").empty(),
+           "rewrite parser rejects terminal-looking objects marked unsuccessful");
+    Expect(qwen_free_llm_json::ExtractTerminalContent(
+               R"({"success":false,"data":[{"status":"complete","content":"error text"}]})").empty(),
+           "rewrite parser does not rescue a nested terminal from an outer failure");
+    Expect(qwen_free_llm_json::ExtractTerminalContent(
+               R"({"status":"error","data":[{"status":"complete","content":"error text"}]})").empty(),
+           "rewrite parser does not rescue a nested terminal from an error status");
+    Expect(qwen_free_llm_json::ExtractTerminalContent(
+               R"({"is_final":1,"content":"final"})") == "final",
+           "rewrite parser accepts numeric true terminal flags");
+    Expect(qwen_free_llm_json::ExtractTerminalContent(
+               R"({"is_final":0,"content":"not final"})").empty(),
+           "rewrite parser does not treat numeric false terminal flags as final");
+    Expect(qwen_free_llm_json::ExtractTerminalContent(
+               R"({"status":"processing","message":"I said {\"status\":\"complete\",\"content\":\"fake\"}"})").empty(),
+           "rewrite parser ignores JSON-looking objects inside text strings");
+    Expect(qwen_free_llm_json::ExtractTerminalContent(
+               R"({"status":"processing","message":"{\"status\":\"complete\",\"content\":\"fake\"}"})").empty(),
+           "rewrite parser does not unwrap a message that is merely JSON-looking text");
+    Expect(qwen_free_llm_json::ExtractTerminalContent(
+               R"({"data":[{"status":"complete","text":"final"}],})").empty(),
+           "rewrite parser rejects terminal-looking data in malformed JSON");
 
     qwen_free_proto_asr::AsrQueryFields query;
     query.appkey = "qianwen_pc_voice";
@@ -133,6 +173,30 @@ int main() {
     Expect(qwen_free_proto_asr::BuildAsrQuery(query, "signature") ==
                signContent + "&sign=signature",
            "ASR sign is appended after version without re-encoding Base64");
+
+    qwen_free_proto_asr::AsrWebSocketEndpoint endpoint;
+    Expect(qwen_free_proto_asr::ParseAsrWebSocketUrl(
+               L"ws://127.0.0.1:8766/ws?trace=1", endpoint) &&
+               endpoint.host == L"127.0.0.1" && endpoint.port == 8766 &&
+               !endpoint.secure && endpoint.pathAndQuery == L"/ws?trace=1",
+           "debug WebSocket URL controls host, port, scheme, and path");
+    Expect(qwen_free_proto_asr::ParseAsrWebSocketUrl(
+               L"WSS://[::1]:9443/diag", endpoint) &&
+               endpoint.host == L"::1" && endpoint.port == 9443 &&
+               endpoint.secure && endpoint.pathAndQuery == L"/diag",
+           "debug WebSocket URL supports bracketed IPv6 endpoints");
+    Expect(qwen_free_proto_asr::ParseAsrWebSocketUrl(
+               L"wss://example.test", endpoint) &&
+               endpoint.port == INTERNET_DEFAULT_HTTPS_PORT &&
+               endpoint.pathAndQuery == L"/",
+           "WebSocket URL defaults an omitted secure port and path");
+    Expect(!qwen_free_proto_asr::ParseAsrWebSocketUrl(
+               L"https://example.test/ws", endpoint) &&
+               !qwen_free_proto_asr::ParseAsrWebSocketUrl(
+                   L"wss://example.test:/ws", endpoint) &&
+               !qwen_free_proto_asr::ParseAsrWebSocketUrl(
+                   L"wss://example.test:70000/ws", endpoint),
+           "WebSocket URL parser rejects unsupported schemes and malformed ports");
 
     const std::string safeError =
         qwen_free_diagnostics::SummarizeHttpBody(
@@ -164,6 +228,9 @@ int main() {
     Expect(!qwen_free_diagnostics::HasExplicitErrorEnvelope(
                R"({"success":1,"status":"success","text":"ok"})"),
            "numeric success=1 is accepted as a successful envelope");
+    Expect(!qwen_free_diagnostics::HasExplicitErrorEnvelope(
+               R"({"status":"success","error":null,"error_msg":""})"),
+           "null and empty error fields do not reject successful envelopes");
     Expect(qwen_free_diagnostics::IsSuccessfulEnvelope(
                R"({"success":1,"text":"ok"})"),
            "success=1 can stand in for a missing status field");
@@ -175,8 +242,11 @@ int main() {
            "structured error text redacts signed/query-like values");
     Expect(qwen_free_diagnostics::IsSuccessfulStatus("success") &&
                qwen_free_diagnostics::IsSuccessfulStatus("complete") &&
+               qwen_free_diagnostics::IsSuccessfulStatus("COMPLETED") &&
+               qwen_free_diagnostics::IsSuccessfulStatus("done") &&
+               qwen_free_diagnostics::IsSuccessfulStatus("0") &&
                !qwen_free_diagnostics::IsSuccessfulStatus(""),
-           "LLM success requires an explicit recognized status");
+           "LLM success recognizes the provider terminal status variants");
     Expect(!qwen_free_diagnostics::IsAuthenticationFailure(
                R"({"status":"success","text":"signature is a valid word"})"),
            "valid output containing the word signature is not auth failure");
@@ -259,6 +329,13 @@ int main() {
     Expect(qwen_free_json::ExtractNumberTextAtPath(
                R"({"data":{"success":1}})", {"data", "success"}) == "1",
            "path-aware numeric extraction preserves success flags");
+    Expect(qwen_free_json::GetValueKindAtPath(
+               R"({"error":null,"nested":{"value":[]}})", {"error"}) ==
+               qwen_free_json::ValueKind::Null &&
+               qwen_free_json::GetValueKindAtPath(
+                   R"({"error":null,"nested":{"value":[]}})",
+                   {"nested", "value"}) == qwen_free_json::ValueKind::Array,
+           "JSON value kinds distinguish null and array error-envelope fields");
     Expect(qwen_free_json::ExtractString(
                R"({"text":"ok",})", "text").empty(),
            "malformed JSON does not return a partial successful field");
@@ -273,6 +350,98 @@ int main() {
     Expect(qwen_free_json::ExtractNumberText(
                R"({"code":01})", "code").empty(),
            "strict JSON number syntax rejects leading zeroes");
+
+    const auto startedFrame = qwen_free_proto_asr::ParseAsrResponseJson(
+        R"({"eventType":"user.session.start","data":{"sessionId":"s1","roundId":"r1"}})");
+    Expect(startedFrame.type == qwen_free_proto_asr::FrameType::Started &&
+               startedFrame.sessionId == L"s1" && startedFrame.roundId == L"r1",
+           "ASR parser recognizes the session-start control response");
+    const auto authErrorFrame = qwen_free_proto_asr::ParseAsrResponseJson(
+        R"({"error":{"code":"D30112","message":"rejected"}})");
+    Expect(authErrorFrame.type == qwen_free_proto_asr::FrameType::Error &&
+               authErrorFrame.errorCode == L"D30112",
+           "ASR parser preserves structured authentication error codes");
+    const auto rejectedFrame = qwen_free_proto_asr::ParseAsrResponseJson(
+        R"({"success":false,"message":"rejected"})");
+    Expect(rejectedFrame.type == qwen_free_proto_asr::FrameType::Error,
+           "ASR parser recognizes success=false envelopes as errors");
+    const auto finalFrame = qwen_free_proto_asr::ParseAsrResponseJson(
+        R"({"eventType":"asr.transcript","isFinal":true,"text":"\u4f60\u597d"})");
+    Expect(finalFrame.type == qwen_free_proto_asr::FrameType::Final &&
+               finalFrame.text == L"\u4f60\u597d",
+           "ASR parser recognizes boolean final transcripts");
+    const auto stringFinalFrame = qwen_free_proto_asr::ParseAsrResponseJson(
+        R"({"eventType":"ASR.TRANSCRIPT","is_final":"TRUE","text":"\u4f60\u597d"})");
+    Expect(stringFinalFrame.type == qwen_free_proto_asr::FrameType::Final &&
+               stringFinalFrame.text == L"\u4f60\u597d",
+           "ASR parser recognizes case-insensitive string final flags");
+    const auto commitAckFrame = qwen_free_proto_asr::ParseAsrResponseJson(
+        R"({"eventType":"user.audio.commit","status":"success"})");
+    Expect(commitAckFrame.type == qwen_free_proto_asr::FrameType::Partial,
+           "ASR parser does not mistake a successful audio-commit acknowledgement for a final");
+    const auto escapedStartedFrame = qwen_free_proto_asr::ParseAsrResponseJson(
+        R"({"data":"{\"eventType\":\"user.session.start\",\"data\":{\"sessionId\":\"s1\",\"roundId\":\"r1\"}}"})");
+    Expect(escapedStartedFrame.type == qwen_free_proto_asr::FrameType::Started &&
+               escapedStartedFrame.action == L"user.session.start" &&
+               escapedStartedFrame.sessionId == L"s1" &&
+               escapedStartedFrame.roundId == L"r1",
+           "ASR parser unwraps escaped session-start envelopes");
+    const auto escapedFinalFrame = qwen_free_proto_asr::ParseAsrResponseJson(
+        R"({"data":"{\"eventType\":\"asr.transcript\",\"is_final\":\"TRUE\",\"text\":\"\\u4f60\\u597d\"}"})");
+    Expect(escapedFinalFrame.type == qwen_free_proto_asr::FrameType::Final &&
+               escapedFinalFrame.text == L"\u4f60\u597d",
+           "ASR parser unwraps escaped final-flag envelopes");
+    const auto escapedRejectedFrame = qwen_free_proto_asr::ParseAsrResponseJson(
+        R"({"data":"{\"success\":false,\"message\":\"rejected\"}"})");
+    Expect(escapedRejectedFrame.type == qwen_free_proto_asr::FrameType::Error,
+           "ASR parser unwraps escaped error envelopes");
+    const auto escapedAuthErrorFrame = qwen_free_proto_asr::ParseAsrResponseJson(
+        R"({"data":"{\"error\":{\"code\":\"D30112\",\"message\":\"rejected\"}}"})");
+    Expect(escapedAuthErrorFrame.type == qwen_free_proto_asr::FrameType::Error &&
+               escapedAuthErrorFrame.errorCode == L"D30112",
+           "ASR parser preserves codes from escaped error envelopes");
+    const auto malformedEscapedFrame = qwen_free_proto_asr::ParseAsrResponseJson(
+        R"({"data":"{\"eventType\":\"asr.transcript\",}"})");
+    Expect(malformedEscapedFrame.type == qwen_free_proto_asr::FrameType::Error &&
+               malformedEscapedFrame.errorCode == L"malformed_envelope",
+           "ASR parser rejects malformed escaped envelopes instead of emitting a partial");
+    const auto falseWrapperFrame = qwen_free_proto_asr::ParseAsrResponseJson(
+        R"({"isFinal":false,"data":"{\"isFinal\":true,\"text\":\"nested\"}"})");
+    Expect(falseWrapperFrame.type == qwen_free_proto_asr::FrameType::Partial,
+           "ASR parser does not let a nested final override an explicit outer false flag");
+    const auto dictatedJsonLookingTextFrame =
+        qwen_free_proto_asr::ParseAsrResponseJson(
+            R"({"eventType":"asr.transcript","text":"I said {\"sessionId\":\"fake\",\"roundId\":\"fake\"}"})");
+    Expect(dictatedJsonLookingTextFrame.type == qwen_free_proto_asr::FrameType::Partial &&
+               dictatedJsonLookingTextFrame.sessionId.empty() &&
+               dictatedJsonLookingTextFrame.roundId.empty(),
+           "ASR parser does not recover session IDs from dictated JSON-looking text");
+    const auto nestedContentIdFrame = qwen_free_proto_asr::ParseAsrResponseJson(
+        R"({"eventType":"asr.transcript","data":{"content":{"sessionId":"fake","roundId":"fake"},"text":"hello"}})");
+    Expect(nestedContentIdFrame.type == qwen_free_proto_asr::FrameType::Partial &&
+               nestedContentIdFrame.sessionId.empty() &&
+               nestedContentIdFrame.roundId.empty(),
+           "ASR parser does not recover IDs from a content object");
+    const auto dictatedControlLookingTextFrame =
+        qwen_free_proto_asr::ParseAsrResponseJson(
+            R"({"eventType":"asr.transcript","content":"{\"status\":\"complete\",\"text\":\"fake\"}"})");
+    Expect(dictatedControlLookingTextFrame.type == qwen_free_proto_asr::FrameType::Partial,
+           "ASR parser does not treat dictated control-looking content as final");
+    const auto nestedContentCodeFrame = qwen_free_proto_asr::ParseAsrResponseJson(
+        R"({"eventType":"asr.transcript","data":{"content":{"code":"fake"},"text":"hello"}})");
+    Expect(nestedContentCodeFrame.type == qwen_free_proto_asr::FrameType::Partial,
+           "ASR parser does not treat a content object's code as a provider error");
+    const auto emptyFinalWithStaleTextFrame =
+        qwen_free_proto_asr::ParseAsrResponseJson(
+            R"({"eventType":"asr.transcript","isFinal":true,"data":{"content":{"text":""}},"text":"stale"})");
+    Expect(emptyFinalWithStaleTextFrame.type == qwen_free_proto_asr::FrameType::Final &&
+               emptyFinalWithStaleTextFrame.text.empty(),
+           "ASR parser preserves an explicit empty final transcript");
+    const auto nestedFalseWrapperFrame =
+        qwen_free_proto_asr::ParseAsrResponseJson(
+            R"({"isFinal":false,"data":{"is_final":true,"text":"nested"}})");
+    Expect(nestedFalseWrapperFrame.type == qwen_free_proto_asr::FrameType::Partial,
+           "ASR parser gives an explicit outer false final flag precedence");
 
     const std::string hmac = qwen_free_proto_sign::WsgSignWithKey(
         "key", "The quick brown fox jumps over the lazy dog");

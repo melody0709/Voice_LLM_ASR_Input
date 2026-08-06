@@ -115,6 +115,11 @@ public:
             receiver_.join();
         }
 
+        if (!asr_.ResetCancellationForNewSession()) {
+            error = QwenErrorText(L"previous session is still closing");
+            return false;
+        }
+
         pendingAudio_.Clear();
         abort_.store(false);
         stopped_.store(false);
@@ -303,6 +308,20 @@ private:
         BufferUntilStopped();
         streaming_.store(false);
         if (abort_.load()) return;
+
+        // Authentication/configuration failures cannot be repaired by
+        // replaying the same PCM.  Preserve the recording for the main
+        // fallback path, but avoid an unnecessary reconnect and its extra
+        // latency once the user releases the hotkey.
+        if (!qwen_free_recovery_policy::ShouldRetryConnect(error)) {
+            asr_runtime_log::WriteIf(
+                config_.qwenFreeDebugLog,
+                "[qwen_free] skip replay for non-retryable error: %ls",
+                error.c_str());
+            finalReceived_.store(true);
+            EmitFinal(QwenErrorText(error));
+            return;
+        }
 
         NotifyStatus(L"Retrying... Qwen IME (Free)");
         std::wstring recoveredText;

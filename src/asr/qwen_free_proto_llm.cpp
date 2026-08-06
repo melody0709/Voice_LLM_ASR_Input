@@ -7,11 +7,13 @@
 #include "qwen_free_json.h"
 #include "qwen_free_llm_json.h"
 #include "qwen_free_proto_unet.h"
+#include "qwen_free_proto_utdid.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <initializer_list>
 #include <limits>
 #include <random>
 #include <sstream>
@@ -80,6 +82,14 @@ std::string ExtractJsonString(const std::string& json, const std::string& key) {
 std::string ExtractLlmString(const std::string& json,
                              const std::string& key,
                              int depth = 0) {
+    const qwen_free_json::ValueKind directKind =
+        qwen_free_json::GetValueKindAtPath(json, {key.c_str()});
+    // Preserve an explicitly empty root field. Falling through to a nested
+    // object in that case can turn a provider's empty terminal output into a
+    // stale/processing child text.
+    if (directKind == qwen_free_json::ValueKind::String) {
+        return qwen_free_json::ExtractStringAtPath(json, {key.c_str()});
+    }
     std::string value = qwen_free_json::ExtractStringAtPath(
         json, {key.c_str()});
     if (value.empty()) value = ExtractJsonString(json, key);
@@ -100,6 +110,63 @@ std::string ExtractLlmString(const std::string& json,
         }
         value = ExtractLlmString(trimmed, key, depth + 1);
         if (!value.empty()) return value;
+    }
+    return {};
+}
+
+// Output fields are handled more conservatively than metadata fields.  A
+// generic recursive search can mistake `content`/`text` in a processing
+// message for the final VoiceInputWrite result. Accept direct fields and one
+// ordinary object envelope here; escaped/array envelopes must carry an
+// explicit terminal object and are handled by qwen_free_llm_json instead.
+std::string ExtractLlmOutputString(const std::string& json,
+                                   const char* key) {
+    if (!key || *key == '\0') return {};
+    if (qwen_free_json::GetValueKindAtPath(json, {key}) ==
+        qwen_free_json::ValueKind::String) {
+        return qwen_free_json::ExtractStringAtPath(json, {key});
+    }
+    for (const char* container : {
+             "data", "result", "response", "body", "payload"
+         }) {
+        const std::initializer_list<const char*> outputPath = {container, key};
+        if (qwen_free_json::GetValueKindAtPath(json, outputPath) !=
+            qwen_free_json::ValueKind::String) {
+            continue;
+        }
+
+        const std::initializer_list<const char*> statusPath = {container, "status"};
+        if (qwen_free_json::GetValueKindAtPath(json, statusPath) ==
+            qwen_free_json::ValueKind::String) {
+            const std::string status = qwen_free_diagnostics::LowerAscii(
+                qwen_free_json::ExtractStringAtPath(json, statusPath));
+            if (status == "processing" || status == "loading" ||
+                status == "pending" || status == "queued" ||
+                status == "running" || status == "in_progress") {
+                continue;
+            }
+        }
+        const std::initializer_list<const char*> successPath = {container, "success"};
+        const qwen_free_json::ValueKind successKind =
+            qwen_free_json::GetValueKindAtPath(json, successPath);
+        if (successKind == qwen_free_json::ValueKind::Bool &&
+            !qwen_free_json::ExtractBoolAtPath(json, successPath)) {
+            continue;
+        }
+        if (successKind == qwen_free_json::ValueKind::Number) {
+            const std::string success =
+                qwen_free_json::ExtractNumberTextAtPath(json, successPath);
+            if (success == "0" || success == "0.0") continue;
+        }
+        if (successKind == qwen_free_json::ValueKind::String) {
+            const std::string success = qwen_free_diagnostics::LowerAscii(
+                qwen_free_json::ExtractStringAtPath(json, successPath));
+            if (success == "false" || success == "0" || success == "no" ||
+                success == "off" || success == "failed" || success == "error") {
+                continue;
+            }
+        }
+        return qwen_free_json::ExtractStringAtPath(json, outputPath);
     }
     return {};
 }
@@ -179,8 +246,8 @@ LlmResult Execute(const LlmConfig& cfg,
     LlmResult r;
     auto t0 = std::chrono::steady_clock::now();
 
-    if (cfg.utdid.empty() || cfg.utdid.size() != 24) {
-        r.error = L"invalid utdid (expect 24 chars)";
+    if (!qwen_free_proto_utdid::IsValidUtdid(cfg.utdid)) {
+        r.error = L"invalid utdid (expect 24 initialized base62 chars)";
         return r;
     }
 
@@ -243,9 +310,9 @@ LlmResult Execute(const LlmConfig& cfg,
          << "\"intent\":\"" << IntentStr(intent) << "\","
          << "\"scene\":\"voice_input_assistant\","
          << "\"source\":\"shell_embedded_voice_usage\","
-         << "\"trigger_type\":\"" << JsonEscapeStr(cfg.triggerType) << "\"," 
-         << "\"req_id\":\"" << reqId << "\"," 
-         << "\"llm_session_id\":\"" << llmSessionId << "\"," 
+         << "\"trigger_type\":\"" << JsonEscapeStr(cfg.triggerType) << "\","
+         << "\"req_id\":\"" << reqId << "\","
+         << "\"llm_session_id\":\"" << llmSessionId << "\","
          << "\"recording_duration_ms\":"
          << recordingDurationMs << ","
          << "\"received_at_ms\":" << nowMs << ","
@@ -260,9 +327,9 @@ LlmResult Execute(const LlmConfig& cfg,
              << "\"intent_content\":\"" << JsonEscapeStr(selectedUtf8) << "\","
              << "\"rewrite_query\":\"" << JsonEscapeStr(instructionUtf8) << "\"},";
     }
-    body << "\"common_params\":{" 
-         << "\"utdid\":\"" << JsonEscapeStr(cfg.utdid) << "\"," 
-         << "\"appkey\":\"" << JsonEscapeStr(cfg.appkey) << "\"," 
+    body << "\"common_params\":{"
+         << "\"utdid\":\"" << JsonEscapeStr(cfg.utdid) << "\","
+         << "\"appkey\":\"" << JsonEscapeStr(cfg.appkey) << "\","
          << "\"vekp\":\"" << JsonEscapeStr(encryptedKps) << "\""
          << "}"
          << "}";
@@ -345,6 +412,16 @@ LlmResult Execute(const LlmConfig& cfg,
         return r;
     }
 
+    // Do not let a field reader salvage a terminal-looking object from a
+    // truncated/malformed HTTP body. Treat the response as a protocol error
+    // before status/output extraction so both ordinary polish and rewrite
+    // paths share the same integrity boundary.
+    if (!qwen_free_json::IsValidDocument(resp.body)) {
+        r.error = L"LLM response malformed JSON";
+        LogErr(r.error);
+        return r;
+    }
+
     LogErr(Utf8ToWide("LLM response shape: " +
                       qwen_free_diagnostics::SummarizeOutputShape(resp.body)));
     LogErr(Utf8ToWide("LLM response summary: " +
@@ -374,7 +451,14 @@ LlmResult Execute(const LlmConfig& cfg,
         LogErr(r.error);
         return r;
     }
-    std::string status = ExtractLlmString(resp.body, "status");
+    std::string status;
+    if (qwen_free_json::GetValueKindAtPath(resp.body, {"status"}) ==
+        qwen_free_json::ValueKind::Bool) {
+        status = qwen_free_json::ExtractBoolAtPath(resp.body, {"status"})
+            ? "true" : "false";
+    } else {
+        status = ExtractLlmString(resp.body, "status");
+    }
     if (status.empty()) {
         status = qwen_free_json::ExtractNumberText(resp.body, "status");
     }
@@ -382,17 +466,21 @@ LlmResult Execute(const LlmConfig& cfg,
         status = "success";
     }
     status = qwen_free_diagnostics::LowerAscii(status);
+    // Both intents can be wrapped in a message list. Prefer a terminal
+    // object from that list over the first (often processing) status field;
+    // the rewrite path additionally uses this as its replacement-text gate.
+    const std::string terminalContent =
+        qwen_free_llm_json::ExtractTerminalContent(resp.body);
     const std::string terminalRewriteContent = isRewrite
-        ? qwen_free_llm_json::ExtractTerminalContent(resp.body)
+        ? terminalContent
         : std::string();
     // Rewrite responses observed in the original client can carry a
     // completed message inside an envelope whose first visible status is
     // "complete", while ordinary VoiceInputWrite responses use "success".
     const bool successfulStatus =
         qwen_free_diagnostics::IsSuccessfulStatus(status);
-    const bool terminalRewriteReady =
-        isRewrite && !terminalRewriteContent.empty();
-    if (!successfulStatus && !terminalRewriteReady) {
+    const bool terminalContentReady = !terminalContent.empty();
+    if (!successfulStatus && !terminalContentReady) {
         r.error = status.empty() ||
                   !qwen_free_diagnostics::IsSafeStructuredField(status)
             ? L"LLM response missing successful status"
@@ -408,13 +496,16 @@ LlmResult Execute(const LlmConfig& cfg,
             // replace the user's selected text with.
             polished = terminalRewriteContent;
         }
-        if (polished.empty()) polished = ExtractLlmString(resp.body, "polished_text");
-        if (polished.empty()) polished = ExtractLlmString(resp.body, "polishedText");
-        if (polished.empty() && !isRewrite) polished = ExtractLlmString(resp.body, "content");
-        if (polished.empty()) polished = ExtractLlmString(resp.body, "output_text");
-        if (polished.empty()) polished = ExtractLlmString(resp.body, "outputText");
-        if (polished.empty()) polished = ExtractLlmString(resp.body, "answer");
-        if (polished.empty()) polished = ExtractLlmString(resp.body, "text");
+        if (polished.empty() && terminalContentReady) {
+            polished = terminalContent;
+        }
+        if (polished.empty()) polished = ExtractLlmOutputString(resp.body, "polished_text");
+        if (polished.empty()) polished = ExtractLlmOutputString(resp.body, "polishedText");
+        if (polished.empty()) polished = ExtractLlmOutputString(resp.body, "content");
+        if (polished.empty()) polished = ExtractLlmOutputString(resp.body, "output_text");
+        if (polished.empty()) polished = ExtractLlmOutputString(resp.body, "outputText");
+        if (polished.empty()) polished = ExtractLlmOutputString(resp.body, "answer");
+        if (polished.empty()) polished = ExtractLlmOutputString(resp.body, "text");
         std::string rewrite = ExtractLlmString(resp.body, "rewrite_query");
         std::string orig = ExtractLlmString(resp.body, "asr_original_text");
         std::string sess = ExtractLlmString(resp.body, "llm_session_id");

@@ -1640,7 +1640,7 @@ void StopRecordingSession() {
     if (g_streamingVadReady) {
         HiResTimer tVad;
         g_asrEngine.Lock();
-        if (g_config.vadModel == L"firered") {
+        if (recordingConfig.vadModel == L"firered") {
             g_asrEngine.fireRedVad->Flush();
             auto samples = PcmToFloat(pcm);
             auto concat = g_asrEngine.fireRedVad->GetConcatenatedSamples(samples.data(), static_cast<int>(samples.size()));
@@ -1658,9 +1658,10 @@ void StopRecordingSession() {
         }
         g_asrEngine.Unlock();
         double ms = tVad.ElapsedMs();
-        if (g_config.enableDebugMode) {
+        if (recordingConfig.enableDebugMode) {
             g_vadMs = ms;
-            g_vadModelName = (g_config.vadModel == L"firered") ? L"FireRed" : L"Silero";
+            g_vadModelName = (recordingConfig.vadModel == L"firered")
+                ? L"FireRed" : L"Silero";
         }
         g_streamingVadReady = false;
 
