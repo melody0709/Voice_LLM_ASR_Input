@@ -8,7 +8,22 @@
 #include <winhttp.h>
 
 #include <string>
+#include <mutex>
 #include <vector>
+
+class CloudHttpCancellation {
+public:
+    void Reset();
+    bool Attach(HINTERNET request);
+    bool Detach(HINTERNET request);
+    void Abort();
+    bool IsAborted() const;
+
+private:
+    mutable std::mutex mutex_;
+    HINTERNET activeRequest_ = nullptr;
+    bool aborted_ = false;
+};
 
 struct CloudHttpRequest {
     std::wstring method = L"POST";
@@ -20,6 +35,7 @@ struct CloudHttpRequest {
     bool useSsl = true;
     DWORD timeoutMs = 8000;
     DWORD accessType = WINHTTP_ACCESS_TYPE_DEFAULT_PROXY;
+    CloudHttpCancellation* cancellation = nullptr;
 };
 
 struct CloudHttpResponse {

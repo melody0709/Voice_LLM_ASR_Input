@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  当前版本：<code>v0.9.23</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
+  当前版本：<code>v0.9.24</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -31,7 +31,7 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 - **实时 HUD** — 录音时底部显示悬浮胶囊窗，5 根音量条随声音跳动
 - **双 VAD 可选** — Silero VAD（轻量）/ FireRed VAD（高精度 F1 97.57），智能跳过静音
 - **LLM 纠错（可选）** — 支持 DeepSeek / OpenRouter / SiliconFlow 等多供应商，一键配置
-- **Cloud ASR（可选）** — 支持火山引擎（豆包）、百度智能云、Qwen ASR（`qwen3-asr-flash-realtime`）、小米 MiMo ASR（`mimo-v2.5-asr`）、实验性豆包输入法 ASR，以及逆向还原的千问输入法（`qwen_free`，需本机已安装千问 IME）作为替代后端，并支持可选 fallback ASR
+- **Cloud ASR（可选）** — 支持火山引擎（豆包）、百度智能云、Qwen ASR（旧版 `qwen3-asr-flash-realtime`、Audio 3 HTTP `qwen-audio-3.0-asr-flash`、Audio 3 streaming `qwen-audio-3.0-asr-flash-streaming`）、小米 MiMo ASR（`mimo-v2.5-asr`）、实验性豆包输入法 ASR，以及逆向还原的千问输入法（`qwen_free`，需本机已安装千问 IME）作为替代后端，并支持可选 fallback ASR
 
 ## Quick Start
 
@@ -122,7 +122,9 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
   - Use history as context — 将最近识别结果作为对话上下文发送，提升准确率
   - Read input field context — 读取当前输入框文本作为 ASR 上下文（UIA/MSAA/WM_GETTEXT 分层 Fallback，输入框优先、历史兜底）
 - **Qwen ASR (DashScope)**：`API Key`（DPAPI 加密）+ `Base URL` + `Model` + `Language` + `Chunk ms` + `Test Connection`
-  - 默认模型：`qwen3-asr-flash-realtime`
+  - 新安装默认模型：`qwen-audio-3.0-asr-flash-streaming`；已有配置保持原模型
+  - Audio 3 默认使用已配置的北京 Workspace 域名，不提供地域选择项
+  - `qwen-audio-3.0-asr-flash-streaming` 在录音期间显示 partial；`qwen-audio-3.0-asr-flash` 松开后提交完整 WAV，只返回 final
   - Turn detection 固定为 Manual，匹配按住说话/松开上屏的输入法场景；Server VAD 设置已隐藏
 - **MiMo ASR (Xiaomi)**：`API Key`（DPAPI 加密）+ `Base URL` + `Model` + `Language` + `Test Connection`
   - 默认 Base URL：`https://token-plan-ams.xiaomimimo.com/v1`

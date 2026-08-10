@@ -17,6 +17,7 @@
 #include "doubao_ime_asr.h"
 #include "doubao_ime_streaming_session.h"
 #include "qwen_streaming_session.h"
+#include "qwen_audio_streaming_session.h"
 #include "qwen_free_streaming_session.h"
 #include "volcengine_streaming_session.h"
 #include "volcengine_asr.h"
@@ -86,6 +87,10 @@ std::vector<std::vector<BYTE>> g_waveBuffers;
 std::vector<BYTE> g_audioData;
 CRITICAL_SECTION g_audioLock;
 bool g_captureActive = false;
+std::atomic<uint64_t> g_audioCaptureGeneration{0};
+std::atomic<bool> g_audioCaptureFailurePending{false};
+std::atomic<DWORD> g_audioCaptureFailureCode{0};
+std::atomic<bool> g_audioCaptureFailureWasapi{false};
 std::atomic<float> g_audioLevel{ 0.0f };
 float g_hudSmoothedLevel = 0.0f;
 bool g_hudHasSpoken = false;
@@ -99,6 +104,8 @@ std::vector<HWND> g_cloudAsrControls;
 std::vector<HWND> g_baiduControls;
 std::vector<HWND> g_volcengineControls;
 std::vector<HWND> g_qwenControls;
+std::vector<HWND> g_qwenAudio3Controls;
+std::vector<HWND> g_qwenAudioStreamingOnlyControls;
 std::vector<HWND> g_mimoControls;
 std::vector<HWND> g_doubaoImeControls;
 std::vector<HWND> g_qwenFreeControls;
@@ -141,8 +148,13 @@ static UINT32 s_wasapiNativeRate = 0;
 
 static bool s_debugConsoleOpen = false;
 
-static bool IsStreamingCloudBackend(const std::wstring& backend) {
-    return backend == L"qwen" || backend == L"volcengine" || backend == L"doubao_ime" || backend == L"qwen_free";
+static bool IsStreamingCloudBackend(const Config& config) {
+    if (config.asrBackend == L"qwen" &&
+        (config.qwenTransport == L"audio_http" || config.qwenModel == L"qwen-audio-3.0-asr-flash")) {
+        return false;
+    }
+    return config.asrBackend == L"qwen" || config.asrBackend == L"volcengine" ||
+           config.asrBackend == L"doubao_ime" || config.asrBackend == L"qwen_free";
 }
 
 static bool ShouldPreloadLocalAsr(const Config& config) {
@@ -232,7 +244,7 @@ static void DebugPrintVadTrimLine(size_t rawBytes, size_t trimmedSamples) {
 }
 
 static void DebugPrintCloudVadTrim(const Config& config) {
-    if (IsStreamingCloudBackend(config.asrBackend) &&
+    if (IsStreamingCloudBackend(config) &&
         g_streamingVadTrimmer && g_streamingVadTrimmer->IsActive()) {
         StreamingVadTrimStats stats = g_streamingVadTrimmer->Stats();
         size_t rawBytes = stats.rawBytes > 0 ? stats.rawBytes : static_cast<size_t>(g_recordingMs * 32.0);
@@ -332,6 +344,7 @@ static void ApplyBatchResultMetrics(const Config& config, const AsrSessionResult
     if (result.isStreaming ||
         result.backend == AsrSessionBackend::BaiduBatch ||
         result.backend == AsrSessionBackend::QwenRealtimeBatch ||
+        result.backend == AsrSessionBackend::QwenAudioBatch ||
         result.backend == AsrSessionBackend::MimoBatch ||
         result.backend == AsrSessionBackend::DoubaoImeRecorded) {
         g_cloudApiMs = result.cloudApiMs;
@@ -393,6 +406,10 @@ static void CaptureOneShotStreamingFinal(std::wstring text,
 static std::unique_ptr<IStreamingAsrSession> CreateStreamingSessionForOneShot(
     const Config& config) {
     if (config.asrBackend == L"qwen") {
+        if (config.qwenTransport == L"audio_streaming" ||
+            config.qwenModel == L"qwen-audio-3.0-asr-flash-streaming") {
+            return CreateQwenAudioStreamingSession(config, g_mainWindow, nullptr, nullptr);
+        }
         return CreateQwenStreamingSession(config, g_mainWindow, nullptr, nullptr);
     }
     if (config.asrBackend == L"doubao_ime") {
@@ -490,7 +507,7 @@ static AsrSessionResult RunConfiguredAsrOnce(
     const Config& config,
     const std::vector<BYTE>& pcm,
     std::vector<float>&& localStreamingVadSamples) {
-    if (IsStreamingCloudBackend(config.asrBackend)) {
+    if (IsStreamingCloudBackend(config)) {
         return RunStreamingAsrOnce(config, pcm);
     }
     return RunBatchAsrOnce(config, pcm, std::move(localStreamingVadSamples));
@@ -535,7 +552,7 @@ void RecognizeAsync(const std::vector<BYTE>& pcm,
                     uint64_t attemptId,
                     Config config) {
     std::vector<float> localStreamingVadSamples;
-    if (config.asrBackend != L"baidu" && !IsStreamingCloudBackend(config.asrBackend) &&
+    if (config.asrBackend != L"baidu" && !IsStreamingCloudBackend(config) &&
         config.asrBackend != L"mimo") {
         localStreamingVadSamples = std::move(g_streamingVadSamples);
         g_streamingVadSamples.clear();
@@ -1343,6 +1360,69 @@ static void ActivateQwenFreeStreamingSession(
     LeaveCriticalSection(&g_audioLock);
 }
 
+static std::wstring AudioCaptureFailureHudText(bool wasapi, DWORD code) {
+    if (wasapi && (code == static_cast<DWORD>(AUDCLNT_E_DEVICE_INVALIDATED) ||
+                   code == static_cast<DWORD>(AUDCLNT_E_SERVICE_NOT_RUNNING))) {
+        return L"Microphone disconnected";
+    }
+    return L"Microphone capture failed";
+}
+
+static void FinishAudioCaptureFailure(uint64_t generation,
+                                      DWORD code,
+                                      bool wasapi,
+                                      uint64_t attemptId,
+                                      double recordingMs,
+                                      const std::vector<BYTE>& pcm) {
+    g_audioCaptureFailurePending.store(false, std::memory_order_release);
+    g_lastPcmBytes = pcm.size();
+    CompleteActiveAttemptRecording(attemptId, &pcm, recordingMs, pcm.size());
+    CancelActiveAsrAttempt(attemptId, true);
+    MarkActiveAttemptFinalHandled(attemptId);
+    KillTimer(g_mainWindow, kStreamingWatchdogTimer);
+    AbortAndResetActiveStreamingSession();
+    ResetStreamingVadTrimmerState();
+    ResetStreamingPartialHudState();
+
+    const std::wstring hudText = AudioCaptureFailureHudText(wasapi, code);
+    asr_runtime_log::Write(
+        "event=capture_runtime_failed generation=%llu attempt=%llu source=%s code=0x%08lx pcm_bytes=%zu",
+        static_cast<unsigned long long>(generation),
+        static_cast<unsigned long long>(attemptId),
+        wasapi ? "wasapi" : "wavein",
+        static_cast<unsigned long>(code),
+        pcm.size());
+    ShowHud(hudText);
+    if (g_hudWindow) SetTimer(g_hudWindow, kHudHideTimer, 2200, nullptr);
+}
+
+static void HandleAudioCaptureFailure(uint64_t generation,
+                                      DWORD code,
+                                      bool wasapi) {
+    const uint64_t currentGeneration =
+        g_audioCaptureGeneration.load(std::memory_order_acquire);
+    if (generation == 0 || generation != currentGeneration || !g_recording) {
+        asr_runtime_log::Write(
+            "event=capture_runtime_failed_stale generation=%llu current=%llu source=%s code=0x%08lx recording=%d",
+            static_cast<unsigned long long>(generation),
+            static_cast<unsigned long long>(currentGeneration),
+            wasapi ? "wasapi" : "wavein",
+            static_cast<unsigned long>(code),
+            g_recording ? 1 : 0);
+        return;
+    }
+
+    const uint64_t attemptId = ActiveAsrAttemptId();
+    const double recordingMs = static_cast<double>(GetTickCount64() - g_sessionStartTick);
+    g_recording = false;
+
+    // Capture failure is a local input fault, not a partial ASR result.  Stop
+    // and discard the active provider session instead of sending incomplete
+    // PCM into fallback or pasting a truncated transcript.
+    const std::vector<BYTE> pcm = StopAudioCapture();
+    FinishAudioCaptureFailure(generation, code, wasapi, attemptId, recordingMs, pcm);
+}
+
 void StartRecordingSession() {
     if (g_recording) return;
     if (g_hudWindow) KillTimer(g_hudWindow, kHudHideTimer);
@@ -1397,8 +1477,11 @@ void StartRecordingSession() {
     ResetStreamingVadTrimmerState();
     ResetStreamingPartialHudState();
 
-    if (g_config.asrBackend == L"qwen") {
-        auto session = CreateQwenStreamingSession(g_config, g_mainWindow, RefineWithLlmAsync, &g_lastRawAsrText);
+    if (g_config.asrBackend == L"qwen" && IsStreamingCloudBackend(g_config)) {
+        auto session = (g_config.qwenTransport == L"audio_streaming" ||
+                        g_config.qwenModel == L"qwen-audio-3.0-asr-flash-streaming")
+            ? CreateQwenAudioStreamingSession(g_config, g_mainWindow, RefineWithLlmAsync, &g_lastRawAsrText)
+            : CreateQwenStreamingSession(g_config, g_mainWindow, RefineWithLlmAsync, &g_lastRawAsrText);
         session->SetPartialCallback(StreamingPartialHudCallback, &g_qwenPartialHudContext);
         session->SetFinalCallback(StreamingFinalCallback, reinterpret_cast<void*>(static_cast<UINT_PTR>(attemptId)));
 
@@ -1538,7 +1621,7 @@ void StartRecordingSession() {
 
     g_streamingVadReady = false;
     g_streamingVadSamples.clear();
-    if (g_config.asrBackend != L"baidu" && !IsStreamingCloudBackend(g_config.asrBackend) &&
+    if (g_config.asrBackend != L"baidu" && !IsStreamingCloudBackend(g_config) &&
         g_config.asrBackend != L"mimo" &&
         g_config.enableVad) {
         const int threads = ResolveThreads(g_config.threads);
@@ -1558,6 +1641,16 @@ void StartRecordingSession() {
 
 void StopRecordingSession() {
     if (!g_recording) return;
+    // A device/driver failure can post its message concurrently with the
+    // physical key-up.  Consume the pending capture fault first so a queued
+    // stop cannot turn incomplete PCM into a normal ASR request.
+    if (g_audioCaptureFailurePending.load(std::memory_order_acquire)) {
+        HandleAudioCaptureFailure(
+            g_audioCaptureGeneration.load(std::memory_order_acquire),
+            g_audioCaptureFailureCode.load(std::memory_order_acquire),
+            g_audioCaptureFailureWasapi.load(std::memory_order_acquire));
+        return;
+    }
     g_recording = false;
     g_recordingMs = static_cast<double>(GetTickCount64() - g_sessionStartTick);
     g_vadMs = 0.0;
@@ -1574,9 +1667,21 @@ void StopRecordingSession() {
     // streaming session through the batch stop path (or vice versa).
     const Config recordingConfig = ActiveAsrAttemptConfig();
     const bool hasStreamingSession = HasActiveStreamingSession();
+    const uint64_t captureGeneration =
+        g_audioCaptureGeneration.load(std::memory_order_acquire);
+    const std::vector<BYTE> pcm = StopAudioCapture();
+    if (g_audioCaptureFailurePending.load(std::memory_order_acquire)) {
+        FinishAudioCaptureFailure(
+            captureGeneration,
+            g_audioCaptureFailureCode.load(std::memory_order_acquire),
+            g_audioCaptureFailureWasapi.load(std::memory_order_acquire),
+            attemptId,
+            g_recordingMs,
+            pcm);
+        return;
+    }
 
-    if (IsStreamingCloudBackend(recordingConfig.asrBackend) && hasStreamingSession) {
-        std::vector<BYTE> pcm = StopAudioCapture();
+    if (IsStreamingCloudBackend(recordingConfig) && hasStreamingSession) {
         std::unique_ptr<AsrAttemptFinalMessage> deferredFinal =
             CompleteActiveAttemptRecording(attemptId, &pcm,
                                             g_recordingMs, pcm.size());
@@ -1626,7 +1731,6 @@ void StopRecordingSession() {
         return;
     }
 
-    const std::vector<BYTE> pcm = StopAudioCapture();
     CompleteActiveAttemptRecording(attemptId, nullptr, g_recordingMs, pcm.size());
     if (pcm.size() < 8000) {
         MarkActiveAttemptFinalHandled(attemptId);
@@ -1742,6 +1846,16 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         } else if (wParam == kHotkeyRecordingStop) {
             StopRecordingSession();
         }
+        return 0;
+    case kAudioCaptureErrorMessage:
+        HandleAudioCaptureFailure(static_cast<uint64_t>(wParam),
+                                  static_cast<DWORD>(lParam),
+                                  true);
+        return 0;
+    case kWaveInCaptureErrorMessage:
+        HandleAudioCaptureFailure(static_cast<uint64_t>(wParam),
+                                  static_cast<DWORD>(lParam),
+                                  false);
         return 0;
     case kHudUpdateWithOptionsMessage: {
         std::unique_ptr<HudUpdateWithOptionsMessage> msg(

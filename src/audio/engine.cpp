@@ -7,6 +7,7 @@
 #include "streaming_vad_trimmer.h"
 #include "utils.h"
 #include "qwen_free_postprocess.h"
+#include "qwen_audio_profile.h"
 #include "asr_runtime_log.h"
 
 #include <algorithm>
@@ -25,7 +26,7 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "winmm.lib")
 
-static constexpr int kCurrentConfigVersion = 9;
+static constexpr int kCurrentConfigVersion = 10;
 
 namespace {
 
@@ -507,13 +508,33 @@ void LoadConfig() {
     g_config.volcHotwordsName = Utf8ToWide(ExtractJsonString(json, "volc_hotwords_name", ""));
     g_config.volcCorrectTableId = Utf8ToWide(ExtractJsonString(json, "volc_correct_table_id", ""));
     g_config.volcCorrectTableName = Utf8ToWide(ExtractJsonString(json, "volc_correct_table_name", ""));
+    const bool hasPersistedQwenModel = json.find("\"qwen_model\"") != std::string::npos;
+    const bool hasPersistedQwenTransport = json.find("\"qwen_transport\"") != std::string::npos;
     g_config.qwenApiKey = llm::DecryptString(Utf8ToWide(ExtractJsonString(json, "qwen_api_key", "")));
     g_config.qwenBaseUrl = Utf8ToWide(ExtractJsonString(json, "qwen_base_url", WideToUtf8(g_config.qwenBaseUrl)));
     g_config.qwenModel = Utf8ToWide(ExtractJsonString(json, "qwen_model", WideToUtf8(g_config.qwenModel)));
+    g_config.qwenTransport = Utf8ToWide(ExtractJsonString(json, "qwen_transport", WideToUtf8(g_config.qwenTransport)));
+    g_config.qwenHttpBaseUrl = Utf8ToWide(ExtractJsonString(json, "qwen_http_base_url", WideToUtf8(g_config.qwenHttpBaseUrl)));
+    g_config.qwenAudioStreamingBaseUrl = Utf8ToWide(ExtractJsonString(json, "qwen_audio_streaming_base_url", WideToUtf8(g_config.qwenAudioStreamingBaseUrl)));
     g_config.qwenLanguage = Utf8ToWide(ExtractJsonString(json, "qwen_language", ""));
     g_config.qwenChunkMs = ExtractJsonInt(json, "qwen_chunk_ms", g_config.qwenChunkMs);
+    g_config.qwenLanguageHints = Utf8ToWide(ExtractJsonString(json, "qwen_language_hints", ""));
+    g_config.qwenVocabularyId = Utf8ToWide(ExtractJsonString(json, "qwen_vocabulary_id", ""));
+    g_config.qwenVocabulary = Utf8ToWide(ExtractJsonString(json, "qwen_vocabulary", ""));
+    g_config.qwenSemanticPunctuation = ExtractJsonBool(json, "qwen_semantic_punctuation", g_config.qwenSemanticPunctuation);
+    g_config.qwenMaxSentenceSilenceMs = std::clamp(ExtractJsonInt(json, "qwen_max_sentence_silence", g_config.qwenMaxSentenceSilenceMs), 200, 6000);
+    g_config.qwenMultiThresholdMode = ExtractJsonBool(json, "qwen_multi_threshold", g_config.qwenMultiThresholdMode);
+    g_config.qwenHeartbeat = ExtractJsonBool(json, "qwen_heartbeat", g_config.qwenHeartbeat);
+    g_config.qwenSpeechNoiseThresholdEnabled = ExtractJsonBool(json, "qwen_speech_noise_threshold_enabled", g_config.qwenSpeechNoiseThresholdEnabled);
+    g_config.qwenSpeechNoiseThreshold = std::clamp(ExtractJsonFloat(json, "qwen_speech_noise_threshold", g_config.qwenSpeechNoiseThreshold), -1.0f, 1.0f);
     if (g_config.qwenBaseUrl.empty()) g_config.qwenBaseUrl = L"wss://dashscope.aliyuncs.com/api-ws/v1/realtime";
-    if (g_config.qwenModel.empty()) g_config.qwenModel = L"qwen3-asr-flash-realtime";
+    if (g_config.qwenHttpBaseUrl.empty()) g_config.qwenHttpBaseUrl = kQwenBeijingHttpBaseUrl;
+    if (g_config.qwenAudioStreamingBaseUrl.empty()) g_config.qwenAudioStreamingBaseUrl = kQwenBeijingAudioStreamingBaseUrl;
+    qwen_audio_profile::NormalizePersistedProfile(
+        g_config.qwenModel,
+        g_config.qwenTransport,
+        hasPersistedQwenModel,
+        hasPersistedQwenTransport);
     g_config.qwenChunkMs = std::clamp(g_config.qwenChunkMs, 20, 1000);
     g_config.mimoApiKey = llm::DecryptString(Utf8ToWide(ExtractJsonString(json, "mimo_api_key", "")));
     g_config.mimoBaseUrl = Utf8ToWide(ExtractJsonString(json, "mimo_base_url", WideToUtf8(g_config.mimoBaseUrl)));
@@ -660,9 +681,21 @@ void SaveConfig() {
          << "  \"volc_correct_table_name\": \"" << EscapeJson(g_config.volcCorrectTableName) << "\",\n"
          << "  \"qwen_api_key\": \"" << EscapeJson(llm::EncryptString(g_config.qwenApiKey)) << "\",\n"
          << "  \"qwen_base_url\": \"" << EscapeJson(g_config.qwenBaseUrl) << "\",\n"
+         << "  \"qwen_http_base_url\": \"" << EscapeJson(g_config.qwenHttpBaseUrl) << "\",\n"
+         << "  \"qwen_audio_streaming_base_url\": \"" << EscapeJson(g_config.qwenAudioStreamingBaseUrl) << "\",\n"
          << "  \"qwen_model\": \"" << EscapeJson(g_config.qwenModel) << "\",\n"
+         << "  \"qwen_transport\": \"" << EscapeJson(g_config.qwenTransport) << "\",\n"
          << "  \"qwen_language\": \"" << EscapeJson(g_config.qwenLanguage) << "\",\n"
          << "  \"qwen_chunk_ms\": " << g_config.qwenChunkMs << ",\n"
+         << "  \"qwen_language_hints\": \"" << EscapeJson(g_config.qwenLanguageHints) << "\",\n"
+         << "  \"qwen_vocabulary_id\": \"" << EscapeJson(g_config.qwenVocabularyId) << "\",\n"
+         << "  \"qwen_vocabulary\": \"" << EscapeJson(g_config.qwenVocabulary) << "\",\n"
+         << "  \"qwen_semantic_punctuation\": " << (g_config.qwenSemanticPunctuation ? "true" : "false") << ",\n"
+         << "  \"qwen_max_sentence_silence\": " << g_config.qwenMaxSentenceSilenceMs << ",\n"
+         << "  \"qwen_multi_threshold\": " << (g_config.qwenMultiThresholdMode ? "true" : "false") << ",\n"
+         << "  \"qwen_heartbeat\": " << (g_config.qwenHeartbeat ? "true" : "false") << ",\n"
+         << "  \"qwen_speech_noise_threshold_enabled\": " << (g_config.qwenSpeechNoiseThresholdEnabled ? "true" : "false") << ",\n"
+         << "  \"qwen_speech_noise_threshold\": " << g_config.qwenSpeechNoiseThreshold << ",\n"
          << "  \"mimo_api_key\": \"" << EscapeJson(llm::EncryptString(g_config.mimoApiKey)) << "\",\n"
          << "  \"mimo_base_url\": \"" << EscapeJson(g_config.mimoBaseUrl) << "\",\n"
          << "  \"mimo_model\": \"" << EscapeJson(g_config.mimoModel) << "\",\n"
@@ -743,12 +776,35 @@ void CALLBACK WaveInProc(HWAVEIN waveIn, UINT msg, DWORD_PTR, DWORD_PTR param1, 
 
     if (g_captureActive) {
         header->dwBytesRecorded = 0;
-        waveInAddBuffer(waveIn, header, sizeof(WAVEHDR));
+        const MMRESULT result = waveInAddBuffer(waveIn, header, sizeof(WAVEHDR));
+        if (result != MMSYSERR_NOERROR && g_captureActive) {
+            // Do not attempt recovery or blocking cleanup from the waveIn
+            // callback.  The main window will stop the capture, invalidate the
+            // current generation, abort any streaming ASR session, and show a
+            // single device error after this callback returns.
+            g_audioCaptureFailureCode.store(static_cast<DWORD>(result), std::memory_order_relaxed);
+            g_audioCaptureFailureWasapi.store(false, std::memory_order_relaxed);
+            g_audioCaptureFailurePending.store(true, std::memory_order_release);
+            g_captureActive = false;
+            if (g_mainWindow) {
+                const uint64_t generation = g_audioCaptureGeneration.load(std::memory_order_acquire);
+                PostMessageW(g_mainWindow,
+                             kWaveInCaptureErrorMessage,
+                             static_cast<WPARAM>(generation),
+                             static_cast<LPARAM>(result));
+            }
+        }
     }
 }
 
 bool StartAudioCapture(std::wstring& error) {
     if (g_waveIn || g_wasapiCapture.IsInitialized()) return true;
+
+    const uint64_t generation =
+        g_audioCaptureGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
+    g_audioCaptureFailureCode.store(0, std::memory_order_relaxed);
+    g_audioCaptureFailureWasapi.store(false, std::memory_order_relaxed);
+    g_audioCaptureFailurePending.store(false, std::memory_order_release);
 
     g_audioLevel.store(0.0f);
     g_hudSmoothedLevel = 0.0f;
@@ -757,6 +813,7 @@ bool StartAudioCapture(std::wstring& error) {
     LeaveCriticalSection(&g_audioLock);
 
     if (g_config.audioBackend == L"wasapi") {
+        g_wasapiCapture.SetCaptureGeneration(generation);
         if (g_wasapiCapture.Init(g_config.audioDeviceId)) {
             if (g_wasapiCapture.Start(error)) {
                 g_captureActive = true;
@@ -812,12 +869,16 @@ bool StartAudioCapture(std::wstring& error) {
 }
 
 std::vector<BYTE> StopAudioCapture() {
+    // Invalidate runtime-failure messages before stopping either capture API.
+    // WASAPI and waveIn may still have one callback in flight while their
+    // handles are being released; the generation guard prevents that callback
+    // from terminating a subsequent recording.
+    g_audioCaptureGeneration.fetch_add(1, std::memory_order_acq_rel);
+    g_captureActive = false;
     if (g_wasapiCapture.IsInitialized()) {
-        g_captureActive = false;
         g_wasapiCapture.Stop();
         g_wasapiCapture.Release();
     } else if (g_waveIn) {
-        g_captureActive = false;
         waveInStop(g_waveIn);
         waveInReset(g_waveIn);
         for (auto& header : g_waveHeaders) {

@@ -11,20 +11,74 @@ class ScopedWinHttpHandle {
 public:
     explicit ScopedWinHttpHandle(HINTERNET handle = nullptr) : handle_(handle) {}
     ~ScopedWinHttpHandle() {
-        if (handle_) WinHttpCloseHandle(handle_);
+        if (!handle_) return;
+        if (cancellation_ && registered_ && !cancellation_->Detach(handle_)) {
+            // Abort() already closed this handle to interrupt a blocking
+            // WinHTTP call; do not close it a second time.
+            return;
+        }
+        WinHttpCloseHandle(handle_);
     }
 
     ScopedWinHttpHandle(const ScopedWinHttpHandle&) = delete;
     ScopedWinHttpHandle& operator=(const ScopedWinHttpHandle&) = delete;
+
+    bool RegisterCancellation(CloudHttpCancellation* cancellation) {
+        cancellation_ = cancellation;
+        if (!cancellation_) {
+            registered_ = false;
+            return true;
+        }
+        registered_ = cancellation_->Attach(handle_);
+        return registered_;
+    }
 
     HINTERNET get() const { return handle_; }
     explicit operator bool() const { return handle_ != nullptr; }
 
 private:
     HINTERNET handle_ = nullptr;
+    CloudHttpCancellation* cancellation_ = nullptr;
+    bool registered_ = false;
 };
 
 } // namespace
+
+void CloudHttpCancellation::Reset() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    activeRequest_ = nullptr;
+    aborted_ = false;
+}
+
+bool CloudHttpCancellation::Attach(HINTERNET request) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (aborted_ || activeRequest_ != nullptr) return false;
+    activeRequest_ = request;
+    return true;
+}
+
+bool CloudHttpCancellation::Detach(HINTERNET request) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (activeRequest_ != request) return false;
+    activeRequest_ = nullptr;
+    return true;
+}
+
+void CloudHttpCancellation::Abort() {
+    HINTERNET request = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        aborted_ = true;
+        request = activeRequest_;
+        activeRequest_ = nullptr;
+    }
+    if (request) WinHttpCloseHandle(request);
+}
+
+bool CloudHttpCancellation::IsAborted() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return aborted_;
+}
 
 CloudHttpResponse SendCloudHttpRequest(const CloudHttpRequest& request) {
     CloudHttpResponse response;
@@ -62,6 +116,11 @@ CloudHttpResponse SendCloudHttpRequest(const CloudHttpRequest& request) {
     if (!hRequest) {
         response.winhttpError = GetLastError();
         response.failedStep = L"WinHttpOpenRequest";
+        return response;
+    }
+    if (!hRequest.RegisterCancellation(request.cancellation)) {
+        response.winhttpError = ERROR_WINHTTP_OPERATION_CANCELLED;
+        response.failedStep = L"request cancelled";
         return response;
     }
     WinHttpSetTimeouts(hRequest.get(), request.timeoutMs, request.timeoutMs,

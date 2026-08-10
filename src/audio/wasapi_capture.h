@@ -37,6 +37,9 @@ public:
 
     bool Init(const std::wstring& deviceId = L"");
     bool Start(std::wstring& error);
+    void SetCaptureGeneration(uint64_t generation) {
+        m_captureGeneration.store(generation, std::memory_order_release);
+    }
     void Stop();
     void Release();
     bool IsCapturing() const { return m_running.load(); }
@@ -53,6 +56,7 @@ private:
     bool InitAudioClient();
     bool InitCaptureClient();
     void CaptureThread();
+    void ReportRuntimeFailure(DWORD code);
     float CalculateAudioLevelFloat(const float* data, UINT32 frames, UINT32 channels);
 
     IMMDeviceEnumerator* m_enumerator{nullptr};
@@ -73,6 +77,7 @@ private:
 
     std::thread m_captureThread;
     std::atomic<bool> m_running{false};
+    std::atomic<uint64_t> m_captureGeneration{0};
     HANDLE m_event{nullptr};
     bool m_comInitialized{false};
 };

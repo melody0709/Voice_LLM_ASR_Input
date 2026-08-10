@@ -147,7 +147,7 @@ call :write_layout_readme
 
 if "!VOXTYPE_TEST_MODE!"=="1" (
     echo Building offline Qwen protocol regression tests...
-    "%CMAKE_EXE%" --build --preset x64-release --target qwen_free_protocol_test
+    "%CMAKE_EXE%" --build --preset x64-release --target qwen_free_protocol_test qwen_audio_json_test
     if errorlevel 1 exit /b !ERRORLEVEL!
     set "VOXTYPE_TEST_EXE=%BUILD_ROOT%\artifacts\tests\qwen_free_protocol_test.exe"
     if not exist "!VOXTYPE_TEST_EXE!" (
@@ -156,6 +156,14 @@ if "!VOXTYPE_TEST_MODE!"=="1" (
     )
     echo Running offline Qwen protocol regression tests...
     "!VOXTYPE_TEST_EXE!"
+    if errorlevel 1 exit /b !ERRORLEVEL!
+    set "VOXTYPE_AUDIO_JSON_TEST_EXE=%BUILD_ROOT%\artifacts\tests\qwen_audio_json_test.exe"
+    if not exist "!VOXTYPE_AUDIO_JSON_TEST_EXE!" (
+        echo ERROR: Qwen Audio JSON test executable was not produced: !VOXTYPE_AUDIO_JSON_TEST_EXE!
+        exit /b 1
+    )
+    echo Running Qwen Audio JSON regression tests...
+    "!VOXTYPE_AUDIO_JSON_TEST_EXE!"
     if errorlevel 1 exit /b !ERRORLEVEL!
 )
 

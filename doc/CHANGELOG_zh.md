@@ -2,6 +2,21 @@
 
 > 🇬🇧 [English](../CHANGELOG.md)
 
+## v0.9.24 (2026-08-10, dev)
+
+### 新增
+
+- **Qwen Audio 3 模型 profile**：同一个 Qwen Provider 内支持旧 DashScope realtime、`qwen-audio-3.0-asr-flash` HTTP 整段识别，以及 `qwen-audio-3.0-asr-flash-streaming` 二进制 PCM 实时识别。全新安装默认选择 Audio 3 streaming，已有配置保持原模型。
+- **Qwen Audio 设置**：增加模型下拉菜单、北京 Workspace HTTP/streaming Endpoint、语言提示、Vocabulary ID、Audio 3 即时热词 JSON、语义断句、句间静音、多阈值、heartbeat 和噪声阈值设置。
+
+### 修复
+
+- **Qwen Audio streaming 初始化**：空的可选 Vocabulary 不再生成缺少值的 `run-task` JSON；请求结构同步为 `parameters` 后接 `input`，使任务可以正常启动并返回 partial。
+- **Qwen Audio profile 迁移**：没有新模型字段的已有配置继续使用旧 realtime；只有完全没有配置文件的新安装才默认 Audio 3 streaming。
+- **Qwen Audio 恢复边界**：服务端 `task-failed` 不再盲目重放 PCM；replay 达到上限后仍等待松键，pending PCM 溢出会明确报告错误而不会静默丢音频。
+- **Qwen Audio 无语音规范化**：HTTP 模型的 `HTTP 400 ASR_RESPONSE_HAVE_NO_WORDS` 静音响应现在进入公共 `No speech detected` 路径，不再显示 operational error 或触发 fallback。
+- **运行中录音设备异常处理**：WASAPI 和 `waveIn` 在录音开始后发生设备/驱动错误时，会由 UI 线程停止当前 attempt、使旧 provider 结果失效、终止云端 session、取消 watchdog，并显示麦克风错误；不完整 PCM 不会进入 fallback 或被粘贴。
+
 ## v0.9.23 (2026-08-06, dev)
 
 ### 变更

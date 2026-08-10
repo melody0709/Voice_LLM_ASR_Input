@@ -9,6 +9,7 @@
 #include "engine.h"
 #include "mimo_asr.h"
 #include "qwen_asr.h"
+#include "qwen_audio_http.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -244,6 +245,68 @@ private:
     AsrEngine& engine_;
 };
 
+class QwenAudioAsrSession final : public BatchAsrSessionBase {
+public:
+    QwenAudioAsrSession(Config config, AsrEngine& engine)
+        : config_(std::move(config)), engine_(engine) {}
+
+    bool Start(std::wstring& error) override {
+        cancellation_.Reset();
+        return BatchAsrSessionBase::Start(error);
+    }
+
+    void Abort() override {
+        aborted_.store(true);
+        cancellation_.Abort();
+    }
+
+    AsrSessionResult Finish() override {
+        AsrSessionResult result;
+        result.backend = AsrSessionBackend::QwenAudioBatch;
+        result.providerName = AsrBackendDisplayName(config_);
+        result.pcmBytes = pcm_.size();
+        if (aborted_) { result.text = L"Qwen Audio ASR error: aborted"; return result; }
+        if (config_.qwenApiKey.empty()) { result.text = L"Qwen Audio ASR error: missing API key"; return result; }
+        std::vector<BYTE> uploadPcm = pcm_;
+        if (config_.enableVad) {
+            BatchVadTrimResult vad = TrimBatchPcm16WithVad(config_, engine_, pcm_);
+            if (vad.active) {
+                result.vadMs = vad.elapsedMs;
+                result.vadModelName = vad.modelName;
+                if (!vad.detectedSpeech || vad.pcm.empty()) { result.text = L""; return result; }
+                result.vadTrimmedSamples = vad.pcm.size() / sizeof(int16_t);
+                uploadPcm = std::move(vad.pcm);
+            }
+        }
+        qwen_audio_http::Config cfg;
+        cfg.apiKey = config_.qwenApiKey;
+        cfg.baseUrl = config_.qwenHttpBaseUrl;
+        cfg.model = config_.qwenModel;
+        cfg.languageHints = config_.qwenLanguageHints.empty() ? config_.qwenLanguage : config_.qwenLanguageHints;
+        cfg.vocabularyId = config_.qwenVocabularyId;
+        cfg.vocabulary = config_.qwenVocabulary;
+        HiResTimer timer;
+        const DWORD timeoutMs = ComputeCloudAsrRecordedRequestTimeoutMs(0.0, uploadPcm.size());
+        qwen_audio_http::Result r;
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            r = qwen_audio_http::Recognize(uploadPcm, cfg, timeoutMs, &cancellation_);
+            if (aborted_.load() || r.ok || !r.retryable || attempt == 1) break;
+            Sleep(150);
+        }
+        result.cloudApiMs = timer.ElapsedMs();
+        result.text = r.ok ? NormalizeAsrText(r.text)
+                           : (r.error.empty() ? L"Qwen Audio ASR error: request failed" : r.error);
+        return result;
+    }
+
+    const wchar_t* ProviderName() const override { return L"Qwen Audio 3 ASR"; }
+
+private:
+    Config config_;
+    AsrEngine& engine_;
+    CloudHttpCancellation cancellation_;
+};
+
 class DoubaoImeRecordedSession final : public BatchAsrSessionBase {
 public:
     explicit DoubaoImeRecordedSession(Config config)
@@ -296,20 +359,19 @@ private:
 
 bool BatchAsrSessionBase::Start(std::wstring& error) {
     error.clear();
-    aborted_ = false;
+    aborted_.store(false);
     return true;
 }
 
 bool BatchAsrSessionBase::EnqueuePcmChunk(const BYTE* data, size_t bytes) {
-    if (aborted_) return false;
+    if (aborted_.load()) return false;
     if (!data || bytes == 0) return true;
     pcm_.insert(pcm_.end(), data, data + bytes);
     return true;
 }
 
 void BatchAsrSessionBase::Abort() {
-    aborted_ = true;
-    pcm_.clear();
+    aborted_.store(true);
 }
 
 bool BatchAsrSessionBase::IsStreaming() const {
@@ -324,6 +386,9 @@ std::unique_ptr<IAsrSession> CreateBatchAsrSession(
         return std::make_unique<BaiduAsrSession>(config, localEngine);
     }
     if (config.asrBackend == L"qwen") {
+        if (config.qwenTransport == L"audio_http" || config.qwenModel == L"qwen-audio-3.0-asr-flash") {
+            return std::make_unique<QwenAudioAsrSession>(config, localEngine);
+        }
         return std::make_unique<QwenAsrSession>(config, localEngine);
     }
     if (config.asrBackend == L"mimo") {

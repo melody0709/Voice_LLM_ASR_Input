@@ -50,6 +50,9 @@ add_executable(VoxType WIN32
     src/asr/doubao_ime_streaming_session.cpp
     src/asr/mimo_asr.cpp
     src/asr/qwen_asr.cpp
+    src/asr/qwen_audio_http.cpp
+    src/asr/qwen_audio_streaming.cpp
+    src/asr/qwen_audio_streaming_session.cpp
     src/asr/qwen_streaming_session.cpp
     src/asr/qwen_free_streaming_session.cpp
     src/asr/qwen_free_proto_utdid.cpp
@@ -140,3 +143,23 @@ set_target_properties(qwen_free_protocol_test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/../../artifacts/tests"
 )
 add_test(NAME qwen_free_protocol_test COMMAND qwen_free_protocol_test)
+
+add_executable(qwen_audio_json_test
+    tests/qwen_audio_json_test.cpp
+    src/asr/qwen_audio_http.cpp
+    src/asr/qwen_audio_streaming.cpp
+    src/asr/cloud_asr_common.cpp
+    src/asr/cloud_http_common.cpp
+)
+target_include_directories(qwen_audio_json_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/asr"
+    "${CMAKE_SOURCE_DIR}/src/core"
+)
+if(MSVC)
+    target_compile_options(qwen_audio_json_test PRIVATE /O2 /EHsc /utf-8)
+endif()
+target_link_libraries(qwen_audio_json_test PRIVATE winhttp crypt32 ole32)
+set_target_properties(qwen_audio_json_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/../../artifacts/tests"
+)
+add_test(NAME qwen_audio_json_test COMMAND qwen_audio_json_test)

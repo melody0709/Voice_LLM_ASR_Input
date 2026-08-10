@@ -2,6 +2,21 @@
 
 > 🇨🇳 [中文版](doc/CHANGELOG_zh.md)
 
+## v0.9.24 (2026-08-10, dev)
+
+### Added
+
+- **Qwen Audio 3 profiles**: Added model-profile routing for the legacy DashScope realtime model, `qwen-audio-3.0-asr-flash` HTTP batch recognition, and `qwen-audio-3.0-asr-flash-streaming` binary-PCM realtime recognition. New installs default to Audio 3 streaming while existing Qwen configuration is preserved.
+- **Qwen Audio settings**: Added a model dropdown, Beijing Workspace HTTP/streaming endpoints, language hints, vocabulary ID, Audio 3 immediate-vocabulary JSON, semantic punctuation, sentence silence, multi-threshold, heartbeat, and speech-noise-threshold controls.
+
+### Fixed
+
+- **Qwen Audio streaming initialization**: Empty optional vocabulary settings are now omitted from `run-task` instead of producing an incomplete JSON value. The request shape also follows the documented `parameters` then `input` layout, allowing the task to start and emit partial results.
+- **Qwen Audio profile migration**: Existing config files without the new model selector stay on the legacy realtime model; only installations without a config file default to Audio 3 streaming.
+- **Qwen Audio recovery boundaries**: Server-side `task-failed` events no longer trigger a blind PCM replay; replay-budget exhaustion keeps the live session until key release, and pending-audio overflow is reported explicitly instead of being silently dropped.
+- **Qwen Audio no-speech normalization**: The HTTP model's `HTTP 400 ASR_RESPONSE_HAVE_NO_WORDS` silence response now becomes the shared `No speech detected` result instead of an operational-error HUD or fallback trigger.
+- **Runtime capture failure handling**: WASAPI and `waveIn` device/driver failures that occur after recording starts now stop the current attempt on the UI thread, invalidate stale provider results, abort the active cloud session, cancel its watchdog, and show a microphone error without sending truncated PCM to fallback.
+
 ## v0.9.23 (2026-08-06, dev)
 
 ### Changed

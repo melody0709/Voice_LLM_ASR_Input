@@ -7,6 +7,7 @@
 #include "globals.h"
 
 #include <memory>
+#include <atomic>
 #include <string>
 #include <vector>
 
@@ -14,6 +15,7 @@ enum class AsrSessionBackend {
     Local,
     BaiduBatch,
     QwenRealtimeBatch,
+    QwenAudioBatch,
     MimoBatch,
     DoubaoImeRecorded,
 };
@@ -60,7 +62,7 @@ public:
     bool IsStreaming() const override;
 
 protected:
-    bool aborted_ = false;
+    std::atomic<bool> aborted_{false};
     std::vector<BYTE> pcm_;
 };
 

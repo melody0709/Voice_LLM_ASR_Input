@@ -155,14 +155,43 @@ void WasapiCapture::Stop() {
     if (m_audioClient) m_audioClient->Stop();
 }
 
+void WasapiCapture::ReportRuntimeFailure(DWORD code) {
+    // Stop the worker before notifying the UI.  This makes the failure
+    // terminal for the current capture and prevents repeated messages while
+    // the main thread is stopping/releasing the WASAPI handles.
+    if (!m_running.exchange(false, std::memory_order_acq_rel)) return;
+
+    g_audioCaptureFailureCode.store(code, std::memory_order_relaxed);
+    g_audioCaptureFailureWasapi.store(true, std::memory_order_relaxed);
+    g_audioCaptureFailurePending.store(true, std::memory_order_release);
+
+    const HWND target = g_mainWindow;
+    const uint64_t generation = m_captureGeneration.load(std::memory_order_acquire);
+    if (!target || generation == 0) return;
+
+    PostMessageW(target,
+                 kAudioCaptureErrorMessage,
+                 static_cast<WPARAM>(generation),
+                 static_cast<LPARAM>(code));
+}
+
 void WasapiCapture::CaptureThread() {
     while (m_running.load(std::memory_order_relaxed)) {
         DWORD waitResult = WaitForSingleObject(m_event, 200);
         if (!m_running.load(std::memory_order_relaxed)) break;
+        if (waitResult == WAIT_FAILED) {
+            ReportRuntimeFailure(GetLastError());
+            break;
+        }
         if (waitResult != WAIT_OBJECT_0) continue;
 
         UINT32 packetLength = 0;
         HRESULT hr = m_captureClient->GetNextPacketSize(&packetLength);
+
+        if (FAILED(hr)) {
+            ReportRuntimeFailure(static_cast<DWORD>(hr));
+            break;
+        }
 
         while (SUCCEEDED(hr) && packetLength > 0 && m_running.load(std::memory_order_relaxed)) {
             BYTE* captureData = nullptr;
@@ -170,7 +199,10 @@ void WasapiCapture::CaptureThread() {
             DWORD flags = 0;
 
             hr = m_captureClient->GetBuffer(&captureData, &numFrames, &flags, nullptr, nullptr);
-            if (FAILED(hr)) break;
+            if (FAILED(hr)) {
+                ReportRuntimeFailure(static_cast<DWORD>(hr));
+                break;
+            }
 
             if (numFrames > 0 && !(flags & AUDCLNT_BUFFERFLAGS_SILENT)) {
                 const float* srcFloat = nullptr;
@@ -194,8 +226,16 @@ void WasapiCapture::CaptureThread() {
                     }
                     srcFloat = monoFloat.data();
                 } else {
-                    m_captureClient->ReleaseBuffer(numFrames);
+                    hr = m_captureClient->ReleaseBuffer(numFrames);
+                    if (FAILED(hr)) {
+                        ReportRuntimeFailure(static_cast<DWORD>(hr));
+                        break;
+                    }
                     hr = m_captureClient->GetNextPacketSize(&packetLength);
+                    if (FAILED(hr)) {
+                        ReportRuntimeFailure(static_cast<DWORD>(hr));
+                        break;
+                    }
                     continue;
                 }
 
@@ -282,8 +322,16 @@ void WasapiCapture::CaptureThread() {
                 }
             }
 
-            m_captureClient->ReleaseBuffer(numFrames);
+            hr = m_captureClient->ReleaseBuffer(numFrames);
+            if (FAILED(hr)) {
+                ReportRuntimeFailure(static_cast<DWORD>(hr));
+                break;
+            }
             hr = m_captureClient->GetNextPacketSize(&packetLength);
+            if (FAILED(hr)) {
+                ReportRuntimeFailure(static_cast<DWORD>(hr));
+                break;
+            }
         }
     }
 }

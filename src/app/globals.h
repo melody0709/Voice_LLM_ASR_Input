@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -33,6 +34,12 @@ constexpr wchar_t kMainClass[] = L"VoxType.Main";
 constexpr wchar_t kSettingsClass[] = L"VoxType.Settings";
 constexpr wchar_t kHudClass[] = L"VoxType.Hud";
 constexpr wchar_t kHotkeyEditClass[] = L"VoxType.HotkeyEdit";
+// Beijing DashScope workspace endpoint supplied for the Audio 3 models.
+// The API key remains user-configured and is never embedded in the binary.
+constexpr wchar_t kQwenBeijingHttpBaseUrl[] =
+    L"https://llm-c6rtn7zy4nw0u39k.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation";
+constexpr wchar_t kQwenBeijingAudioStreamingBaseUrl[] =
+    L"wss://llm-c6rtn7zy4nw0u39k.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kReloadMessage = WM_APP + 2;
 constexpr UINT kAsrResultMessage = WM_APP + 3;
@@ -45,6 +52,11 @@ constexpr UINT kHudUpdateWithOptionsMessage = WM_APP + 9;
 // Main-window only. Settings uses WM_APP + 10 locally for test results.
 constexpr UINT kAsrAttemptFinalMessage = WM_APP + 10;
 constexpr UINT kHotkeyRecordingMessage = WM_APP + 11;
+// Posted by the capture worker when the microphone/driver fails after a
+// recording has already started.  The generation in wParam invalidates stale
+// messages from a previous recording; lParam carries the native error code.
+constexpr UINT kAudioCaptureErrorMessage = WM_APP + 12;
+constexpr UINT kWaveInCaptureErrorMessage = WM_APP + 13;
 constexpr WPARAM kHotkeyRecordingStart = 1;
 constexpr WPARAM kHotkeyRecordingStop = 2;
 constexpr WPARAM kHotkeyCapsLockRecordingStop = 3;
@@ -210,6 +222,18 @@ constexpr int IDC_QWEN_MODEL = 2083;
 constexpr int IDC_QWEN_LANGUAGE = 2084;
 constexpr int IDC_QWEN_TEST = 2085;
 constexpr int IDC_QWEN_CHUNK_MS = 2089;
+constexpr int IDC_QWEN_MODEL_COMBO = 2096;
+constexpr int IDC_QWEN_HTTP_BASE_URL = 2097;
+constexpr int IDC_QWEN_AUDIO_STREAMING_BASE_URL = 2098;
+constexpr int IDC_QWEN_VOCABULARY_ID = 2099;
+constexpr int IDC_QWEN_VOCABULARY = 2120;
+constexpr int IDC_QWEN_SEMANTIC_PUNCTUATION = 2121;
+constexpr int IDC_QWEN_MAX_SENTENCE_SILENCE = 2122;
+constexpr int IDC_QWEN_MULTI_THRESHOLD = 2123;
+constexpr int IDC_QWEN_HEARTBEAT = 2124;
+constexpr int IDC_QWEN_SPEECH_NOISE_THRESHOLD = 2125;
+constexpr int IDC_QWEN_LANGUAGE_HINTS = 2126;
+constexpr int IDC_QWEN_SPEECH_NOISE_ENABLE = 2127;
 constexpr int IDC_MIMO_API_KEY = 2090;
 constexpr int IDC_MIMO_SHOW_KEY = 2091;
 constexpr int IDC_MIMO_BASE_URL = 2092;
@@ -281,9 +305,21 @@ struct Config {
     std::wstring volcCorrectTableName;
     std::wstring qwenApiKey;
     std::wstring qwenBaseUrl = L"wss://dashscope.aliyuncs.com/api-ws/v1/realtime";
-    std::wstring qwenModel = L"qwen3-asr-flash-realtime";
+    std::wstring qwenHttpBaseUrl = kQwenBeijingHttpBaseUrl;
+    std::wstring qwenAudioStreamingBaseUrl = kQwenBeijingAudioStreamingBaseUrl;
+    std::wstring qwenModel = L"qwen-audio-3.0-asr-flash-streaming";
+    std::wstring qwenTransport = L"audio_streaming";
     std::wstring qwenLanguage;
     int qwenChunkMs = 100;
+    std::wstring qwenLanguageHints;
+    std::wstring qwenVocabularyId;
+    std::wstring qwenVocabulary;
+    bool qwenSemanticPunctuation = false;
+    int qwenMaxSentenceSilenceMs = 1300;
+    bool qwenMultiThresholdMode = false;
+    bool qwenHeartbeat = false;
+    bool qwenSpeechNoiseThresholdEnabled = false;
+    float qwenSpeechNoiseThreshold = 0.0f;
     std::wstring mimoApiKey;
     std::wstring mimoBaseUrl = L"https://token-plan-ams.xiaomimimo.com/v1";
     std::wstring mimoModel = L"mimo-v2.5-asr";
@@ -391,6 +427,10 @@ extern std::vector<std::vector<BYTE>> g_waveBuffers;
 extern std::vector<BYTE> g_audioData;
 extern CRITICAL_SECTION g_audioLock;
 extern bool g_captureActive;
+extern std::atomic<uint64_t> g_audioCaptureGeneration;
+extern std::atomic<bool> g_audioCaptureFailurePending;
+extern std::atomic<DWORD> g_audioCaptureFailureCode;
+extern std::atomic<bool> g_audioCaptureFailureWasapi;
 extern std::atomic<float> g_audioLevel;
 extern float g_hudSmoothedLevel;
 extern bool g_hudHasSpoken;
@@ -404,6 +444,8 @@ extern std::vector<HWND> g_cloudAsrControls;
 extern std::vector<HWND> g_baiduControls;
 extern std::vector<HWND> g_volcengineControls;
 extern std::vector<HWND> g_qwenControls;
+extern std::vector<HWND> g_qwenAudio3Controls;
+extern std::vector<HWND> g_qwenAudioStreamingOnlyControls;
 extern std::vector<HWND> g_mimoControls;
 extern std::vector<HWND> g_doubaoImeControls;
 extern std::vector<HWND> g_qwenFreeControls;

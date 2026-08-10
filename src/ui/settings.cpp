@@ -10,6 +10,9 @@
 #include "doubao_ime_asr.h"
 #include "mimo_asr.h"
 #include "qwen_asr.h"
+#include "qwen_audio_http.h"
+#include "qwen_audio_json.h"
+#include "qwen_audio_streaming.h"
 #include "qwen_free_proto_asr.h"
 #include "qwen_free_proto_llm.h"
 #include "qwen_free_postprocess.h"
@@ -23,6 +26,7 @@
 #include <cstdint>
 #include <imm.h>
 #include <windowsx.h>
+#include <winhttp.h>
 #include <shlobj.h>
 #include <string>
 #include <thread>
@@ -99,6 +103,225 @@ const wchar_t* QwenLanguageCodeFromIndex(int index) {
         return kQwenLanguages[index].code;
     }
     return L"";
+}
+
+bool IsQwenAudioHttpModel(const std::wstring& model) {
+    return model == L"qwen-audio-3.0-asr-flash";
+}
+
+bool IsQwenAudioStreamingModel(const std::wstring& model) {
+    return model == L"qwen-audio-3.0-asr-flash-streaming";
+}
+
+std::wstring s_qwenUiModel;
+std::wstring s_qwenUiHttpUrl;
+std::wstring s_qwenUiAudioStreamingUrl;
+std::wstring s_qwenUiLegacyUrl;
+
+std::wstring QwenModelFromControl(HWND hwnd) {
+    wchar_t model[256] = {};
+    GetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_MODEL), model, 256);
+    return model;
+}
+
+std::wstring QwenControlText(HWND hwnd, int id, size_t capacity = 1024) {
+    std::wstring value(capacity, L'\0');
+    const int length = GetWindowTextW(GetDlgItem(hwnd, id), value.data(), static_cast<int>(value.size()));
+    if (length <= 0) return {};
+    value.resize(static_cast<size_t>(length));
+    return value;
+}
+
+void StoreQwenProfileUrl(HWND hwnd, const std::wstring& model) {
+    const std::wstring url = QwenControlText(hwnd, IDC_QWEN_BASE_URL, 2048);
+    if (url.empty()) return;
+    if (IsQwenAudioHttpModel(model)) s_qwenUiHttpUrl = url;
+    else if (IsQwenAudioStreamingModel(model)) s_qwenUiAudioStreamingUrl = url;
+    else s_qwenUiLegacyUrl = url;
+}
+
+std::wstring NormalizeQwenLanguageHints(const std::wstring& raw) {
+    std::wstring normalized;
+    size_t start = 0;
+    size_t count = 0;
+    while (start <= raw.size() && count < 4) {
+        const size_t end = raw.find_first_of(L",;", start);
+        std::wstring item = Trim(raw.substr(start, end == std::wstring::npos ? std::wstring::npos : end - start));
+        if (!item.empty()) {
+            if (item == L"fil") item = L"tl";
+            bool valid = item.size() <= 16;
+            for (wchar_t ch : item) valid = valid && ((ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z') || ch == L'-');
+            if (valid) {
+                if (!normalized.empty()) normalized += L',';
+                normalized += item;
+                ++count;
+            }
+        }
+        if (end == std::wstring::npos) break;
+        start = end + 1;
+    }
+    return normalized;
+}
+
+bool ValidateQwenHints(const std::wstring& raw, std::wstring& error) {
+    const std::wstring text = Trim(raw);
+    if (text.empty()) return true;
+    size_t start = 0;
+    size_t count = 0;
+    while (start <= text.size()) {
+        const size_t end = text.find_first_of(L",;", start);
+        std::wstring item = Trim(text.substr(start, end == std::wstring::npos ? std::wstring::npos : end - start));
+        if (item.empty()) {
+            error = L"Language hints must contain 1–4 non-empty language codes.";
+            return false;
+        }
+        if (item == L"fil") item = L"tl";
+        if (item.size() > 16) {
+            error = L"Each language hint must be at most 16 characters.";
+            return false;
+        }
+        for (wchar_t ch : item) {
+            if (!((ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z') || ch == L'-')) {
+                error = L"Language hints may contain only letters and hyphens.";
+                return false;
+            }
+        }
+        if (++count > 4) {
+            error = L"Audio 3 supports at most 4 language hints.";
+            return false;
+        }
+        if (end == std::wstring::npos) break;
+        start = end + 1;
+    }
+    return true;
+}
+
+bool ValidateQwenEndpoint(const std::wstring& raw,
+                          const std::wstring& scheme,
+                          const std::wstring& path,
+                          std::wstring& error) {
+    URL_COMPONENTSW parts = {};
+    parts.dwStructSize = sizeof(parts);
+    parts.dwSchemeLength = static_cast<DWORD>(-1);
+    parts.dwHostNameLength = static_cast<DWORD>(-1);
+    parts.dwUrlPathLength = static_cast<DWORD>(-1);
+    const std::wstring original = Trim(raw);
+    if (original.empty() || original.rfind(scheme + L"://", 0) != 0) {
+        error = L"Qwen Base URL is invalid.";
+        return false;
+    }
+    std::wstring url = original;
+    const std::wstring parsedScheme = (scheme == L"wss") ? L"https" :
+        (scheme == L"ws" ? L"http" : scheme);
+    if (scheme == L"wss" || scheme == L"ws") url.replace(0, scheme.size(), parsedScheme);
+    if (!WinHttpCrackUrl(url.c_str(), 0, 0, &parts)) {
+        error = L"Qwen Base URL is invalid.";
+        return false;
+    }
+    const std::wstring actualScheme(parts.lpszScheme, parts.dwSchemeLength);
+    if (actualScheme != parsedScheme || parts.dwHostNameLength == 0) {
+        error = L"Qwen Base URL must use " + scheme + L" and include a host.";
+        return false;
+    }
+    std::wstring actualPath(parts.lpszUrlPath, parts.dwUrlPathLength);
+    while (actualPath.size() > 1 && actualPath.back() == L'/') actualPath.pop_back();
+    if (actualPath != path) {
+        error = L"Qwen Base URL path must be " + path + L".";
+        return false;
+    }
+    return true;
+}
+
+bool ValidateQwenControls(HWND hwnd, std::wstring& error) {
+    if (ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_CLOUD_PROVIDER)) != 2) return true;
+
+    if (QwenControlText(hwnd, IDC_QWEN_API_KEY, 1024).empty()) {
+        error = L"Qwen API Key cannot be empty when Qwen ASR is selected.";
+        return false;
+    }
+    const std::wstring model = QwenModelFromControl(hwnd);
+    if (!IsQwenAudioHttpModel(model) && !IsQwenAudioStreamingModel(model) &&
+        model != L"qwen3-asr-flash-realtime") {
+        error = L"Select a supported Qwen ASR model.";
+        return false;
+    }
+
+    const std::wstring url = QwenControlText(hwnd, IDC_QWEN_BASE_URL, 2048);
+    if (IsQwenAudioHttpModel(model)) {
+        if (!ValidateQwenEndpoint(url, L"https",
+                L"/api/v1/services/aigc/multimodal-generation/generation", error)) return false;
+    } else if (IsQwenAudioStreamingModel(model)) {
+        if (!ValidateQwenEndpoint(url, L"wss", L"/api-ws/v1/inference", error)) return false;
+    } else {
+        std::wstring wssError;
+        std::wstring wsError;
+        if (!ValidateQwenEndpoint(url, L"wss", L"/api-ws/v1/realtime", wssError) &&
+            !ValidateQwenEndpoint(url, L"ws", L"/api-ws/v1/realtime", wsError)) {
+            error = wssError.empty() ? wsError : wssError;
+            return false;
+        }
+    }
+
+    const std::wstring hints = QwenControlText(hwnd, IDC_QWEN_LANGUAGE_HINTS, 1024);
+    if (!ValidateQwenHints(hints, error)) return false;
+    const std::wstring vocabulary = QwenControlText(hwnd, IDC_QWEN_VOCABULARY, 8192);
+    if (!qwen_audio_json::IsValidVocabulary(vocabulary, &error)) return false;
+
+    if (IsQwenAudioStreamingModel(model)) {
+        const std::wstring silence = QwenControlText(hwnd, IDC_QWEN_MAX_SENTENCE_SILENCE, 32);
+        const int silenceMs = _wtoi(silence.c_str());
+        if (silenceMs < 200 || silenceMs > 6000) {
+            error = L"Max sentence silence must be between 200 and 6000 ms.";
+            return false;
+        }
+        const bool semantic = Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_SEMANTIC_PUNCTUATION)) == BST_CHECKED;
+        const bool multi = Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_MULTI_THRESHOLD)) == BST_CHECKED;
+        if (semantic && multi) {
+            error = L"Semantic punctuation and multi-threshold mode cannot both be enabled.";
+            return false;
+        }
+        if (Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_SPEECH_NOISE_ENABLE)) == BST_CHECKED) {
+            const std::wstring noise = QwenControlText(hwnd, IDC_QWEN_SPEECH_NOISE_THRESHOLD, 32);
+            const double value = _wtof(noise.c_str());
+            if (value < -1.0 || value > 1.0) {
+                error = L"Speech noise threshold must be between -1.0 and 1.0.";
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+void ApplyQwenModelProfile(HWND hwnd, const std::wstring& model, bool preserveUrl) {
+    const bool http = IsQwenAudioHttpModel(model);
+    const bool isStreamingTransport = !http;
+    HWND base = GetDlgItem(hwnd, IDC_QWEN_BASE_URL);
+    if (base && !preserveUrl) {
+        const std::wstring& value = http ? s_qwenUiHttpUrl
+            : (IsQwenAudioStreamingModel(model) ? s_qwenUiAudioStreamingUrl : s_qwenUiLegacyUrl);
+        SetWindowTextW(base, value.c_str());
+    }
+    HWND chunk = GetDlgItem(hwnd, IDC_QWEN_CHUNK_MS);
+    if (chunk) EnableWindow(chunk, isStreamingTransport ? TRUE : FALSE);
+    const bool audio3 = http || IsQwenAudioStreamingModel(model);
+    for (HWND control : g_qwenAudio3Controls) {
+        ShowWindow(control, audio3 && g_cloudProviderIdx == 2 ? SW_SHOW : SW_HIDE);
+    }
+    const bool audioStreaming = audio3 && IsQwenAudioStreamingModel(model);
+    for (HWND control : g_qwenAudioStreamingOnlyControls) {
+        ShowWindow(control, audioStreaming && g_cloudProviderIdx == 2 ? SW_SHOW : SW_HIDE);
+    }
+    if (audio3) {
+        EnableWindow(GetDlgItem(hwnd, IDC_QWEN_MULTI_THRESHOLD),
+                     Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_SEMANTIC_PUNCTUATION)) == BST_CHECKED ? FALSE : TRUE);
+        EnableWindow(GetDlgItem(hwnd, IDC_QWEN_HEARTBEAT),
+                     IsQwenAudioStreamingModel(model) ? TRUE : FALSE);
+        EnableWindow(GetDlgItem(hwnd, IDC_QWEN_SPEECH_NOISE_ENABLE),
+                     IsQwenAudioStreamingModel(model) ? TRUE : FALSE);
+        EnableWindow(GetDlgItem(hwnd, IDC_QWEN_SPEECH_NOISE_THRESHOLD),
+                     IsQwenAudioStreamingModel(model) &&
+                     Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_SPEECH_NOISE_ENABLE)) == BST_CHECKED ? TRUE : FALSE);
+    }
 }
 
 struct MimoLanguageOption {
@@ -623,6 +846,18 @@ void AddQwenControl(HWND hwnd) {
     if (hwnd) g_qwenControls.push_back(hwnd);
 }
 
+void AddQwenAudio3Control(HWND hwnd) {
+    if (hwnd) {
+        g_qwenControls.push_back(hwnd);
+        g_qwenAudio3Controls.push_back(hwnd);
+    }
+}
+
+void AddQwenAudioStreamingOnlyControl(HWND hwnd) {
+    AddQwenAudio3Control(hwnd);
+    if (hwnd) g_qwenAudioStreamingOnlyControls.push_back(hwnd);
+}
+
 void AddMimoControl(HWND hwnd) {
     if (hwnd) g_mimoControls.push_back(hwnd);
 }
@@ -653,6 +888,12 @@ void ShowCloudSubPage(HWND hwnd, int providerIdx) {
     for (HWND c : g_baiduControls) ShowWindow(c, providerIdx == 1 ? SW_SHOW : SW_HIDE);
     for (HWND c : g_volcengineControls) ShowWindow(c, providerIdx == 0 ? SW_SHOW : SW_HIDE);
     for (HWND c : g_qwenControls) ShowWindow(c, providerIdx == 2 ? SW_SHOW : SW_HIDE);
+    const bool audio3 = providerIdx == 2 &&
+        (IsQwenAudioHttpModel(QwenModelFromControl(hwnd)) ||
+         IsQwenAudioStreamingModel(QwenModelFromControl(hwnd)));
+    for (HWND c : g_qwenAudio3Controls) ShowWindow(c, audio3 ? SW_SHOW : SW_HIDE);
+    const bool audioStreaming = audio3 && IsQwenAudioStreamingModel(QwenModelFromControl(hwnd));
+    for (HWND c : g_qwenAudioStreamingOnlyControls) ShowWindow(c, audioStreaming ? SW_SHOW : SW_HIDE);
     for (HWND c : g_mimoControls) ShowWindow(c, providerIdx == 3 ? SW_SHOW : SW_HIDE);
     for (HWND c : g_doubaoImeControls) ShowWindow(c, providerIdx == 4 ? SW_SHOW : SW_HIDE);
     for (HWND c : g_qwenFreeControls) ShowWindow(c, providerIdx == 5 ? SW_SHOW : SW_HIDE);
@@ -680,6 +921,7 @@ void ShowSettingsPage(HWND hwnd, int page) {
         for (HWND c : g_baiduControls) ShowWindow(c, SW_HIDE);
         for (HWND c : g_volcengineControls) ShowWindow(c, SW_HIDE);
         for (HWND c : g_qwenControls) ShowWindow(c, SW_HIDE);
+        for (HWND c : g_qwenAudio3Controls) ShowWindow(c, SW_HIDE);
         for (HWND c : g_mimoControls) ShowWindow(c, SW_HIDE);
         for (HWND c : g_doubaoImeControls) ShowWindow(c, SW_HIDE);
         for (HWND c : g_qwenFreeControls) ShowWindow(c, SW_HIDE);
@@ -973,8 +1215,19 @@ void LoadSettingsControls(HWND hwnd) {
 
     SetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_API_KEY), g_config.volcApiKey.c_str());
     SetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_API_KEY), g_config.qwenApiKey.c_str());
-    SetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_BASE_URL), g_config.qwenBaseUrl.c_str());
-    SetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_MODEL), g_config.qwenModel.c_str());
+    HWND qwenModelCombo = GetDlgItem(hwnd, IDC_QWEN_MODEL);
+    ComboBox_ResetContent(qwenModelCombo);
+    ComboBox_AddString(qwenModelCombo, L"qwen-audio-3.0-asr-flash-streaming");
+    ComboBox_AddString(qwenModelCombo, L"qwen-audio-3.0-asr-flash");
+    ComboBox_AddString(qwenModelCombo, L"qwen3-asr-flash-realtime");
+    int qwenModelIndex = IsQwenAudioStreamingModel(g_config.qwenModel) ? 0 :
+        (IsQwenAudioHttpModel(g_config.qwenModel) ? 1 : 2);
+    ComboBox_SetCurSel(qwenModelCombo, qwenModelIndex);
+    s_qwenUiModel = g_config.qwenModel;
+    s_qwenUiHttpUrl = g_config.qwenHttpBaseUrl;
+    s_qwenUiAudioStreamingUrl = g_config.qwenAudioStreamingBaseUrl;
+    s_qwenUiLegacyUrl = g_config.qwenBaseUrl;
+    ApplyQwenModelProfile(hwnd, g_config.qwenModel, false);
     SetWindowTextW(GetDlgItem(hwnd, IDC_MIMO_API_KEY), g_config.mimoApiKey.c_str());
     SetWindowTextW(GetDlgItem(hwnd, IDC_MIMO_BASE_URL), g_config.mimoBaseUrl.c_str());
     SetWindowTextW(GetDlgItem(hwnd, IDC_MIMO_MODEL), g_config.mimoModel.c_str());
@@ -1000,6 +1253,23 @@ void LoadSettingsControls(HWND hwnd) {
         ComboBox_AddString(qwenLangCombo, lang.label);
     }
     ComboBox_SetCurSel(qwenLangCombo, QwenLanguageIndexFromCode(g_config.qwenLanguage));
+    SetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_LANGUAGE_HINTS), g_config.qwenLanguageHints.c_str());
+    SetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_VOCABULARY_ID), g_config.qwenVocabularyId.c_str());
+    SetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_VOCABULARY), g_config.qwenVocabulary.c_str());
+    Button_SetCheck(GetDlgItem(hwnd, IDC_QWEN_SEMANTIC_PUNCTUATION), g_config.qwenSemanticPunctuation ? BST_CHECKED : BST_UNCHECKED);
+    Button_SetCheck(GetDlgItem(hwnd, IDC_QWEN_MULTI_THRESHOLD), g_config.qwenMultiThresholdMode ? BST_CHECKED : BST_UNCHECKED);
+    Button_SetCheck(GetDlgItem(hwnd, IDC_QWEN_HEARTBEAT), g_config.qwenHeartbeat ? BST_CHECKED : BST_UNCHECKED);
+    Button_SetCheck(GetDlgItem(hwnd, IDC_QWEN_SPEECH_NOISE_ENABLE), g_config.qwenSpeechNoiseThresholdEnabled ? BST_CHECKED : BST_UNCHECKED);
+    {
+        wchar_t silence[32] = {};
+        _itow_s(g_config.qwenMaxSentenceSilenceMs, silence, 10);
+        SetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_MAX_SENTENCE_SILENCE), silence);
+    }
+    {
+        wchar_t threshold[32] = {};
+        swprintf_s(threshold, L"%.3f", static_cast<double>(g_config.qwenSpeechNoiseThreshold));
+        SetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_SPEECH_NOISE_THRESHOLD), threshold);
+    }
 
     HWND mimoLangCombo = GetDlgItem(hwnd, IDC_MIMO_LANGUAGE);
     for (const auto& lang : kMimoLanguages) {
@@ -1104,6 +1374,12 @@ std::wstring ComboText(HWND combo) {
 }
 
 void SaveSettingsControls(HWND hwnd) {
+    std::wstring qwenValidationError;
+    if (!ValidateQwenControls(hwnd, qwenValidationError)) {
+        SetStatus(hwnd, qwenValidationError);
+        MessageBoxW(hwnd, qwenValidationError.c_str(), L"Qwen Settings", MB_OK | MB_ICONERROR);
+        return;
+    }
     // Keep the registry-backed setting transactional with the normal config:
     // a startup registration failure must not commit any of the UI changes.
     if (!SaveStartupRegistrationControl(hwnd)) return;
@@ -1236,10 +1512,27 @@ void SaveSettingsControls(HWND hwnd) {
     g_config.qwenApiKey = qwenApiKey;
     wchar_t qwenBaseUrl[512] = {};
     GetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_BASE_URL), qwenBaseUrl, 512);
-    g_config.qwenBaseUrl = qwenBaseUrl[0] ? qwenBaseUrl : qwen_asr::kDefaultBaseUrl;
+    const std::wstring selectedQwenModel = QwenModelFromControl(hwnd);
+    const std::wstring selectedQwenUrl = qwenBaseUrl[0] ? qwenBaseUrl :
+        (IsQwenAudioHttpModel(selectedQwenModel) ? g_config.qwenHttpBaseUrl :
+         (IsQwenAudioStreamingModel(selectedQwenModel) ? g_config.qwenAudioStreamingBaseUrl : qwen_asr::kDefaultBaseUrl));
+    StoreQwenProfileUrl(hwnd, selectedQwenModel);
+    if (IsQwenAudioHttpModel(selectedQwenModel)) {
+        s_qwenUiHttpUrl = selectedQwenUrl;
+        g_config.qwenTransport = L"audio_http";
+    } else if (IsQwenAudioStreamingModel(selectedQwenModel)) {
+        s_qwenUiAudioStreamingUrl = selectedQwenUrl;
+        g_config.qwenTransport = L"audio_streaming";
+    } else {
+        s_qwenUiLegacyUrl = selectedQwenUrl;
+        g_config.qwenTransport = L"legacy_realtime";
+    }
+    g_config.qwenHttpBaseUrl = s_qwenUiHttpUrl;
+    g_config.qwenAudioStreamingBaseUrl = s_qwenUiAudioStreamingUrl;
+    g_config.qwenBaseUrl = s_qwenUiLegacyUrl;
     wchar_t qwenModel[256] = {};
     GetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_MODEL), qwenModel, 256);
-    g_config.qwenModel = qwenModel[0] ? qwenModel : qwen_asr::kDefaultModel;
+    g_config.qwenModel = qwenModel[0] ? qwenModel : L"qwen-audio-3.0-asr-flash-streaming";
     {
         int langIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_QWEN_LANGUAGE));
         g_config.qwenLanguage = QwenLanguageCodeFromIndex(langIdx);
@@ -1249,6 +1542,26 @@ void SaveSettingsControls(HWND hwnd) {
         GetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_CHUNK_MS), buf, 32);
         g_config.qwenChunkMs = std::clamp(_wtoi(buf), 20, 1000);
     }
+    wchar_t qwenHints[512] = {};
+    GetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_LANGUAGE_HINTS), qwenHints, 512);
+    g_config.qwenLanguageHints = NormalizeQwenLanguageHints(qwenHints);
+    wchar_t qwenVocabId[512] = {};
+    GetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_VOCABULARY_ID), qwenVocabId, 512);
+    g_config.qwenVocabularyId = qwenVocabId;
+    wchar_t qwenVocabulary[4096] = {};
+    GetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_VOCABULARY), qwenVocabulary, 4096);
+    g_config.qwenVocabulary = qwenVocabulary;
+    g_config.qwenSemanticPunctuation = Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_SEMANTIC_PUNCTUATION)) == BST_CHECKED;
+    g_config.qwenMultiThresholdMode = !g_config.qwenSemanticPunctuation &&
+        Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_MULTI_THRESHOLD)) == BST_CHECKED;
+    g_config.qwenHeartbeat = Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_HEARTBEAT)) == BST_CHECKED;
+    g_config.qwenSpeechNoiseThresholdEnabled = Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_SPEECH_NOISE_ENABLE)) == BST_CHECKED;
+    wchar_t qwenSilence[32] = {};
+    GetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_MAX_SENTENCE_SILENCE), qwenSilence, 32);
+    g_config.qwenMaxSentenceSilenceMs = std::clamp(_wtoi(qwenSilence), 200, 6000);
+    wchar_t qwenNoise[32] = {};
+    GetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_SPEECH_NOISE_THRESHOLD), qwenNoise, 32);
+    g_config.qwenSpeechNoiseThreshold = std::clamp(static_cast<float>(_wtof(qwenNoise)), -1.0f, 1.0f);
 
     wchar_t mimoApiKey[512] = {};
     GetWindowTextW(GetDlgItem(hwnd, IDC_MIMO_API_KEY), mimoApiKey, 512);
@@ -1724,6 +2037,8 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         g_baiduControls.clear();
         g_volcengineControls.clear();
         g_qwenControls.clear();
+        g_qwenAudio3Controls.clear();
+        g_qwenAudioStreamingOnlyControls.clear();
         g_mimoControls.clear();
         g_doubaoImeControls.clear();
         g_qwenFreeControls.clear();
@@ -2004,9 +2319,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 
         control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(3)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Model");
         AddQwenControl(control);
-        HWND qwenModel = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", qwen_asr::kDefaultModel, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                                         S(UiStyle::InputLeft), S(UiStyle::RowInputY(3)), S(330), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_MODEL)), g_instance, nullptr);
-        ApplyUiFont(qwenModel);
+        HWND qwenModel = CreateCombo(hwnd, IDC_QWEN_MODEL, S(UiStyle::InputLeft), S(UiStyle::RowInputY(3)), S(420), S(UiStyle::ComboH));
         AddQwenControl(qwenModel);
 
         control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(4)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Language");
@@ -2019,6 +2332,49 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                                            S(UiStyle::InputLeft), S(UiStyle::RowInputY(5)), S(80), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_CHUNK_MS)), g_instance, nullptr);
         ApplyUiFont(qwenChunkMs);
         AddQwenControl(qwenChunkMs);
+
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(6)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Language hints");
+        AddQwenAudio3Control(control);
+        HWND qwenHints = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                                         S(UiStyle::InputLeft), S(UiStyle::RowInputY(6)), S(420), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_LANGUAGE_HINTS)), g_instance, nullptr);
+        ApplyUiFont(qwenHints); AddQwenAudio3Control(qwenHints);
+
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(7)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Vocabulary ID");
+        AddQwenAudio3Control(control);
+        HWND qwenVocabId = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                                           S(UiStyle::InputLeft), S(UiStyle::RowInputY(7)), S(420), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_VOCABULARY_ID)), g_instance, nullptr);
+        ApplyUiFont(qwenVocabId); AddQwenAudio3Control(qwenVocabId);
+
+        HWND qwenSemantic = CreateCheckBox(hwnd, IDC_QWEN_SEMANTIC_PUNCTUATION, S(UiStyle::InputLeft), S(UiStyle::RowInputY(8)), S(220), S(UiStyle::CheckH), L"Semantic punctuation");
+        AddQwenAudioStreamingOnlyControl(qwenSemantic);
+        control = CreateLabel(hwnd, S(420), S(UiStyle::RowLabelY(8)), S(115), S(UiStyle::LabelH), L"Silence ms");
+        AddQwenAudioStreamingOnlyControl(control);
+        HWND qwenSilence = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
+                                           S(535), S(UiStyle::RowInputY(8)), S(80), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_MAX_SENTENCE_SILENCE)), g_instance, nullptr);
+        ApplyUiFont(qwenSilence); AddQwenAudioStreamingOnlyControl(qwenSilence);
+
+        HWND qwenMulti = CreateCheckBox(hwnd, IDC_QWEN_MULTI_THRESHOLD, S(UiStyle::InputLeft), S(UiStyle::RowInputY(9)), S(170), S(UiStyle::CheckH), L"Multi-threshold");
+        AddQwenAudioStreamingOnlyControl(qwenMulti);
+        HWND qwenHeartbeat = CreateCheckBox(hwnd, IDC_QWEN_HEARTBEAT, S(360), S(UiStyle::RowInputY(9)), S(135), S(UiStyle::CheckH), L"Heartbeat");
+        AddQwenAudioStreamingOnlyControl(qwenHeartbeat);
+
+        HWND qwenNoiseEnable = CreateCheckBox(hwnd, IDC_QWEN_SPEECH_NOISE_ENABLE,
+                                               S(500), S(UiStyle::RowInputY(9)), S(220), S(UiStyle::CheckH),
+                                               L"Speech noise threshold");
+        AddQwenAudioStreamingOnlyControl(qwenNoiseEnable);
+        HWND qwenNoise = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr,
+                                         WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                                         S(725), S(UiStyle::RowInputY(9)), S(70), S(UiStyle::EditH),
+                                         hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_SPEECH_NOISE_THRESHOLD)), g_instance, nullptr);
+        ApplyUiFont(qwenNoise); AddQwenAudioStreamingOnlyControl(qwenNoise);
+
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(10)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Vocabulary JSON");
+        AddQwenAudio3Control(control);
+        HWND qwenVocabulary = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr,
+                                              WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL,
+                                              S(UiStyle::InputLeft), S(UiStyle::RowInputY(10)), S(420), S(40),
+                                              hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_VOCABULARY)), g_instance, nullptr);
+        ApplyUiFont(qwenVocabulary); AddQwenAudio3Control(qwenVocabulary);
 
         AddQwenControl(CreateButton(hwnd, IDC_QWEN_TEST, S(500), S(UiStyle::RowInputY(0)), S(UiStyle::ActionBtnW), S(UiStyle::ActionBtnH), L"Test Connection"));
 
@@ -2251,6 +2607,37 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             if (HIWORD(wParam) == CBN_SELCHANGE) {
                 const std::wstring modelId = ModelIdFromIndex(ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_MODEL)));
                 SetWindowTextW(GetDlgItem(hwnd, IDC_MODEL_DIR), DefaultModelDir(modelId).c_str());
+                return 0;
+            }
+            break;
+        case IDC_QWEN_MODEL:
+            if (HIWORD(wParam) == CBN_SELCHANGE) {
+                if (!s_qwenUiModel.empty()) StoreQwenProfileUrl(hwnd, s_qwenUiModel);
+                s_qwenUiModel = QwenModelFromControl(hwnd);
+                ApplyQwenModelProfile(hwnd, s_qwenUiModel, false);
+                return 0;
+            }
+            break;
+        case IDC_QWEN_SEMANTIC_PUNCTUATION:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                const bool enabled = Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_SEMANTIC_PUNCTUATION)) == BST_CHECKED;
+                if (enabled) Button_SetCheck(GetDlgItem(hwnd, IDC_QWEN_MULTI_THRESHOLD), BST_UNCHECKED);
+                EnableWindow(GetDlgItem(hwnd, IDC_QWEN_MULTI_THRESHOLD), enabled ? FALSE : TRUE);
+                return 0;
+            }
+            break;
+        case IDC_QWEN_MULTI_THRESHOLD:
+            if (HIWORD(wParam) == BN_CLICKED &&
+                Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_MULTI_THRESHOLD)) == BST_CHECKED) {
+                Button_SetCheck(GetDlgItem(hwnd, IDC_QWEN_SEMANTIC_PUNCTUATION), BST_UNCHECKED);
+                return 0;
+            }
+            break;
+        case IDC_QWEN_SPEECH_NOISE_ENABLE:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                const bool streamingModel = IsQwenAudioStreamingModel(QwenModelFromControl(hwnd));
+                const bool enabled = Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_SPEECH_NOISE_ENABLE)) == BST_CHECKED;
+                EnableWindow(GetDlgItem(hwnd, IDC_QWEN_SPEECH_NOISE_THRESHOLD), streamingModel && enabled ? TRUE : FALSE);
                 return 0;
             }
             break;
@@ -2593,6 +2980,45 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             return 0;
         }
         case IDC_QWEN_TEST: {
+            const std::wstring selectedModel = QwenModelFromControl(hwnd);
+            if (IsQwenAudioHttpModel(selectedModel)) {
+                qwen_audio_http::Config cfg;
+                wchar_t tmp[1024] = {};
+                GetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_API_KEY), tmp, 1024); cfg.apiKey = tmp;
+                GetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_BASE_URL), tmp, 1024); cfg.baseUrl = tmp;
+                cfg.model = selectedModel;
+                cfg.languageHints = NormalizeQwenLanguageHints(QwenControlText(hwnd, IDC_QWEN_LANGUAGE_HINTS));
+                cfg.vocabularyId = QwenControlText(hwnd, IDC_QWEN_VOCABULARY_ID);
+                cfg.vocabulary = QwenControlText(hwnd, IDC_QWEN_VOCABULARY, 4096);
+                SetStatus(hwnd, L"Testing Qwen Audio HTTP connection...");
+                std::thread([hwnd, cfg]() {
+                    auto result = qwen_audio_http::TestConnection(cfg);
+                    PostMessageW(hwnd, WM_APP + 10, result.ok ? 0 : 1, reinterpret_cast<LPARAM>(new std::wstring(result.message)));
+                }).detach();
+                return 0;
+            }
+            if (IsQwenAudioStreamingModel(selectedModel)) {
+                qwen_audio_streaming::Config cfg;
+                wchar_t tmp[1024] = {};
+                GetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_API_KEY), tmp, 1024); cfg.apiKey = tmp;
+                GetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_BASE_URL), tmp, 1024); cfg.baseUrl = tmp;
+                cfg.model = selectedModel;
+                cfg.languageHints = NormalizeQwenLanguageHints(QwenControlText(hwnd, IDC_QWEN_LANGUAGE_HINTS));
+                cfg.vocabularyId = QwenControlText(hwnd, IDC_QWEN_VOCABULARY_ID);
+                cfg.vocabulary = QwenControlText(hwnd, IDC_QWEN_VOCABULARY, 4096);
+                cfg.semanticPunctuation = Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_SEMANTIC_PUNCTUATION)) == BST_CHECKED;
+                cfg.multiThresholdMode = Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_MULTI_THRESHOLD)) == BST_CHECKED;
+                cfg.heartbeat = Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_HEARTBEAT)) == BST_CHECKED;
+                cfg.speechNoiseThresholdEnabled = Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_SPEECH_NOISE_ENABLE)) == BST_CHECKED;
+                cfg.speechNoiseThreshold = std::clamp(static_cast<float>(_wtof(QwenControlText(hwnd, IDC_QWEN_SPEECH_NOISE_THRESHOLD, 32).c_str())), -1.0f, 1.0f);
+                cfg.maxSentenceSilenceMs = std::clamp(_wtoi(QwenControlText(hwnd, IDC_QWEN_MAX_SENTENCE_SILENCE, 32).c_str()), 200, 6000);
+                SetStatus(hwnd, L"Testing Qwen Audio streaming connection...");
+                std::thread([hwnd, cfg]() {
+                    auto result = qwen_audio_streaming::TestConnection(cfg);
+                    PostMessageW(hwnd, WM_APP + 10, result.ok ? 0 : 1, reinterpret_cast<LPARAM>(new std::wstring(result.message)));
+                }).detach();
+                return 0;
+            }
             qwen_asr::QwenConfig qcfg;
             wchar_t tmp[512] = {};
             GetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_API_KEY), tmp, 512);
