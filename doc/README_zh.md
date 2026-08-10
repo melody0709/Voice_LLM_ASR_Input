@@ -35,6 +35,12 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 
 ## Quick Start
 
+### Qwen IME (Free) 独立运行时指南
+
+需要先安装千问输入法初始化本机 UTDID，再迁移私有运行时并卸载千问时，请参阅：
+
+[Qwen IME (Free) 独立运行时指南](qwen_free_standalone_runtime_guide_zh.md)
+
 ### 1. 下载模型
 
 ```powershell
