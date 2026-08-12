@@ -1,6 +1,7 @@
 #include "qwen_streaming_session.h"
 
 #include "asr_result.h"
+#include "asr_runtime_log.h"
 #include "asr_streaming_session_base.h"
 #include "cloud_asr_common.h"
 #include "globals.h"
@@ -9,6 +10,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdarg>
 #include <cstddef>
 #include <mutex>
 #include <thread>
@@ -16,6 +18,14 @@
 #include <vector>
 
 namespace {
+
+void QwenRealtimeSessionDebugLog(const char* format, ...) {
+    if (!format) return;
+    va_list args;
+    va_start(args, format);
+    asr_runtime_log::WriteNamedV(L"qwen_audio_debug.log", format, args);
+    va_end(args);
+}
 
 constexpr DWORD kQwenRecordingWatchdogMs = 18000;
 constexpr DWORD kQwenManualMaxRecordingMs = 55000;
@@ -430,14 +440,27 @@ private:
             } else {
                 const ULONGLONG deadline = GetTickCount64() + std::max<DWORD>(finalTimeout, 1000);
                 while (!abort_.load()) {
+                    // Check for a completed transcript BEFORE drainFailed. The
+                    // server may peer-close after sending
+                    // conversation.item.input_audio_transcription.completed but
+                    // before session.finished; in that race we already hold the
+                    // final transcript and must not downgrade it to a failure
+                    // that triggers a full replay (which could then erase the
+                    // valid result on a non-transport retry error).
+                    if (drainCompleted.load() || drainSessionFinished.load()) {
+                        if (drainCompleted.load() && !drainSessionFinished.load()) {
+                            QwenRealtimeSessionDebugLog(
+                                "event=transcript_completed_without_session_finished "
+                                "attempt=%llu phase=finalize",
+                                static_cast<unsigned long long>(config_.asrAttemptId));
+                        }
+                        break;
+                    }
                     if (drainFailed.load()) {
                         std::lock_guard<std::mutex> lock(drainMutex);
                         error = drainError.empty() ? L"receive failed" : drainError;
                         failed = true;
                         retryWithReplay = true;
-                        break;
-                    }
-                    if (drainCompleted.load() || drainSessionFinished.load()) {
                         break;
                     }
                     if (GetTickCount64() >= deadline) {

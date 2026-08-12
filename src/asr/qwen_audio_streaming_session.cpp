@@ -440,6 +440,10 @@ private:
         bool failed = false;
         bool retryWithReplay = false;
         bool replayEnabled = true;
+        // True only when an incomplete finalize happened AFTER finish-task was
+        // sent (task-finished timeout or peer close during finalize). Used to
+        // recover an already-delivered transcript instead of discarding it.
+        bool finalizePhaseError = false;
 
         auto sendChunk = [&](const BYTE* data, size_t bytes) -> bool {
             if (bytes == 0) return true;
@@ -539,6 +543,11 @@ private:
                     Sleep(25);
                 }
                 if (!taskFinished.load()) {
+                    // Reached only when finish-task was sent but task-finished
+                    // did not arrive in time (timeout or peer close during
+                    // finalize). Flag so the transcript can be recovered below
+                    // if the server already delivered final sentences.
+                    finalizePhaseError = true;
                     failed = true;
                     retryWithReplay = replayEnabled;
                     std::lock_guard<std::mutex> lock(stateMutex);
@@ -557,6 +566,22 @@ private:
         {
             std::lock_guard<std::mutex> lock(textMutex);
             finalText = transcript.Text();
+        }
+        // Recovery: if finish-task was sent but the server ended the session
+        // without task-finished (timeout or peer close) yet already delivered
+        // final sentences (sentence_end=true), prefer the accumulated
+        // transcript over discarding it as a failure. Mid-stream send/receive
+        // failures (finalizePhaseError == false) still go through the replay
+        // retry path because the server may not have received all audio.
+        if (!abort_.load() && !noSpeech.load() && finalizePhaseError && !finalText.empty()) {
+            QwenAudioSessionDebugLog(
+                "event=transcript_recovered_despite_incomplete_finalize attempt=%llu drain_failed=%d text_chars=%zu",
+                static_cast<unsigned long long>(cfg_.attemptId),
+                drainFailed.load() ? 1 : 0, finalText.size());
+            failed = false;
+            retryWithReplay = false;
+            std::lock_guard<std::mutex> lock(stateMutex);
+            error.clear();
         }
         std::wstring finalError;
         {
