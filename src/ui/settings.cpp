@@ -353,10 +353,10 @@ void ApplyQwenModelProfile(HWND hwnd, const std::wstring& model, bool preserveUr
     if (chunk) EnableWindow(chunk, isStreamingTransport ? TRUE : FALSE);
     if (s_qwenChunkContextHint) {
         const wchar_t* hint = http
-            ? L"HTTP batch ignores Chunk ms. Context sends up to 400 focused-field characters to the Audio 3 cloud service."
+            ? L"HTTP batch ignores Chunk ms. Context sends the focused field's text (≤400 chars) to the cloud."
             : (IsQwenAudioStreamingModel(model)
-                ? L"Chunk controls streaming latency (100–300 ms recommended). Context sends up to 400 focused-field characters to the cloud."
-                : L"Chunk controls realtime upload latency; 100–300 ms is recommended for normal dictation.");
+                ? L"100–300 ms recommended. Context sends the focused field's text (≤400 chars) to the cloud."
+                : L"Realtime upload latency; 100–300 ms recommended.");
         SetWindowTextW(s_qwenChunkContextHint, hint);
     }
     const bool audio3 = http || IsQwenAudioStreamingModel(model);
@@ -1033,7 +1033,7 @@ HWND CreateLabel(HWND parent, int x, int y, int w, int h, const wchar_t* text) {
 }
 
 HWND CreateHint(HWND parent, int x, int y, int w, int h, const wchar_t* text) {
-    HWND hwnd = CreateWindowW(L"STATIC", text, WS_CHILD | WS_VISIBLE,
+    HWND hwnd = CreateWindowW(L"STATIC", text, WS_CHILD | WS_VISIBLE | SS_LEFT,
                               x, y, w, h, parent, nullptr, g_instance, nullptr);
     ApplyUiFont(hwnd);
     MarkSettingsHint(hwnd);
@@ -2102,8 +2102,8 @@ LRESULT CALLBACK QwenAdvancedWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         ApplyUiFont(vocabId);
         control = CreateHint(hwnd, S(UiStyle::QwenAdvancedDialogInputLeft),
                              S(UiStyle::QwenAdvancedDialogVocabIdHintY),
-                             S(UiStyle::QwenAdvancedDialogInputW), S(UiStyle::QwenHintH) * 2,
-                             L"Optional precompiled vocabulary ID created in Alibaba Cloud. The vocabulary target model must match the selected ASR model.");
+                             S(UiStyle::QwenAdvancedDialogInputW), S(UiStyle::QwenHint2LineH),
+                             L"Optional. Its target model must match the selected ASR model.");
 
         control = CreateLabel(hwnd, S(UiStyle::QwenAdvancedDialogLeft),
                               S(UiStyle::QwenAdvancedDialogVocabJsonLabelY),
@@ -2119,8 +2119,8 @@ LRESULT CALLBACK QwenAdvancedWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         ApplyUiFont(vocabulary);
         control = CreateHint(hwnd, S(UiStyle::QwenAdvancedDialogInputLeft),
                              S(UiStyle::QwenAdvancedDialogVocabJsonHintY),
-                             S(UiStyle::QwenAdvancedDialogInputW), S(UiStyle::QwenHintH) * 2,
-                             L"Optional per-request hotwords. Example: {\"VoxType\":4,\"Qwen\":4}. Weights are 1–5 or 50 and combine with Vocabulary ID hotwords.");
+                             S(UiStyle::QwenAdvancedDialogInputW), S(UiStyle::QwenHint2LineH),
+                             L"Optional. Example: {\"VoxType\":4,\"Qwen\":4} — weights 1–5 or 50.");
 
         const wchar_t* groupTitle = data && data->streaming
             ? L"Streaming recognition"
@@ -2143,8 +2143,8 @@ LRESULT CALLBACK QwenAdvancedWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                                        g_instance, nullptr);
         ApplyUiFont(silence);
         control = CreateHint(hwnd, S(UiStyle::QwenAdvancedDialogInputLeft),
-                             S(UiStyle::QwenAdvancedDialogStreamingHint1Y), S(470), S(UiStyle::QwenHintH),
-                             L"Semantic punctuation uses meaning for sentence boundaries; Silence ms finalizes after sustained silence (200–6000).");
+                             S(UiStyle::QwenAdvancedDialogStreamingHint1Y), S(470), S(UiStyle::QwenHint2LineH),
+                             L"Semantic punctuation splits by meaning. Silence ms finalizes after silence (200–6000).");
 
         HWND multi = CreateCheckBox(hwnd, IDC_QWEN_MULTI_THRESHOLD,
                                     S(UiStyle::QwenAdvancedDialogInputLeft), S(UiStyle::QwenAdvancedDialogStreamingRow2Y),
@@ -2153,8 +2153,8 @@ LRESULT CALLBACK QwenAdvancedWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                                         S(350), S(UiStyle::QwenAdvancedDialogStreamingRow2Y),
                                         S(150), S(UiStyle::CheckH), L"Heartbeat");
         control = CreateHint(hwnd, S(UiStyle::QwenAdvancedDialogInputLeft),
-                             S(UiStyle::QwenAdvancedDialogStreamingHint2Y), S(470), S(UiStyle::QwenHintH),
-                             L"Multi-threshold targets noisy audio and conflicts with semantic punctuation. Heartbeat keeps idle connections alive.");
+                             S(UiStyle::QwenAdvancedDialogStreamingHint2Y), S(470), S(UiStyle::QwenHint2LineH),
+                             L"For noisy audio; can't combine with semantic punctuation. Heartbeat keeps the connection alive.");
 
         HWND noiseEnable = CreateCheckBox(hwnd, IDC_QWEN_SPEECH_NOISE_ENABLE,
                                           S(UiStyle::QwenAdvancedDialogInputLeft), S(UiStyle::QwenAdvancedDialogNoiseY),
@@ -2166,10 +2166,10 @@ LRESULT CALLBACK QwenAdvancedWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                                      g_instance, nullptr);
         ApplyUiFont(noise);
         control = CreateHint(hwnd, S(530), S(UiStyle::QwenAdvancedDialogNoiseY) + S(4),
-                             S(135), S(UiStyle::QwenHintH), L"Range: -1.0 to 1.0");
+                             S(135), S(UiStyle::QwenHintH), L"-1.0 to 1.0");
         control = CreateHint(hwnd, S(UiStyle::QwenAdvancedDialogInputLeft),
                              S(UiStyle::QwenAdvancedDialogNoiseHintY), S(480), S(UiStyle::QwenHintH),
-                             L"Leave disabled unless speech/noise detection needs tuning for a difficult recording environment.");
+                             L"Only enable for difficult recording environments.");
 
         HWND okButton = CreateButton(hwnd, IDOK, S(500), S(UiStyle::QwenAdvancedDialogFooterY),
                                      S(UiStyle::FooterBtnW), S(UiStyle::ActionBtnH), L"OK");
@@ -2695,8 +2695,8 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         AddQwenControl(control);
         AddQwenControl(CreateCombo(hwnd, IDC_QWEN_LANGUAGE, S(UiStyle::InputLeft), S(UiStyle::QwenLanguageY), S(UiStyle::ComboW), S(UiStyle::ComboH)));
         control = CreateHint(hwnd, S(UiStyle::InputLeft), S(UiStyle::QwenLanguageHintY),
-                             S(UiStyle::InputWFull), S(UiStyle::QwenHintH),
-                             L"Used when Language hints is empty. Auto leaves language detection unrestricted.");
+                             S(UiStyle::InputWFull), S(UiStyle::QwenHint2LineH),
+                             L"Fallback when Language hints is blank.");
         AddQwenControl(control);
 
         control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::QwenChunkY) + S(UiStyle::LabelYOffset), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Chunk ms");
@@ -2708,11 +2708,11 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 
         HWND qwenInputContext = CreateCheckBox(hwnd, IDC_QWEN_INPUT_CONTEXT,
                                                 S(300), S(UiStyle::QwenChunkY), S(300), S(UiStyle::CheckH),
-                                                L"Input field context");
+                                                L"Use input field text as context");
         AddQwenAudio3Control(qwenInputContext);
         control = CreateHint(hwnd, S(UiStyle::InputLeft), S(UiStyle::QwenChunkHintY),
-                             S(UiStyle::InputWFull), S(UiStyle::QwenHintH),
-                             L"Chunk controls streaming latency. Context sends up to 400 characters from the focused field to Audio 3.");
+                             S(UiStyle::InputWFull), S(UiStyle::QwenHint2LineH),
+                             L"100–300 ms recommended. Context sends the focused field's text (≤400 chars) to the cloud.");
         s_qwenChunkContextHint = control;
         AddQwenControl(control);
 
@@ -2725,8 +2725,8 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                                           S(UiStyle::SideBtnX), S(UiStyle::QwenLanguageHintsY) - S(1),
                                           S(UiStyle::SideBtnW), S(UiStyle::BtnH), L"Reset"));
         control = CreateHint(hwnd, S(UiStyle::InputLeft), S(UiStyle::QwenLanguageHintsHintY),
-                             S(UiStyle::InputWFull), S(UiStyle::QwenHintH),
-                             L"Comma-separated language codes (max 4), e.g. zh,en,yue. Leave blank to use Language/Auto.");
+                             S(UiStyle::InputWFull), S(UiStyle::QwenHint2LineH),
+                             L"Up to 4 codes, e.g. zh,en,yue. Blank uses the Language setting.");
         AddQwenAudio3Control(control);
 
         control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::QwenAdvancedButtonY) + S(UiStyle::LabelYOffset), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Advanced");
@@ -2735,8 +2735,8 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                                           S(UiStyle::InputLeft), S(UiStyle::QwenAdvancedButtonY),
                                           S(UiStyle::ActionBtnW), S(UiStyle::ActionBtnH), L"Advanced..."));
         control = CreateHint(hwnd, S(UiStyle::InputLeft), S(UiStyle::QwenAdvancedHintY),
-                             S(UiStyle::InputWFull), S(UiStyle::QwenHintH) * 2,
-                             L"Configure precompiled or per-request hotwords. Streaming also supports semantic punctuation, VAD thresholds and heartbeat.");
+                             S(UiStyle::InputWFull), S(UiStyle::QwenHint2LineH),
+                             L"Hotwords, semantic punctuation, VAD thresholds, heartbeat.");
         AddQwenAudio3Control(control);
 
         HWND qwenVocabId = CreateWindowExW(0, L"EDIT", nullptr, WS_CHILD | ES_AUTOHSCROLL,
