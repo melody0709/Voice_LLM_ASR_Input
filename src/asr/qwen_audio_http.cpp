@@ -4,6 +4,7 @@
 
 #include "qwen_audio_http.h"
 
+#include "asr_runtime_log.h"
 #include "cloud_asr_common.h"
 #include "cloud_http_common.h"
 #include "qwen_audio_json.h"
@@ -11,6 +12,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdarg>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -25,8 +27,29 @@
 namespace qwen_audio_http {
 namespace {
 
-constexpr size_t kMaxBase64Bytes = 12u * 1024u * 1024u;
-constexpr size_t kMaxPcmBytes = (kMaxBase64Bytes * 3u) / 4u - 44u;
+void QwenHttpDebugLog(const char* format, ...) {
+#if defined(VOXTYPE_QWEN_AUDIO_PROTOCOL_TEST)
+    (void)format;
+    return;
+#else
+    if (!format) return;
+    va_list args;
+    va_start(args, format);
+    asr_runtime_log::WriteNamedV(L"qwen_audio_debug.log", format, args);
+    va_end(args);
+#endif
+}
+
+// The Audio 3 HTTP documentation caps the Base64/Data-URL input at 10 MiB.
+// Reserve the Data-URL prefix before calculating the PCM budget.
+constexpr size_t kMaxDataUrlBytes = 10u * 1024u * 1024u;
+constexpr size_t kDataUrlPrefixBytes = sizeof("data:audio/wav;base64,") - 1;
+constexpr size_t kMaxBase64Bytes = kMaxDataUrlBytes - kDataUrlPrefixBytes;
+// Base64 rounds the WAV payload up to a multiple of four. Use a conservative
+// multiple-of-three WAV budget so the complete Data URL can never exceed the
+// documented 10 MiB cap after padding is added.
+constexpr size_t kMaxWavBytes = (kMaxBase64Bytes / 4u) * 3u;
+constexpr size_t kMaxPcmBytes = kMaxWavBytes > 44u ? kMaxWavBytes - 44u : 0u;
 
 void PutLe16(std::vector<BYTE>& out, size_t pos, uint16_t value) {
     out[pos] = static_cast<BYTE>(value & 0xff);
@@ -136,13 +159,20 @@ Endpoint ParseEndpoint(std::wstring url) {
 }
 
 std::string BuildRequestImpl(const Config& cfg, const std::string& audio) {
-    std::string json = "{\"model\":\"" + JsonEscape(cfg.model) + "\",\"input\":{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_audio\",\"input_audio\":{\"data\":\"data:audio/wav;base64," + audio + "\"}}]}]},\"parameters\":{\"format\":\"wav\",\"sample_rate\":16000";
+    std::string json = "{\"model\":\"" + JsonEscape(cfg.model) + "\",\"input\":{\"messages\":[";
+    std::wstring context = Trim(cfg.inputContextText);
+    if (context.size() > 400) context.resize(400);
+    if (!context.empty()) {
+        json += "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"" +
+            JsonEscape(context) + "\"}]},";
+    }
+    json += "{\"role\":\"user\",\"content\":[{\"type\":\"input_audio\",\"input_audio\":{\"data\":\"data:audio/wav;base64," + audio + "\"}}]}],\"parameters\":{\"format\":\"wav\",\"sample_rate\":16000";
     AppendHints(json, cfg.languageHints);
     if (!Trim(cfg.vocabularyId).empty()) json += ",\"vocabulary_id\":\"" + JsonEscape(cfg.vocabularyId) + "\"";
     if (qwen_audio_json::HasValidVocabulary(cfg.vocabulary)) {
         json += ",\"vocabulary\":" + WideToUtf8(Trim(cfg.vocabulary));
     }
-    json += "}}";
+    json += "}}}";
     return json;
 }
 
@@ -168,6 +198,14 @@ std::string BuildRequestJsonForTest(const Config& config, const std::string& aud
     return BuildRequestImpl(config, audioBase64);
 }
 
+std::wstring ParseResponseTextForTest(const std::string& responseBody) {
+    std::wstring text = qwen_audio_json::ExtractString(responseBody, "text");
+    if (text.empty()) text = qwen_audio_json::ExtractString(responseBody, "transcript");
+    if (text.empty()) text = qwen_audio_json::ExtractString(responseBody, "sentence");
+    if (text.empty()) text = qwen_audio_json::ExtractString(responseBody, "content");
+    return text;
+}
+
 bool IsNoSpeechResponseForTest(DWORD statusCode, const std::string& responseBody) {
     return IsNoSpeechResponseImpl(statusCode, responseBody);
 }
@@ -190,6 +228,8 @@ Result Recognize(const std::vector<BYTE>& pcm,
     Endpoint endpoint = ParseEndpoint(cfg.baseUrl);
     if (!endpoint.error.empty()) { result.error = L"Qwen Audio ASR error: " + endpoint.error; return result; }
     if (pcm.size() > kMaxPcmBytes) {
+        QwenHttpDebugLog("event=http_rejected reason=audio_too_large pcm_bytes=%zu limit_bytes=%zu",
+                         pcm.size(), kMaxPcmBytes);
         result.error = L"Qwen Audio ASR error: audio exceeds the maximum request size";
         return result;
     }
@@ -209,13 +249,25 @@ Result Recognize(const std::vector<BYTE>& pcm,
     request.headers = L"Content-Type: application/json\r\nAuthorization: Bearer " + Trim(cfg.apiKey) + L"\r\nX-DashScope-SSE: disable\r\n";
     const std::string body = BuildRequestImpl(cfg, encoded);
     request.body.assign(body.begin(), body.end());
+    QwenHttpDebugLog("event=http_request_start model=%s host=%s path=%s pcm_bytes=%zu context=%d",
+                     WideToUtf8(cfg.model).c_str(),
+                     WideToUtf8(endpoint.host).c_str(),
+                     WideToUtf8(endpoint.path).c_str(),
+                     pcm.size(), cfg.inputContextText.empty() ? 0 : 1);
     const auto started = std::chrono::steady_clock::now();
     CloudHttpResponse response = SendCloudHttpRequest(request);
     result.elapsedMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
     result.statusCode = response.statusCode;
+    QwenHttpDebugLog("event=http_response status=%lu winhttp_error=%lu ok=%d elapsed_ms=%.1f",
+                     static_cast<unsigned long>(response.statusCode),
+                     static_cast<unsigned long>(response.winhttpError),
+                     response.ok ? 1 : 0, result.elapsedMs);
     if (!response.ok) {
         result.retryable = IsTransientCloudHttpError(response.winhttpError);
         result.error = L"Qwen Audio ASR error: " + response.failedStep;
+        if (response.winhttpError != 0) {
+            result.error += L" (err=" + std::to_wstring(response.winhttpError) + L")";
+        }
         return result;
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -233,10 +285,7 @@ Result Recognize(const std::vector<BYTE>& pcm,
         if (!msg.empty()) result.error += L": " + msg;
         return result;
     }
-    result.text = qwen_audio_json::ExtractString(response.body, "text");
-    if (result.text.empty()) result.text = qwen_audio_json::ExtractString(response.body, "transcript");
-    if (result.text.empty()) result.text = qwen_audio_json::ExtractString(response.body, "sentence");
-    if (result.text.empty()) result.text = qwen_audio_json::ExtractString(response.body, "content");
+    result.text = ParseResponseTextForTest(response.body);
     result.ok = true;
     return result;
 }

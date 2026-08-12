@@ -53,6 +53,40 @@ int S(int px) {
     return DipToPx(static_cast<float>(px), UiStyle::Scale);
 }
 
+constexpr wchar_t kSettingsHintProperty[] = L"VoxType.SettingsHint";
+
+void MarkSettingsHint(HWND hwnd) {
+    if (hwnd) SetPropW(hwnd, kSettingsHintProperty, reinterpret_cast<HANDLE>(1));
+}
+
+bool IsSettingsHint(HWND hwnd) {
+    return hwnd && GetPropW(hwnd, kSettingsHintProperty) != nullptr;
+}
+
+void OpenAsrDebugLog(HWND hwnd, const wchar_t* fileName) {
+    if (!fileName || !*fileName) return;
+    wchar_t tempPath[MAX_PATH] = {};
+    const DWORD length = GetTempPathW(MAX_PATH, tempPath);
+    if (length == 0 || length >= MAX_PATH) {
+        MessageBoxW(hwnd, L"Unable to resolve the temporary log directory.", L"Open log", MB_OK | MB_ICONERROR);
+        return;
+    }
+    std::wstring path(tempPath, length);
+    path += fileName;
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        MessageBoxW(hwnd, L"Unable to create or open the debug log file.", L"Open log", MB_OK | MB_ICONERROR);
+        return;
+    }
+    CloseHandle(file);
+    const HINSTANCE result = ShellExecuteW(hwnd, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    if (reinterpret_cast<INT_PTR>(result) <= 32) {
+        MessageBoxW(hwnd, L"No application is associated with the debug log file.", L"Open log", MB_OK | MB_ICONERROR);
+    }
+}
+
 struct QwenLanguageOption {
     const wchar_t* label;
     const wchar_t* code;
@@ -117,6 +151,20 @@ std::wstring s_qwenUiModel;
 std::wstring s_qwenUiHttpUrl;
 std::wstring s_qwenUiAudioStreamingUrl;
 std::wstring s_qwenUiLegacyUrl;
+HWND s_qwenChunkContextHint = nullptr;
+
+struct QwenAdvancedDialogData {
+    bool streaming = false;
+    bool ok = false;
+    std::wstring vocabularyId;
+    std::wstring vocabulary;
+    bool semanticPunctuation = false;
+    std::wstring maxSentenceSilence;
+    bool multiThreshold = false;
+    bool heartbeat = false;
+    bool speechNoiseEnabled = false;
+    std::wstring speechNoiseThreshold;
+};
 
 std::wstring QwenModelFromControl(HWND hwnd) {
     wchar_t model[256] = {};
@@ -303,6 +351,14 @@ void ApplyQwenModelProfile(HWND hwnd, const std::wstring& model, bool preserveUr
     }
     HWND chunk = GetDlgItem(hwnd, IDC_QWEN_CHUNK_MS);
     if (chunk) EnableWindow(chunk, isStreamingTransport ? TRUE : FALSE);
+    if (s_qwenChunkContextHint) {
+        const wchar_t* hint = http
+            ? L"HTTP batch ignores Chunk ms. Context sends up to 400 focused-field characters to the Audio 3 cloud service."
+            : (IsQwenAudioStreamingModel(model)
+                ? L"Chunk controls streaming latency (100–300 ms recommended). Context sends up to 400 focused-field characters to the cloud."
+                : L"Chunk controls realtime upload latency; 100–300 ms is recommended for normal dictation.");
+        SetWindowTextW(s_qwenChunkContextHint, hint);
+    }
     const bool audio3 = http || IsQwenAudioStreamingModel(model);
     for (HWND control : g_qwenAudio3Controls) {
         ShowWindow(control, audio3 && g_cloudProviderIdx == 2 ? SW_SHOW : SW_HIDE);
@@ -951,11 +1007,10 @@ void LayoutSettingsWindow(HWND hwnd) {
     if (save) MoveWindow(save, rc.right - margin - S(192), btnY, S(UiStyle::FooterBtnW), S(UiStyle::ActionBtnH), TRUE);
     if (close) MoveWindow(close, rc.right - margin - S(UiStyle::FooterBtnW), btnY, S(UiStyle::FooterBtnW), S(UiStyle::ActionBtnH), TRUE);
     if (g_cloudAsrHintControl) {
-        RECT tabRc;
-        GetWindowRect(tab, &tabRc);
-        MapWindowPoints(nullptr, hwnd, reinterpret_cast<LPPOINT>(&tabRc), 2);
-        const int hintY = tabRc.bottom - S(UiStyle::LabelH) - S(4);
-        SetWindowPos(g_cloudAsrHintControl, nullptr, S(UiStyle::ContentLeft), hintY, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+        SetWindowPos(g_cloudAsrHintControl, nullptr,
+                     S(UiStyle::ContentLeft), S(UiStyle::CloudAsrHintY),
+                     S(UiStyle::CloudAsrHintW), S(UiStyle::LabelH),
+                     SWP_NOZORDER);
     }
 }
 
@@ -974,6 +1029,14 @@ void HideSettingsWindow(HWND hwnd) {
 HWND CreateLabel(HWND parent, int x, int y, int w, int h, const wchar_t* text) {
     HWND hwnd = CreateWindowW(L"STATIC", text, WS_CHILD | WS_VISIBLE, x, y, w, h, parent, nullptr, g_instance, nullptr);
     ApplyUiFont(hwnd);
+    return hwnd;
+}
+
+HWND CreateHint(HWND parent, int x, int y, int w, int h, const wchar_t* text) {
+    HWND hwnd = CreateWindowW(L"STATIC", text, WS_CHILD | WS_VISIBLE,
+                              x, y, w, h, parent, nullptr, g_instance, nullptr);
+    ApplyUiFont(hwnd);
+    MarkSettingsHint(hwnd);
     return hwnd;
 }
 
@@ -1256,6 +1319,8 @@ void LoadSettingsControls(HWND hwnd) {
     SetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_LANGUAGE_HINTS), g_config.qwenLanguageHints.c_str());
     SetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_VOCABULARY_ID), g_config.qwenVocabularyId.c_str());
     SetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_VOCABULARY), g_config.qwenVocabulary.c_str());
+    Button_SetCheck(GetDlgItem(hwnd, IDC_QWEN_INPUT_CONTEXT),
+                    g_config.qwenEnableInputContext ? BST_CHECKED : BST_UNCHECKED);
     Button_SetCheck(GetDlgItem(hwnd, IDC_QWEN_SEMANTIC_PUNCTUATION), g_config.qwenSemanticPunctuation ? BST_CHECKED : BST_UNCHECKED);
     Button_SetCheck(GetDlgItem(hwnd, IDC_QWEN_MULTI_THRESHOLD), g_config.qwenMultiThresholdMode ? BST_CHECKED : BST_UNCHECKED);
     Button_SetCheck(GetDlgItem(hwnd, IDC_QWEN_HEARTBEAT), g_config.qwenHeartbeat ? BST_CHECKED : BST_UNCHECKED);
@@ -1562,6 +1627,8 @@ void SaveSettingsControls(HWND hwnd) {
     wchar_t qwenNoise[32] = {};
     GetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_SPEECH_NOISE_THRESHOLD), qwenNoise, 32);
     g_config.qwenSpeechNoiseThreshold = std::clamp(static_cast<float>(_wtof(qwenNoise)), -1.0f, 1.0f);
+    g_config.qwenEnableInputContext =
+        Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_INPUT_CONTEXT)) == BST_CHECKED;
 
     wchar_t mimoApiKey[512] = {};
     GetWindowTextW(GetDlgItem(hwnd, IDC_MIMO_API_KEY), mimoApiKey, 512);
@@ -1969,6 +2036,306 @@ bool ShowVolcExtraDialog(HWND parent, std::wstring& out) {
     return false;
 }
 
+void UpdateQwenAdvancedDialogState(HWND hwnd, bool streaming) {
+    const bool semantic = Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_SEMANTIC_PUNCTUATION)) == BST_CHECKED;
+    const bool noiseEnabled = Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_SPEECH_NOISE_ENABLE)) == BST_CHECKED;
+    EnableWindow(GetDlgItem(hwnd, IDC_QWEN_SEMANTIC_PUNCTUATION), streaming ? TRUE : FALSE);
+    EnableWindow(GetDlgItem(hwnd, IDC_QWEN_MAX_SENTENCE_SILENCE), streaming ? TRUE : FALSE);
+    EnableWindow(GetDlgItem(hwnd, IDC_QWEN_MULTI_THRESHOLD), streaming && !semantic ? TRUE : FALSE);
+    EnableWindow(GetDlgItem(hwnd, IDC_QWEN_HEARTBEAT), streaming ? TRUE : FALSE);
+    EnableWindow(GetDlgItem(hwnd, IDC_QWEN_SPEECH_NOISE_ENABLE), streaming ? TRUE : FALSE);
+    EnableWindow(GetDlgItem(hwnd, IDC_QWEN_SPEECH_NOISE_THRESHOLD),
+                 streaming && noiseEnabled ? TRUE : FALSE);
+}
+
+bool ReadQwenAdvancedDialog(HWND hwnd, QwenAdvancedDialogData& data, std::wstring& error) {
+    data.vocabularyId = QwenControlText(hwnd, IDC_QWEN_VOCABULARY_ID, 512);
+    data.vocabulary = QwenControlText(hwnd, IDC_QWEN_VOCABULARY, 8192);
+    if (!qwen_audio_json::IsValidVocabulary(data.vocabulary, &error)) return false;
+
+    data.semanticPunctuation = Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_SEMANTIC_PUNCTUATION)) == BST_CHECKED;
+    data.maxSentenceSilence = QwenControlText(hwnd, IDC_QWEN_MAX_SENTENCE_SILENCE, 32);
+    data.multiThreshold = Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_MULTI_THRESHOLD)) == BST_CHECKED;
+    data.heartbeat = Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_HEARTBEAT)) == BST_CHECKED;
+    data.speechNoiseEnabled = Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_SPEECH_NOISE_ENABLE)) == BST_CHECKED;
+    data.speechNoiseThreshold = QwenControlText(hwnd, IDC_QWEN_SPEECH_NOISE_THRESHOLD, 32);
+
+    if (!data.streaming) return true;
+    const int silenceMs = _wtoi(data.maxSentenceSilence.c_str());
+    if (silenceMs < 200 || silenceMs > 6000) {
+        error = L"Silence ms must be between 200 and 6000.";
+        return false;
+    }
+    if (data.semanticPunctuation && data.multiThreshold) {
+        error = L"Semantic punctuation and multi-threshold cannot both be enabled.";
+        return false;
+    }
+    if (data.speechNoiseEnabled) {
+        const double threshold = _wtof(data.speechNoiseThreshold.c_str());
+        if (threshold < -1.0 || threshold > 1.0) {
+            error = L"Speech noise threshold must be between -1.0 and 1.0.";
+            return false;
+        }
+    }
+    return true;
+}
+
+LRESULT CALLBACK QwenAdvancedWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* data = reinterpret_cast<QwenAdvancedDialogData*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (msg) {
+    case WM_CREATE: {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        data = reinterpret_cast<QwenAdvancedDialogData*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(data));
+        SetWindowTextW(hwnd, L"Qwen ASR Advanced Settings");
+
+        HWND control = CreateLabel(hwnd, S(UiStyle::QwenAdvancedDialogLeft),
+                                   S(UiStyle::QwenAdvancedDialogVocabIdLabelY),
+                                   S(UiStyle::QwenAdvancedDialogLabelW), S(UiStyle::LabelH),
+                                   L"Vocabulary ID");
+        HWND vocabId = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr,
+                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                                       S(UiStyle::QwenAdvancedDialogInputLeft), S(UiStyle::QwenAdvancedDialogVocabIdY),
+                                       S(UiStyle::QwenAdvancedDialogInputW), S(UiStyle::EditH), hwnd,
+                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_VOCABULARY_ID)),
+                                       g_instance, nullptr);
+        ApplyUiFont(vocabId);
+        control = CreateHint(hwnd, S(UiStyle::QwenAdvancedDialogInputLeft),
+                             S(UiStyle::QwenAdvancedDialogVocabIdHintY),
+                             S(UiStyle::QwenAdvancedDialogInputW), S(UiStyle::QwenHintH) * 2,
+                             L"Optional precompiled vocabulary ID created in Alibaba Cloud. The vocabulary target model must match the selected ASR model.");
+
+        control = CreateLabel(hwnd, S(UiStyle::QwenAdvancedDialogLeft),
+                              S(UiStyle::QwenAdvancedDialogVocabJsonLabelY),
+                              S(UiStyle::QwenAdvancedDialogLabelW), S(UiStyle::LabelH),
+                              L"Vocabulary JSON");
+        HWND vocabulary = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr,
+                                          WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE |
+                                              ES_AUTOVSCROLL | WS_VSCROLL | ES_WANTRETURN,
+                                          S(UiStyle::QwenAdvancedDialogInputLeft), S(UiStyle::QwenAdvancedDialogVocabJsonY),
+                                          S(UiStyle::QwenAdvancedDialogInputW), S(UiStyle::QwenAdvancedDialogVocabJsonH),
+                                          hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_VOCABULARY)),
+                                          g_instance, nullptr);
+        ApplyUiFont(vocabulary);
+        control = CreateHint(hwnd, S(UiStyle::QwenAdvancedDialogInputLeft),
+                             S(UiStyle::QwenAdvancedDialogVocabJsonHintY),
+                             S(UiStyle::QwenAdvancedDialogInputW), S(UiStyle::QwenHintH) * 2,
+                             L"Optional per-request hotwords. Example: {\"VoxType\":4,\"Qwen\":4}. Weights are 1–5 or 50 and combine with Vocabulary ID hotwords.");
+
+        const wchar_t* groupTitle = data && data->streaming
+            ? L"Streaming recognition"
+            : L"Streaming recognition (not used by this model)";
+        HWND group = CreateWindowW(L"BUTTON", groupTitle, WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+                                   S(UiStyle::QwenAdvancedDialogLeft), S(UiStyle::QwenAdvancedDialogStreamingGroupY),
+                                   S(UiStyle::QwenAdvancedDialogLabelW), S(UiStyle::QwenAdvancedDialogStreamingGroupH),
+                                   hwnd, nullptr, g_instance, nullptr);
+        ApplyUiFont(group);
+
+        HWND semantic = CreateCheckBox(hwnd, IDC_QWEN_SEMANTIC_PUNCTUATION,
+                                       S(UiStyle::QwenAdvancedDialogInputLeft), S(UiStyle::QwenAdvancedDialogStreamingRow1Y),
+                                       S(220), S(UiStyle::CheckH), L"Semantic punctuation");
+        control = CreateLabel(hwnd, S(420), S(UiStyle::QwenAdvancedDialogStreamingRow1Y) + S(4),
+                              S(105), S(UiStyle::LabelH), L"Silence ms");
+        HWND silence = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr,
+                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER,
+                                       S(530), S(UiStyle::QwenAdvancedDialogStreamingRow1Y), S(100), S(UiStyle::EditH),
+                                       hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_MAX_SENTENCE_SILENCE)),
+                                       g_instance, nullptr);
+        ApplyUiFont(silence);
+        control = CreateHint(hwnd, S(UiStyle::QwenAdvancedDialogInputLeft),
+                             S(UiStyle::QwenAdvancedDialogStreamingHint1Y), S(470), S(UiStyle::QwenHintH),
+                             L"Semantic punctuation uses meaning for sentence boundaries; Silence ms finalizes after sustained silence (200–6000).");
+
+        HWND multi = CreateCheckBox(hwnd, IDC_QWEN_MULTI_THRESHOLD,
+                                    S(UiStyle::QwenAdvancedDialogInputLeft), S(UiStyle::QwenAdvancedDialogStreamingRow2Y),
+                                    S(170), S(UiStyle::CheckH), L"Multi-threshold");
+        HWND heartbeat = CreateCheckBox(hwnd, IDC_QWEN_HEARTBEAT,
+                                        S(350), S(UiStyle::QwenAdvancedDialogStreamingRow2Y),
+                                        S(150), S(UiStyle::CheckH), L"Heartbeat");
+        control = CreateHint(hwnd, S(UiStyle::QwenAdvancedDialogInputLeft),
+                             S(UiStyle::QwenAdvancedDialogStreamingHint2Y), S(470), S(UiStyle::QwenHintH),
+                             L"Multi-threshold targets noisy audio and conflicts with semantic punctuation. Heartbeat keeps idle connections alive.");
+
+        HWND noiseEnable = CreateCheckBox(hwnd, IDC_QWEN_SPEECH_NOISE_ENABLE,
+                                          S(UiStyle::QwenAdvancedDialogInputLeft), S(UiStyle::QwenAdvancedDialogNoiseY),
+                                          S(220), S(UiStyle::CheckH), L"Speech noise threshold");
+        HWND noise = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr,
+                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                                     S(420), S(UiStyle::QwenAdvancedDialogNoiseY), S(100), S(UiStyle::EditH),
+                                     hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_SPEECH_NOISE_THRESHOLD)),
+                                     g_instance, nullptr);
+        ApplyUiFont(noise);
+        control = CreateHint(hwnd, S(530), S(UiStyle::QwenAdvancedDialogNoiseY) + S(4),
+                             S(135), S(UiStyle::QwenHintH), L"Range: -1.0 to 1.0");
+        control = CreateHint(hwnd, S(UiStyle::QwenAdvancedDialogInputLeft),
+                             S(UiStyle::QwenAdvancedDialogNoiseHintY), S(480), S(UiStyle::QwenHintH),
+                             L"Leave disabled unless speech/noise detection needs tuning for a difficult recording environment.");
+
+        HWND okButton = CreateButton(hwnd, IDOK, S(500), S(UiStyle::QwenAdvancedDialogFooterY),
+                                     S(UiStyle::FooterBtnW), S(UiStyle::ActionBtnH), L"OK");
+        HWND cancelButton = CreateButton(hwnd, IDCANCEL, S(596), S(UiStyle::QwenAdvancedDialogFooterY),
+                                         S(UiStyle::FooterBtnW), S(UiStyle::ActionBtnH), L"Cancel");
+        SendMessageW(okButton, BM_SETSTYLE, BS_DEFPUSHBUTTON, TRUE);
+
+        if (data) {
+            SetWindowTextW(vocabId, data->vocabularyId.c_str());
+            SetWindowTextW(vocabulary, data->vocabulary.c_str());
+            Button_SetCheck(semantic, data->semanticPunctuation ? BST_CHECKED : BST_UNCHECKED);
+            SetWindowTextW(silence, data->maxSentenceSilence.c_str());
+            Button_SetCheck(multi, data->multiThreshold ? BST_CHECKED : BST_UNCHECKED);
+            Button_SetCheck(heartbeat, data->heartbeat ? BST_CHECKED : BST_UNCHECKED);
+            Button_SetCheck(noiseEnable, data->speechNoiseEnabled ? BST_CHECKED : BST_UNCHECKED);
+            SetWindowTextW(noise, data->speechNoiseThreshold.c_str());
+            UpdateQwenAdvancedDialogState(hwnd, data->streaming);
+        }
+        SetFocus(vocabId);
+        return 0;
+    }
+    case WM_CTLCOLORDLG:
+        return reinterpret_cast<LRESULT>(g_settingsBgBrush);
+    case WM_CTLCOLORSTATIC: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        HWND control = reinterpret_cast<HWND>(lParam);
+        SetTextColor(hdc, IsSettingsHint(control) ? UiStyle::HintTextColor : UiStyle::TextColor);
+        SetBkColor(hdc, UiStyle::BgColor);
+        return reinterpret_cast<LRESULT>(g_settingsBgBrush);
+    }
+    case WM_CTLCOLOREDIT: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(hdc, UiStyle::InputTextColor);
+        SetBkColor(hdc, UiStyle::ControlBgColor);
+        return reinterpret_cast<LRESULT>(g_controlBgBrush);
+    }
+    case WM_CTLCOLORBTN: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        SetBkColor(hdc, UiStyle::BgColor);
+        return reinterpret_cast<LRESULT>(g_settingsBgBrush);
+    }
+    case WM_COMMAND:
+        switch (LOWORD(wParam)) {
+        case IDC_QWEN_SEMANTIC_PUNCTUATION:
+            if (HIWORD(wParam) == BN_CLICKED && data) {
+                if (Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_SEMANTIC_PUNCTUATION)) == BST_CHECKED) {
+                    Button_SetCheck(GetDlgItem(hwnd, IDC_QWEN_MULTI_THRESHOLD), BST_UNCHECKED);
+                }
+                UpdateQwenAdvancedDialogState(hwnd, data->streaming);
+                return 0;
+            }
+            break;
+        case IDC_QWEN_MULTI_THRESHOLD:
+            if (HIWORD(wParam) == BN_CLICKED && data) {
+                if (Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_MULTI_THRESHOLD)) == BST_CHECKED) {
+                    Button_SetCheck(GetDlgItem(hwnd, IDC_QWEN_SEMANTIC_PUNCTUATION), BST_UNCHECKED);
+                }
+                UpdateQwenAdvancedDialogState(hwnd, data->streaming);
+                return 0;
+            }
+            break;
+        case IDC_QWEN_SPEECH_NOISE_ENABLE:
+            if (HIWORD(wParam) == BN_CLICKED && data) {
+                UpdateQwenAdvancedDialogState(hwnd, data->streaming);
+                return 0;
+            }
+            break;
+        case IDOK:
+            if (data) {
+                std::wstring error;
+                if (!ReadQwenAdvancedDialog(hwnd, *data, error)) {
+                    MessageBoxW(hwnd, error.c_str(), L"Invalid Qwen Advanced Settings", MB_OK | MB_ICONERROR);
+                    return 0;
+                }
+                data->ok = true;
+            }
+            DestroyWindow(hwnd);
+            return 0;
+        case IDCANCEL:
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+bool ShowQwenAdvancedDialog(HWND parent, QwenAdvancedDialogData& data) {
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc = {};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = QwenAdvancedWndProc;
+        wc.hInstance = g_instance;
+        wc.hbrBackground = g_settingsBgBrush;
+        wc.lpszClassName = L"VoxTypeQwenAdvancedDlg";
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        RegisterClassExW(&wc);
+        registered = true;
+    }
+
+    RECT work = {};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    RECT parentRect = {};
+    GetWindowRect(parent, &parentRect);
+    const int width = S(UiStyle::QwenAdvancedDialogW);
+    const int height = S(UiStyle::QwenAdvancedDialogH);
+    int x = parentRect.left + ((parentRect.right - parentRect.left) - width) / 2;
+    int y = parentRect.top + ((parentRect.bottom - parentRect.top) - height) / 2;
+    const int workLeft = static_cast<int>(work.left);
+    const int workTop = static_cast<int>(work.top);
+    const int workRight = static_cast<int>(work.right);
+    const int workBottom = static_cast<int>(work.bottom);
+    x = std::clamp(x, workLeft, (std::max)(workLeft, workRight - width));
+    y = std::clamp(y, workTop, (std::max)(workTop, workBottom - height));
+
+    HWND dialog = CreateWindowExW(WS_EX_APPWINDOW | WS_EX_DLGMODALFRAME,
+                                  L"VoxTypeQwenAdvancedDlg", L"Qwen ASR Advanced Settings",
+                                  WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                                  x, y, width, height, parent, nullptr, g_instance, &data);
+    if (!dialog) return false;
+    EnableWindow(parent, FALSE);
+    ShowWindow(dialog, SW_SHOW);
+    SetForegroundWindow(dialog);
+    MSG msg = {};
+    while (IsWindow(dialog) && GetMessageW(&msg, nullptr, 0, 0)) {
+        if (IsDialogMessageW(dialog, &msg)) continue;
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    EnableWindow(parent, TRUE);
+    SetForegroundWindow(parent);
+    return data.ok;
+}
+
+void EditQwenAdvancedSettings(HWND hwnd) {
+    QwenAdvancedDialogData data;
+    data.streaming = IsQwenAudioStreamingModel(QwenModelFromControl(hwnd));
+    data.vocabularyId = QwenControlText(hwnd, IDC_QWEN_VOCABULARY_ID, 512);
+    data.vocabulary = QwenControlText(hwnd, IDC_QWEN_VOCABULARY, 8192);
+    data.semanticPunctuation = Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_SEMANTIC_PUNCTUATION)) == BST_CHECKED;
+    data.maxSentenceSilence = QwenControlText(hwnd, IDC_QWEN_MAX_SENTENCE_SILENCE, 32);
+    data.multiThreshold = Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_MULTI_THRESHOLD)) == BST_CHECKED;
+    data.heartbeat = Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_HEARTBEAT)) == BST_CHECKED;
+    data.speechNoiseEnabled = Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_SPEECH_NOISE_ENABLE)) == BST_CHECKED;
+    data.speechNoiseThreshold = QwenControlText(hwnd, IDC_QWEN_SPEECH_NOISE_THRESHOLD, 32);
+    if (!ShowQwenAdvancedDialog(hwnd, data)) return;
+
+    SetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_VOCABULARY_ID), data.vocabularyId.c_str());
+    SetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_VOCABULARY), data.vocabulary.c_str());
+    Button_SetCheck(GetDlgItem(hwnd, IDC_QWEN_SEMANTIC_PUNCTUATION),
+                    data.semanticPunctuation ? BST_CHECKED : BST_UNCHECKED);
+    SetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_MAX_SENTENCE_SILENCE), data.maxSentenceSilence.c_str());
+    Button_SetCheck(GetDlgItem(hwnd, IDC_QWEN_MULTI_THRESHOLD),
+                    data.multiThreshold ? BST_CHECKED : BST_UNCHECKED);
+    Button_SetCheck(GetDlgItem(hwnd, IDC_QWEN_HEARTBEAT), data.heartbeat ? BST_CHECKED : BST_UNCHECKED);
+    Button_SetCheck(GetDlgItem(hwnd, IDC_QWEN_SPEECH_NOISE_ENABLE),
+                    data.speechNoiseEnabled ? BST_CHECKED : BST_UNCHECKED);
+    SetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_SPEECH_NOISE_THRESHOLD), data.speechNoiseThreshold.c_str());
+    ApplyQwenModelProfile(hwnd, QwenModelFromControl(hwnd), true);
+    SetStatus(hwnd, L"Qwen advanced settings updated. Click Save to apply.");
+}
+
 LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_ERASEBKGND: {
@@ -2005,7 +2372,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
     case WM_CTLCOLORSTATIC: {
         HDC hdc = reinterpret_cast<HDC>(wParam);
         HWND ctl = reinterpret_cast<HWND>(lParam);
-        if (ctl == GetDlgItem(hwnd, IDC_LLM_PROMPT_HINT)) {
+        if (ctl == GetDlgItem(hwnd, IDC_LLM_PROMPT_HINT) || IsSettingsHint(ctl)) {
             SetTextColor(hdc, UiStyle::HintTextColor);
         } else {
             SetTextColor(hdc, UiStyle::TextColor);
@@ -2039,6 +2406,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         g_qwenControls.clear();
         g_qwenAudio3Controls.clear();
         g_qwenAudioStreamingOnlyControls.clear();
+        s_qwenChunkContextHint = nullptr;
         g_mimoControls.clear();
         g_doubaoImeControls.clear();
         g_qwenFreeControls.clear();
@@ -2313,7 +2681,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(2)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Base URL");
         AddQwenControl(control);
         HWND qwenBaseUrl = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                                           S(UiStyle::InputLeft), S(UiStyle::RowInputY(2)), S(480), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_BASE_URL)), g_instance, nullptr);
+                                           S(UiStyle::InputLeft), S(UiStyle::RowInputY(2)), S(UiStyle::InputWFull), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_BASE_URL)), g_instance, nullptr);
         ApplyUiFont(qwenBaseUrl);
         AddQwenControl(qwenBaseUrl);
 
@@ -2321,60 +2689,88 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         AddQwenControl(control);
         HWND qwenModel = CreateCombo(hwnd, IDC_QWEN_MODEL, S(UiStyle::InputLeft), S(UiStyle::RowInputY(3)), S(420), S(UiStyle::ComboH));
         AddQwenControl(qwenModel);
+        AddQwenControl(CreateButton(hwnd, IDC_QWEN_OPEN_LOG, S(620), S(UiStyle::RowInputY(3)), S(110), S(UiStyle::ActionBtnH), L"Open log"));
 
-        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(4)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Language");
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::QwenLanguageY) + S(UiStyle::LabelYOffset), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Language");
         AddQwenControl(control);
-        AddQwenControl(CreateCombo(hwnd, IDC_QWEN_LANGUAGE, S(UiStyle::InputLeft), S(UiStyle::RowInputY(4)), S(UiStyle::ComboW), S(UiStyle::ComboH)));
+        AddQwenControl(CreateCombo(hwnd, IDC_QWEN_LANGUAGE, S(UiStyle::InputLeft), S(UiStyle::QwenLanguageY), S(UiStyle::ComboW), S(UiStyle::ComboH)));
+        control = CreateHint(hwnd, S(UiStyle::InputLeft), S(UiStyle::QwenLanguageHintY),
+                             S(UiStyle::InputWFull), S(UiStyle::QwenHintH),
+                             L"Used when Language hints is empty. Auto leaves language detection unrestricted.");
+        AddQwenControl(control);
 
-        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(5)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Chunk ms");
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::QwenChunkY) + S(UiStyle::LabelYOffset), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Chunk ms");
         AddQwenControl(control);
         HWND qwenChunkMs = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
-                                           S(UiStyle::InputLeft), S(UiStyle::RowInputY(5)), S(80), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_CHUNK_MS)), g_instance, nullptr);
+                                           S(UiStyle::InputLeft), S(UiStyle::QwenChunkY), S(80), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_CHUNK_MS)), g_instance, nullptr);
         ApplyUiFont(qwenChunkMs);
         AddQwenControl(qwenChunkMs);
 
-        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(6)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Language hints");
+        HWND qwenInputContext = CreateCheckBox(hwnd, IDC_QWEN_INPUT_CONTEXT,
+                                                S(300), S(UiStyle::QwenChunkY), S(300), S(UiStyle::CheckH),
+                                                L"Input field context");
+        AddQwenAudio3Control(qwenInputContext);
+        control = CreateHint(hwnd, S(UiStyle::InputLeft), S(UiStyle::QwenChunkHintY),
+                             S(UiStyle::InputWFull), S(UiStyle::QwenHintH),
+                             L"Chunk controls streaming latency. Context sends up to 400 characters from the focused field to Audio 3.");
+        s_qwenChunkContextHint = control;
+        AddQwenControl(control);
+
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::QwenLanguageHintsY) + S(UiStyle::LabelYOffset), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Language hints");
         AddQwenAudio3Control(control);
         HWND qwenHints = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                                         S(UiStyle::InputLeft), S(UiStyle::RowInputY(6)), S(420), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_LANGUAGE_HINTS)), g_instance, nullptr);
+                                         S(UiStyle::InputLeft), S(UiStyle::QwenLanguageHintsY), S(UiStyle::InputW), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_LANGUAGE_HINTS)), g_instance, nullptr);
         ApplyUiFont(qwenHints); AddQwenAudio3Control(qwenHints);
-
-        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(7)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Vocabulary ID");
+        AddQwenAudio3Control(CreateButton(hwnd, IDC_QWEN_LANGUAGE_HINTS_RESET,
+                                          S(UiStyle::SideBtnX), S(UiStyle::QwenLanguageHintsY) - S(1),
+                                          S(UiStyle::SideBtnW), S(UiStyle::BtnH), L"Reset"));
+        control = CreateHint(hwnd, S(UiStyle::InputLeft), S(UiStyle::QwenLanguageHintsHintY),
+                             S(UiStyle::InputWFull), S(UiStyle::QwenHintH),
+                             L"Comma-separated language codes (max 4), e.g. zh,en,yue. Leave blank to use Language/Auto.");
         AddQwenAudio3Control(control);
-        HWND qwenVocabId = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                                           S(UiStyle::InputLeft), S(UiStyle::RowInputY(7)), S(420), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_VOCABULARY_ID)), g_instance, nullptr);
-        ApplyUiFont(qwenVocabId); AddQwenAudio3Control(qwenVocabId);
 
-        HWND qwenSemantic = CreateCheckBox(hwnd, IDC_QWEN_SEMANTIC_PUNCTUATION, S(UiStyle::InputLeft), S(UiStyle::RowInputY(8)), S(220), S(UiStyle::CheckH), L"Semantic punctuation");
-        AddQwenAudioStreamingOnlyControl(qwenSemantic);
-        control = CreateLabel(hwnd, S(420), S(UiStyle::RowLabelY(8)), S(115), S(UiStyle::LabelH), L"Silence ms");
-        AddQwenAudioStreamingOnlyControl(control);
-        HWND qwenSilence = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
-                                           S(535), S(UiStyle::RowInputY(8)), S(80), S(UiStyle::EditH), hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_MAX_SENTENCE_SILENCE)), g_instance, nullptr);
-        ApplyUiFont(qwenSilence); AddQwenAudioStreamingOnlyControl(qwenSilence);
-
-        HWND qwenMulti = CreateCheckBox(hwnd, IDC_QWEN_MULTI_THRESHOLD, S(UiStyle::InputLeft), S(UiStyle::RowInputY(9)), S(170), S(UiStyle::CheckH), L"Multi-threshold");
-        AddQwenAudioStreamingOnlyControl(qwenMulti);
-        HWND qwenHeartbeat = CreateCheckBox(hwnd, IDC_QWEN_HEARTBEAT, S(360), S(UiStyle::RowInputY(9)), S(135), S(UiStyle::CheckH), L"Heartbeat");
-        AddQwenAudioStreamingOnlyControl(qwenHeartbeat);
-
-        HWND qwenNoiseEnable = CreateCheckBox(hwnd, IDC_QWEN_SPEECH_NOISE_ENABLE,
-                                               S(500), S(UiStyle::RowInputY(9)), S(220), S(UiStyle::CheckH),
-                                               L"Speech noise threshold");
-        AddQwenAudioStreamingOnlyControl(qwenNoiseEnable);
-        HWND qwenNoise = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr,
-                                         WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                                         S(725), S(UiStyle::RowInputY(9)), S(70), S(UiStyle::EditH),
-                                         hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_SPEECH_NOISE_THRESHOLD)), g_instance, nullptr);
-        ApplyUiFont(qwenNoise); AddQwenAudioStreamingOnlyControl(qwenNoise);
-
-        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(10)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Vocabulary JSON");
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::QwenAdvancedButtonY) + S(UiStyle::LabelYOffset), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Advanced");
         AddQwenAudio3Control(control);
-        HWND qwenVocabulary = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr,
-                                              WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL,
-                                              S(UiStyle::InputLeft), S(UiStyle::RowInputY(10)), S(420), S(40),
-                                              hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_VOCABULARY)), g_instance, nullptr);
-        ApplyUiFont(qwenVocabulary); AddQwenAudio3Control(qwenVocabulary);
+        AddQwenAudio3Control(CreateButton(hwnd, IDC_QWEN_ADVANCED,
+                                          S(UiStyle::InputLeft), S(UiStyle::QwenAdvancedButtonY),
+                                          S(UiStyle::ActionBtnW), S(UiStyle::ActionBtnH), L"Advanced..."));
+        control = CreateHint(hwnd, S(UiStyle::InputLeft), S(UiStyle::QwenAdvancedHintY),
+                             S(UiStyle::InputWFull), S(UiStyle::QwenHintH) * 2,
+                             L"Configure precompiled or per-request hotwords. Streaming also supports semantic punctuation, VAD thresholds and heartbeat.");
+        AddQwenAudio3Control(control);
+
+        HWND qwenVocabId = CreateWindowExW(0, L"EDIT", nullptr, WS_CHILD | ES_AUTOHSCROLL,
+                                           0, 0, 0, 0, hwnd,
+                                           reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_VOCABULARY_ID)), g_instance, nullptr);
+        HWND qwenVocabulary = CreateWindowExW(0, L"EDIT", nullptr, WS_CHILD | ES_MULTILINE,
+                                              0, 0, 0, 0, hwnd,
+                                              reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_VOCABULARY)), g_instance, nullptr);
+        HWND qwenSemantic = CreateWindowW(L"BUTTON", nullptr, WS_CHILD | BS_AUTOCHECKBOX,
+                                          0, 0, 0, 0, hwnd,
+                                          reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_SEMANTIC_PUNCTUATION)), g_instance, nullptr);
+        HWND qwenSilence = CreateWindowExW(0, L"EDIT", nullptr, WS_CHILD | ES_AUTOHSCROLL | ES_NUMBER,
+                                           0, 0, 0, 0, hwnd,
+                                           reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_MAX_SENTENCE_SILENCE)), g_instance, nullptr);
+        HWND qwenMulti = CreateWindowW(L"BUTTON", nullptr, WS_CHILD | BS_AUTOCHECKBOX,
+                                       0, 0, 0, 0, hwnd,
+                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_MULTI_THRESHOLD)), g_instance, nullptr);
+        HWND qwenHeartbeat = CreateWindowW(L"BUTTON", nullptr, WS_CHILD | BS_AUTOCHECKBOX,
+                                           0, 0, 0, 0, hwnd,
+                                           reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_HEARTBEAT)), g_instance, nullptr);
+        HWND qwenNoiseEnable = CreateWindowW(L"BUTTON", nullptr, WS_CHILD | BS_AUTOCHECKBOX,
+                                             0, 0, 0, 0, hwnd,
+                                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_SPEECH_NOISE_ENABLE)), g_instance, nullptr);
+        HWND qwenNoise = CreateWindowExW(0, L"EDIT", nullptr, WS_CHILD | ES_AUTOHSCROLL,
+                                         0, 0, 0, 0, hwnd,
+                                         reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_QWEN_SPEECH_NOISE_THRESHOLD)), g_instance, nullptr);
+        ApplyUiFont(qwenVocabId);
+        ApplyUiFont(qwenVocabulary);
+        ApplyUiFont(qwenSemantic);
+        ApplyUiFont(qwenSilence);
+        ApplyUiFont(qwenMulti);
+        ApplyUiFont(qwenHeartbeat);
+        ApplyUiFont(qwenNoiseEnable);
+        ApplyUiFont(qwenNoise);
 
         AddQwenControl(CreateButton(hwnd, IDC_QWEN_TEST, S(500), S(UiStyle::RowInputY(0)), S(UiStyle::ActionBtnW), S(UiStyle::ActionBtnH), L"Test Connection"));
 
@@ -2487,6 +2883,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(2)), S(130), S(UiStyle::LabelH), L"Model");
         AddVolcengineControl(control);
         AddVolcengineControl(CreateCombo(hwnd, IDC_VOLC_RESOURCE, S(UiStyle::InputLeft), S(UiStyle::RowInputY(2)), S(480), S(UiStyle::ComboH)));
+        AddVolcengineControl(CreateButton(hwnd, IDC_VOLC_OPEN_LOG, S(680), S(UiStyle::RowInputY(2)), S(100), S(UiStyle::ActionBtnH), L"Open log"));
 
         control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(3)), S(130), S(UiStyle::LabelH), L"ASR Mode");
         AddVolcengineControl(control);
@@ -2586,7 +2983,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 
         AddVolcengineControl(CreateButton(hwnd, IDC_VOLC_TEST, S(500), S(UiStyle::RowInputY(0)), S(UiStyle::ActionBtnW), S(UiStyle::ActionBtnH), L"Test Connection"));
 
-        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowInputY(9)) + S(30), S(640), S(UiStyle::LabelH),
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::CloudAsrHintY), S(UiStyle::CloudAsrHintW), S(UiStyle::LabelH),
             L"Cloud ASR sends audio to remote servers. Keys are encrypted with DPAPI locally.");
         AddCloudAsrControl(control);
         g_cloudAsrHintControl = control;
@@ -2979,6 +3376,9 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             }).detach();
             return 0;
         }
+        case IDC_VOLC_OPEN_LOG:
+            OpenAsrDebugLog(hwnd, L"volc_asr_debug.log");
+            return 0;
         case IDC_QWEN_TEST: {
             const std::wstring selectedModel = QwenModelFromControl(hwnd);
             if (IsQwenAudioHttpModel(selectedModel)) {
@@ -3045,6 +3445,16 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             }).detach();
             return 0;
         }
+        case IDC_QWEN_OPEN_LOG:
+            OpenAsrDebugLog(hwnd, L"qwen_audio_debug.log");
+            return 0;
+        case IDC_QWEN_LANGUAGE_HINTS_RESET:
+            SetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_LANGUAGE_HINTS), kQwenDefaultLanguageHints);
+            SetStatus(hwnd, L"Language hints reset to zh,en,yue. Click Save to apply.");
+            return 0;
+        case IDC_QWEN_ADVANCED:
+            EditQwenAdvancedSettings(hwnd);
+            return 0;
         case IDC_MIMO_TEST: {
             mimo_asr::MimoConfig mcfg;
             wchar_t tmp[512] = {};
@@ -3297,6 +3707,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
     case WM_DESTROY:
         g_qwenFreeTestGeneration.fetch_add(1, std::memory_order_relaxed);
         g_qwenFreeStatusGeneration.fetch_add(1, std::memory_order_relaxed);
+        s_qwenChunkContextHint = nullptr;
         if (g_settingsWindow == hwnd) g_settingsWindow = nullptr;
         return 0;
     case WM_CLOSE:

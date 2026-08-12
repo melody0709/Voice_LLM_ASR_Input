@@ -4,16 +4,22 @@
 
 #include "qwen_asr.h"
 
+#include "asr_runtime_log.h"
+#include "qwen_audio_json.h"
 #include "utils.h"
+#include "winhttp_websocket_transport.h"
 
 #include <wincrypt.h>
 #include <winhttp.h>
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cstdarg>
 #include <cstdint>
 #include <cwctype>
 #include <iomanip>
+#include <limits>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -28,17 +34,26 @@
 #define WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET 114
 #endif
 
-#ifndef WINHTTP_OPTION_WEB_SOCKET_RECEIVE_TIMEOUT
-#define WINHTTP_OPTION_WEB_SOCKET_RECEIVE_TIMEOUT 122
-#endif
-
 namespace qwen_asr {
 namespace {
 
 constexpr DWORD kConnectTimeoutMs = 8000;
 constexpr DWORD kSessionReadyTimeoutMs = 5000;
-constexpr DWORD kReceiveSliceMs = 1000;
+constexpr DWORD kSendTimeoutMs = 5000;
 constexpr size_t kPcmBytesPerMs = 32; // 16kHz, mono, s16le.
+
+void QwenRealtimeDebugLog(const char* format, ...) {
+#if defined(VOXTYPE_QWEN_AUDIO_PROTOCOL_TEST)
+    (void)format;
+    return;
+#else
+    if (!format) return;
+    va_list args;
+    va_start(args, format);
+    asr_runtime_log::WriteNamedV(L"qwen_audio_debug.log", format, args);
+    va_end(args);
+#endif
+}
 
 struct ParsedUrl {
     std::wstring host;
@@ -47,46 +62,9 @@ struct ParsedUrl {
     bool secure = true;
 };
 
-struct QwenConnection {
-    HINTERNET hSession = nullptr;
-    HINTERNET hConnect = nullptr;
-    std::atomic<HINTERNET> hWebSocket{nullptr};
-
-    ~QwenConnection() {
-        Close();
-    }
-
-    void Close() {
-        HINTERNET ws = TakeWebSocket();
-        if (ws) {
-            WinHttpWebSocketClose(ws, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, nullptr, 0);
-            WinHttpCloseHandle(ws);
-        }
-        if (hConnect) {
-            WinHttpCloseHandle(hConnect);
-            hConnect = nullptr;
-        }
-        if (hSession) {
-            WinHttpCloseHandle(hSession);
-            hSession = nullptr;
-        }
-    }
-
-    HINTERNET WebSocket() const {
-        return hWebSocket.load();
-    }
-
-    void SetWebSocket(HINTERNET ws) {
-        hWebSocket.store(ws);
-    }
-
-    HINTERNET TakeWebSocket() {
-        return hWebSocket.exchange(nullptr);
-    }
-};
-
 struct MessageFrame {
     std::wstring type;
+    std::wstring sessionId;
     std::wstring partialText;
     std::wstring finalText;
     bool transcriptionCompleted = false;
@@ -138,20 +116,11 @@ bool ParseWebSocketUrl(const std::wstring& url, ParsedUrl& parsed, std::wstring&
     std::wstring normalized = url;
     parsed.secure = true;
 
-    if (StartsWith(normalized, L"wss://")) {
-        normalized.replace(0, 6, L"https://");
-        parsed.secure = true;
-    } else if (StartsWith(normalized, L"ws://")) {
-        normalized.replace(0, 5, L"http://");
-        parsed.secure = false;
-    } else if (StartsWith(normalized, L"https://")) {
-        parsed.secure = true;
-    } else if (StartsWith(normalized, L"http://")) {
-        parsed.secure = false;
-    } else {
-        error = L"invalid WebSocket URL";
+    if (!StartsWith(normalized, L"wss://")) {
+        error = L"Qwen3 Realtime endpoint must use wss://";
         return false;
     }
+    normalized.replace(0, 6, L"https://");
 
     URL_COMPONENTS parts = {};
     parts.dwStructSize = sizeof(parts);
@@ -166,6 +135,11 @@ bool ParseWebSocketUrl(const std::wstring& url, ParsedUrl& parsed, std::wstring&
     }
 
     parsed.host.assign(parts.lpszHostName, parts.dwHostNameLength);
+    const std::wstring path(parts.lpszUrlPath, parts.dwUrlPathLength);
+    if (path != L"/api-ws/v1/realtime") {
+        error = L"Qwen3 Realtime endpoint path must be /api-ws/v1/realtime";
+        return false;
+    }
     parsed.pathAndQuery.assign(parts.lpszUrlPath, parts.dwUrlPathLength);
     if (parts.lpszExtraInfo && parts.dwExtraInfoLength > 0) {
         parsed.pathAndQuery.append(parts.lpszExtraInfo, parts.dwExtraInfoLength);
@@ -237,24 +211,6 @@ bool ReadHex4(const std::string& value, size_t pos, uint32_t& out) {
     return true;
 }
 
-void AppendUtf8(std::string& out, uint32_t cp) {
-    if (cp <= 0x7F) {
-        out.push_back(static_cast<char>(cp));
-    } else if (cp <= 0x7FF) {
-        out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
-        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    } else if (cp <= 0xFFFF) {
-        out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
-        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    } else {
-        out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
-        out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    }
-}
-
 std::wstring ExtractJsonStringValue(const std::string& json, const std::string& key) {
     std::string search = "\"" + key + "\"";
     size_t pos = json.find(search);
@@ -301,7 +257,7 @@ std::wstring ExtractJsonStringValue(const std::string& json, const std::string& 
                     cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
                 }
             }
-            AppendUtf8(unescaped, cp);
+            qwen_audio_json::AppendUtf8(unescaped, cp);
             break;
         }
         default:
@@ -354,7 +310,9 @@ std::wstring ManualTurnDetectionJson(const QwenConfig& cfg) {
 MessageFrame ParseMessageFrame(const std::string& message) {
     MessageFrame frame;
     frame.type = ExtractJsonStringValue(message, "type");
-    if (frame.type == L"conversation.item.input_audio_transcription.text") {
+    if (frame.type == L"session.created" || frame.type == L"session.updated") {
+        frame.sessionId = ExtractJsonStringValue(message, "id");
+    } else if (frame.type == L"conversation.item.input_audio_transcription.text") {
         std::wstring confirmed = ExtractJsonStringValue(message, "text");
         std::wstring stash = ExtractJsonStringValue(message, "stash");
         frame.partialText = confirmed + stash;
@@ -367,17 +325,16 @@ MessageFrame ParseMessageFrame(const std::string& message) {
     return frame;
 }
 
-bool SendTextMessage(HINTERNET hWebSocket, const std::string& message, std::wstring& error) {
-    DWORD err = WinHttpWebSocketSend(
-        hWebSocket,
-        WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
-        const_cast<char*>(message.data()),
-        static_cast<DWORD>(message.size()));
-    if (err != NO_ERROR) {
-        error = L"WebSocket send failed (err=" + std::to_wstring(err) + L")";
-        return false;
-    }
-    return true;
+bool SendTextMessage(winhttp_websocket::Transport& transport,
+                     const std::string& message,
+                     std::wstring& error) {
+    DWORD winhttpError = NO_ERROR;
+    return transport.Send(WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
+                          message.data(),
+                          message.size(),
+                          kSendTimeoutMs,
+                          winhttpError,
+                          error);
 }
 
 std::string BuildSimpleEventMessage(const char* type) {
@@ -385,16 +342,24 @@ std::string BuildSimpleEventMessage(const char* type) {
         "\",\"event_id\":\"" + GenerateEventId() + "\"}";
 }
 
-bool SendBinaryChunk(HINTERNET hWebSocket, const BYTE* data, DWORD bytes, std::wstring& error) {
+std::string BuildAudioAppendMessage(const BYTE* data, DWORD bytes, std::wstring& error) {
     std::string base64;
     if (!Base64Encode(data, bytes, base64)) {
         error = L"failed to base64-encode audio";
-        return false;
+        return {};
     }
 
-    std::string message = "{\"type\":\"input_audio_buffer.append\",\"event_id\":\"" + GenerateEventId() +
+    return "{\"type\":\"input_audio_buffer.append\",\"event_id\":\"" + GenerateEventId() +
         "\",\"audio\":\"" + base64 + "\"}";
-    return SendTextMessage(hWebSocket, message, error);
+}
+
+bool SendBinaryChunk(winhttp_websocket::Transport& transport,
+                     const BYTE* data,
+                     DWORD bytes,
+                     std::wstring& error) {
+    const std::string message = BuildAudioAppendMessage(data, bytes, error);
+    if (!error.empty()) return false;
+    return SendTextMessage(transport, message, error);
 }
 
 std::string BuildSessionUpdateMessage(const QwenConfig& cfg) {
@@ -403,6 +368,7 @@ std::string BuildSessionUpdateMessage(const QwenConfig& cfg) {
 
     std::ostringstream oss;
     oss << "{\"type\":\"session.update\",\"event_id\":\"" << GenerateEventId() << "\",\"session\":{";
+    oss << "\"modalities\":[\"text\"],";
     oss << "\"input_audio_format\":\"pcm\",";
     oss << "\"sample_rate\":16000,";
     oss << "\"input_audio_transcription\":{";
@@ -421,173 +387,180 @@ size_t ClampChunkBytes(size_t bytes) {
     return std::clamp(bytes, minBytes, maxBytes);
 }
 
-bool ParseReceiveMessage(HINTERNET hWebSocket,
-                         DWORD timeoutMs,
-                         std::string& message,
-                         std::wstring& error) {
-    message.clear();
-    DWORD effectiveTimeout = std::max<DWORD>(timeoutMs, 1);
-    WinHttpSetOption(hWebSocket, WINHTTP_OPTION_WEB_SOCKET_RECEIVE_TIMEOUT,
-                     &effectiveTimeout, sizeof(effectiveTimeout));
+enum class ReceiveStatus {
+    Message,
+    Timeout,
+    PeerClosed,
+    Cancelled,
+    Error,
+};
 
-    std::vector<char> buffer(64 * 1024);
+ReceiveStatus ParseReceiveMessage(winhttp_websocket::Transport& transport,
+                                  DWORD timeoutMs,
+                                  std::string& message,
+                                  std::wstring& error,
+                                  USHORT* closeStatus = nullptr,
+                                  std::wstring* closeReason = nullptr) {
+    message.clear();
     std::string assembled;
 
     while (true) {
-        DWORD bytesRead = 0;
-        WINHTTP_WEB_SOCKET_BUFFER_TYPE bufferType = WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE;
-        DWORD err = WinHttpWebSocketReceive(hWebSocket,
-                                            buffer.data(),
-                                            static_cast<DWORD>(buffer.size()),
-                                            &bytesRead,
-                                            &bufferType);
-        if (err == ERROR_WINHTTP_TIMEOUT) return false;
-        if (err != NO_ERROR) {
-            error = L"WebSocket receive failed (err=" + std::to_wstring(err) + L")";
-            return false;
+        const auto received = transport.Receive(timeoutMs);
+        if (received.kind == winhttp_websocket::ReceiveKind::Timeout) {
+            return ReceiveStatus::Timeout;
         }
-
-        if (bufferType == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE) {
+        if (received.kind == winhttp_websocket::ReceiveKind::Cancelled) {
+            error = L"WebSocket operation cancelled";
+            return ReceiveStatus::Cancelled;
+        }
+        if (received.kind == winhttp_websocket::ReceiveKind::Error) {
+            error = L"WebSocket receive failed: " +
+                winhttp_websocket::FormatWinHttpError(received.winhttpError);
+            return ReceiveStatus::Error;
+        }
+        if (received.kind == winhttp_websocket::ReceiveKind::PeerClosed) {
             message.clear();
-            return true;
+            error = L"WebSocket peer closed before session.finished";
+            if (closeStatus) *closeStatus = received.closeStatus;
+            if (closeReason) *closeReason = received.closeReason;
+            return ReceiveStatus::PeerClosed;
         }
-
-        if (bytesRead > 0) {
-            assembled.append(buffer.data(), buffer.data() + bytesRead);
+        if (!received.data.empty()) {
+            assembled.append(reinterpret_cast<const char*>(received.data.data()),
+                             received.data.size());
         }
-
-        if (bufferType == WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE ||
-            bufferType == WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE) {
+        if (received.bufferType == WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE ||
+            received.bufferType == WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE) {
             message = std::move(assembled);
-            return true;
+            return ReceiveStatus::Message;
         }
     }
 }
 
-bool ConnectInternal(QwenConnection& conn, const QwenConfig& cfg, std::wstring& error) {
+bool ConnectInternal(winhttp_websocket::Transport& transport,
+                     const QwenConfig& cfg,
+                     std::wstring& error,
+                     bool& retryable) {
+    error.clear();
+    retryable = true;
     ParsedUrl parsed;
     std::wstring endpoint = BuildEndpointUrl(cfg);
     if (!ParseWebSocketUrl(endpoint, parsed, error)) {
+        retryable = false;
+        QwenRealtimeDebugLog("event=connect_rejected attempt=%llu phase=validate reason=invalid_endpoint model=%s error_len=%zu",
+                             static_cast<unsigned long long>(cfg.attemptId),
+                             WideToUtf8(ResolveModel(cfg.model)).c_str(), error.size());
         return false;
     }
+    QwenRealtimeDebugLog("event=connect_start attempt=%llu phase=handshake model=%s host=%s path=%s port=%u",
+                         static_cast<unsigned long long>(cfg.attemptId),
+                         WideToUtf8(ResolveModel(cfg.model)).c_str(),
+                         WideToUtf8(parsed.host).c_str(),
+                         WideToUtf8(parsed.pathAndQuery).c_str(),
+                         static_cast<unsigned>(parsed.port));
 
-    conn.hSession = WinHttpOpen(L"VoxType/1.0",
-                                WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                                WINHTTP_NO_PROXY_NAME,
-                                WINHTTP_NO_PROXY_BYPASS,
-                                0);
-    if (!conn.hSession) {
-        error = L"WinHttpOpen failed";
-        return false;
-    }
-    WinHttpSetTimeouts(conn.hSession, kConnectTimeoutMs, kConnectTimeoutMs, kConnectTimeoutMs, kConnectTimeoutMs);
+    winhttp_websocket::ConnectOptions options;
+    options.host = parsed.host;
+    options.port = parsed.port;
+    options.pathAndQuery = parsed.pathAndQuery;
+    options.secure = parsed.secure;
+    options.timeoutMs = kConnectTimeoutMs;
+    options.closeTimeoutMs = 1000;
+    options.keepAliveMs = 30000;
+    options.headers = L"Authorization: Bearer " + cfg.apiKey +
+        L"\r\nOpenAI-Beta: realtime=v1\r\n";
 
-    conn.hConnect = WinHttpConnect(conn.hSession, parsed.host.c_str(), parsed.port, 0);
-    if (!conn.hConnect) {
-        error = L"WinHttpConnect failed (err=" + std::to_wstring(GetLastError()) + L")";
-        return false;
-    }
-
-    DWORD flags = parsed.secure ? WINHTTP_FLAG_SECURE : 0;
-    HINTERNET hReq = WinHttpOpenRequest(conn.hConnect,
-                                        L"GET",
-                                        parsed.pathAndQuery.c_str(),
-                                        nullptr,
-                                        WINHTTP_NO_REFERER,
-                                        WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                        flags);
-    if (!hReq) {
-        error = L"WinHttpOpenRequest failed (err=" + std::to_wstring(GetLastError()) + L")";
-        return false;
-    }
-
-    WinHttpSetTimeouts(hReq, kConnectTimeoutMs, kConnectTimeoutMs, kConnectTimeoutMs, kConnectTimeoutMs);
-    WinHttpSetOption(hReq, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0);
-
-    DWORD closeTimeout = 3000;
-    DWORD keepAlive = 30000;
-    WinHttpSetOption(hReq, WINHTTP_OPTION_WEB_SOCKET_CLOSE_TIMEOUT, &closeTimeout, sizeof(closeTimeout));
-    WinHttpSetOption(hReq, WINHTTP_OPTION_WEB_SOCKET_KEEPALIVE_INTERVAL, &keepAlive, sizeof(keepAlive));
-
-    std::wstring headers = L"Authorization: Bearer " + cfg.apiKey + L"\r\n";
-    if (!WinHttpAddRequestHeaders(hReq, headers.c_str(), static_cast<DWORD>(-1), WINHTTP_ADDREQ_FLAG_ADD)) {
-        error = L"WinHttpAddRequestHeaders failed (err=" + std::to_wstring(GetLastError()) + L")";
-        WinHttpCloseHandle(hReq);
-        return false;
-    }
-
-    std::mutex requestMutex;
-    auto closeRequest = [&]() {
-        std::lock_guard<std::mutex> lock(requestMutex);
-        if (hReq) {
-            WinHttpCloseHandle(hReq);
-            hReq = nullptr;
+    winhttp_websocket::HandshakeDiagnostics diagnostics;
+    if (!transport.Connect(options, diagnostics, error)) {
+        if (diagnostics.statusCode != 0) {
+            retryable = diagnostics.statusCode == 408 || diagnostics.statusCode == 409 ||
+                diagnostics.statusCode == 425 || diagnostics.statusCode == 429 ||
+                (diagnostics.statusCode >= 500 && diagnostics.statusCode <= 599);
         }
-    };
-
-    const ULONGLONG requestStart = GetTickCount64();
-    std::atomic<bool> requestDone{false};
-    std::thread watchdogThread([&]() {
-        while (!requestDone.load()) {
-            Sleep(100);
-            if (requestDone.load()) return;
-            if (GetTickCount64() - requestStart >= kConnectTimeoutMs) {
-                closeRequest();
-                return;
-            }
-        }
-    });
-
-    bool sendOk = WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                                     WINHTTP_NO_REQUEST_DATA, 0, 0, 0) != FALSE;
-    bool recvOk = sendOk && WinHttpReceiveResponse(hReq, nullptr) != FALSE;
-    requestDone.store(true);
-    watchdogThread.join();
-
-    if (!sendOk) {
-        error = L"WinHttpSendRequest failed (err=" + std::to_wstring(GetLastError()) + L")";
-        closeRequest();
+        QwenRealtimeDebugLog(
+            "event=connect_failed attempt=%llu phase=handshake status=%lu retryable=%d request_id=%s trace_id=%s secure_flags=%lu body=%s error=%s",
+            static_cast<unsigned long long>(cfg.attemptId),
+            static_cast<unsigned long>(diagnostics.statusCode),
+            retryable ? 1 : 0,
+            WideToUtf8(diagnostics.requestId).c_str(),
+            WideToUtf8(diagnostics.traceId).c_str(),
+            static_cast<unsigned long>(diagnostics.secureFailureFlags),
+            diagnostics.responseBody.c_str(),
+            WideToUtf8(error).c_str());
         return false;
     }
 
-    if (!recvOk) {
-        error = L"WinHttpReceiveResponse failed (err=" + std::to_wstring(GetLastError()) + L")";
-        closeRequest();
-        return false;
-    }
-
-    DWORD statusCode = 0;
-    DWORD statusSize = sizeof(statusCode);
-    WinHttpQueryHeaders(hReq,
-                        WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                        WINHTTP_HEADER_NAME_BY_INDEX,
-                        &statusCode,
-                        &statusSize,
-                        WINHTTP_NO_HEADER_INDEX);
-    if (statusCode != 101) {
-        error = L"WebSocket upgrade failed (HTTP " + std::to_wstring(statusCode) + L")";
-        closeRequest();
-        return false;
-    }
-
-    conn.SetWebSocket(WinHttpWebSocketCompleteUpgrade(hReq, 0));
-    closeRequest();
-    if (!conn.WebSocket()) {
-        error = L"WinHttpWebSocketCompleteUpgrade failed (err=" + std::to_wstring(GetLastError()) + L")";
-        return false;
-    }
-
+    QwenRealtimeDebugLog(
+        "event=handshake_response attempt=%llu phase=handshake status=%lu request_id=%s trace_id=%s secure_flags=%lu",
+        static_cast<unsigned long long>(cfg.attemptId),
+        static_cast<unsigned long>(diagnostics.statusCode),
+        WideToUtf8(diagnostics.requestId).c_str(),
+        WideToUtf8(diagnostics.traceId).c_str(),
+        static_cast<unsigned long>(diagnostics.secureFailureFlags));
     return true;
 }
 
 } // namespace
 
+#if defined(VOXTYPE_QWEN_AUDIO_PROTOCOL_TEST)
+std::wstring BuildEndpointUrlForTest(const QwenConfig& cfg) {
+    return BuildEndpointUrl(cfg);
+}
+
+std::string BuildSessionUpdateMessageForTest(const QwenConfig& cfg) {
+    return BuildSessionUpdateMessage(cfg);
+}
+
+std::string BuildAudioAppendMessageForTest(const BYTE* data, size_t bytes) {
+    std::wstring error;
+    return BuildAudioAppendMessage(data, static_cast<DWORD>(bytes), error);
+}
+
+std::string BuildCommitMessageForTest() {
+    return BuildSimpleEventMessage("input_audio_buffer.commit");
+}
+
+std::string BuildSessionFinishMessageForTest() {
+    return BuildSimpleEventMessage("session.finish");
+}
+
+ProtocolEventForTest ParseServerEventForTest(const std::string& message) {
+    ProtocolEventForTest result;
+    const MessageFrame frame = ParseMessageFrame(message);
+    result.type = frame.type;
+    result.partialText = frame.partialText;
+    result.finalText = frame.finalText;
+    result.transcriptionCompleted = frame.transcriptionCompleted;
+    result.sessionFinished = frame.sessionFinished;
+    if (frame.type == L"conversation.item.input_audio_transcription.failed" ||
+        frame.type == L"error") {
+        result.failed = true;
+        result.error = RealtimeErrorMessage(message, L"realtime server error");
+    }
+    return result;
+}
+#endif
+
 struct RealtimeClient::Impl {
     QwenConfig cfg;
-    QwenConnection conn;
+    winhttp_websocket::Transport transport;
     std::atomic<bool> connected{false};
+    std::atomic<bool> lastFailureRetryable{true};
+    std::atomic<size_t> audioBytes{0};
+    mutable std::mutex metadataMutex;
+    std::wstring sessionId;
 
     explicit Impl(QwenConfig c) : cfg(std::move(c)) {}
+
+    void SetSessionId(std::wstring value) {
+        std::lock_guard<std::mutex> lock(metadataMutex);
+        sessionId = std::move(value);
+    }
+
+    std::wstring SessionId() const {
+        std::lock_guard<std::mutex> lock(metadataMutex);
+        return sessionId;
+    }
 };
 
 RealtimeClient::RealtimeClient(QwenConfig cfg)
@@ -596,21 +569,33 @@ RealtimeClient::RealtimeClient(QwenConfig cfg)
 RealtimeClient::~RealtimeClient() = default;
 
 bool RealtimeClient::Connect(std::wstring& error) {
+    error.clear();
     if (!impl_) {
         error = L"Qwen client not initialized";
         return false;
     }
-    if (!ConnectInternal(impl_->conn, impl_->cfg, error)) {
+    impl_->lastFailureRetryable.store(true);
+    impl_->connected.store(false);
+    impl_->audioBytes.store(0);
+    impl_->SetSessionId({});
+    impl_->transport.Close();
+    if (impl_->cfg.apiKey.empty()) {
+        error = L"missing DashScope API key";
+        impl_->lastFailureRetryable.store(false);
+        return false;
+    }
+    bool connectRetryable = true;
+    const bool connectOk = ConnectInternal(impl_->transport, impl_->cfg, error, connectRetryable);
+    if (!connectOk) {
+        impl_->lastFailureRetryable.store(connectRetryable);
+        Close();
         return false;
     }
     impl_->connected.store(true);
 
-    HINTERNET ws = impl_->conn.WebSocket();
-    if (!ws) {
-        error = L"WebSocket not connected";
-        return false;
-    }
-    if (!SendTextMessage(ws, BuildSessionUpdateMessage(impl_->cfg), error)) {
+    if (!SendTextMessage(impl_->transport,
+                         BuildSessionUpdateMessage(impl_->cfg),
+                         error)) {
         Close();
         return false;
     }
@@ -625,33 +610,39 @@ bool RealtimeClient::Connect(std::wstring& error) {
         }
 
         std::string message;
-        ws = impl_->conn.WebSocket();
-        if (!ws) {
-            error = L"WebSocket not connected";
+        const ReceiveStatus receiveStatus = ParseReceiveMessage(
+            impl_->transport,
+            static_cast<DWORD>(std::min<ULONGLONG>(deadline - now, 500)),
+            message,
+            error);
+        if (receiveStatus == ReceiveStatus::Timeout) continue;
+        if (receiveStatus == ReceiveStatus::Cancelled) {
             Close();
             return false;
         }
-        if (!ParseReceiveMessage(ws,
-                                 static_cast<DWORD>(std::min<ULONGLONG>(deadline - now, kReceiveSliceMs)),
-                                 message,
-                                 error)) {
-            if (error.empty()) continue;
-            Close();
-            return false;
-        }
-
-        if (message.empty()) {
+        if (receiveStatus == ReceiveStatus::PeerClosed) {
             Close();
             error = L"server closed connection before session was ready";
+            return false;
+        }
+        if (receiveStatus == ReceiveStatus::Error) {
+            Close();
             return false;
         }
 
         MessageFrame frame = ParseMessageFrame(message);
         if (frame.type == L"session.updated") {
+            impl_->SetSessionId(frame.sessionId);
+            const std::wstring sessionId = impl_->SessionId();
+            QwenRealtimeDebugLog(
+                "event=session_ready attempt=%llu session_id=%s phase=streaming audio_bytes=0",
+                static_cast<unsigned long long>(impl_->cfg.attemptId),
+                WideToUtf8(sessionId).c_str());
             return true;
         }
         if (frame.type == L"error") {
             error = RealtimeErrorMessage(message, L"realtime server error");
+            impl_->lastFailureRetryable.store(false);
             Close();
             return false;
         }
@@ -664,12 +655,21 @@ bool RealtimeClient::SendAudioChunk(const BYTE* data, size_t bytes, std::wstring
         return false;
     }
     if (bytes == 0) return true;
-    HINTERNET ws = impl_->conn.WebSocket();
-    if (!ws) {
-        error = L"WebSocket not connected";
+    if (bytes > static_cast<size_t>((std::numeric_limits<DWORD>::max)())) {
+        error = L"audio chunk is too large";
         return false;
     }
-    return SendBinaryChunk(ws, data, static_cast<DWORD>(bytes), error);
+    if (!SendBinaryChunk(impl_->transport, data, static_cast<DWORD>(bytes), error)) {
+        const std::wstring sessionId = impl_->SessionId();
+        QwenRealtimeDebugLog(
+            "event=send_audio_failed attempt=%llu session_id=%s phase=streaming chunk_bytes=%zu audio_bytes=%zu error=%s",
+            static_cast<unsigned long long>(impl_->cfg.attemptId),
+            WideToUtf8(sessionId).c_str(), bytes, impl_->audioBytes.load(),
+            WideToUtf8(error).c_str());
+        return false;
+    }
+    impl_->audioBytes.fetch_add(bytes);
+    return true;
 }
 
 bool RealtimeClient::PollEvent(DWORD timeoutMs, RealtimeEvent& event, std::wstring& error) {
@@ -680,17 +680,28 @@ bool RealtimeClient::PollEvent(DWORD timeoutMs, RealtimeEvent& event, std::wstri
     }
 
     std::string message;
-    HINTERNET ws = impl_->conn.WebSocket();
-    if (!ws) {
-        error = L"WebSocket not connected";
+    const ReceiveStatus receiveStatus = ParseReceiveMessage(
+        impl_->transport, timeoutMs, message, error);
+    if (receiveStatus == ReceiveStatus::Timeout) {
+        error.clear();
+        return true;
+    }
+    if (receiveStatus == ReceiveStatus::PeerClosed) {
+        event.peerClosed = true;
+        const std::wstring sessionId = impl_->SessionId();
+        QwenRealtimeDebugLog(
+            "event=peer_close_before_session_finished attempt=%llu session_id=%s phase=finalize audio_bytes=%zu",
+            static_cast<unsigned long long>(impl_->cfg.attemptId),
+            WideToUtf8(sessionId).c_str(), impl_->audioBytes.load());
+        return true;
+    }
+    if (receiveStatus == ReceiveStatus::Cancelled) {
         return false;
     }
-    if (!ParseReceiveMessage(ws, timeoutMs, message, error)) {
-        if (error.empty()) return true; // timeout
+    if (receiveStatus == ReceiveStatus::Error) {
         return false;
     }
     if (message.empty()) {
-        event.sessionFinished = true;
         return true;
     }
 
@@ -700,8 +711,19 @@ bool RealtimeClient::PollEvent(DWORD timeoutMs, RealtimeEvent& event, std::wstri
     } else if (frame.type == L"conversation.item.input_audio_transcription.completed") {
         event.finalText = frame.finalText;
         event.transcriptionCompleted = true;
+        const std::wstring sessionId = impl_->SessionId();
+        QwenRealtimeDebugLog(
+            "event=transcription_completed attempt=%llu session_id=%s phase=finalize audio_bytes=%zu text_chars=%zu",
+            static_cast<unsigned long long>(impl_->cfg.attemptId),
+            WideToUtf8(sessionId).c_str(), impl_->audioBytes.load(),
+            frame.finalText.size());
     } else if (frame.type == L"session.finished") {
         event.sessionFinished = true;
+        const std::wstring sessionId = impl_->SessionId();
+        QwenRealtimeDebugLog(
+            "event=session_finished attempt=%llu session_id=%s phase=complete audio_bytes=%zu",
+            static_cast<unsigned long long>(impl_->cfg.attemptId),
+            WideToUtf8(sessionId).c_str(), impl_->audioBytes.load());
     } else if (frame.type == L"conversation.item.input_audio_transcription.failed") {
         error = RealtimeErrorMessage(message, L"transcription failed");
         return false;
@@ -717,28 +739,41 @@ bool RealtimeClient::SendFinish(std::wstring& error) {
         error = L"WebSocket not connected";
         return false;
     }
-    HINTERNET ws = impl_->conn.WebSocket();
-    if (!ws) {
+    if (!impl_->connected.load()) {
         error = L"WebSocket not connected";
         return false;
     }
 
     if (LowerCase(NormalizeTurnDetection(impl_->cfg.turnDetection)) != L"server_vad") {
-        if (!SendTextMessage(ws, BuildSimpleEventMessage("input_audio_buffer.commit"), error)) {
+        if (!SendTextMessage(impl_->transport,
+                             BuildSimpleEventMessage("input_audio_buffer.commit"),
+                             error)) {
+            const std::wstring sessionId = impl_->SessionId();
+            QwenRealtimeDebugLog(
+                "event=commit_failed attempt=%llu session_id=%s phase=finalize audio_bytes=%zu error=%s",
+                static_cast<unsigned long long>(impl_->cfg.attemptId),
+                WideToUtf8(sessionId).c_str(), impl_->audioBytes.load(),
+                WideToUtf8(error).c_str());
             return false;
         }
     }
 
-    ws = impl_->conn.WebSocket();
-    if (!ws) {
-        error = L"WebSocket not connected";
-        return false;
-    }
-    if (!SendTextMessage(ws,
+    if (!SendTextMessage(impl_->transport,
                          BuildSimpleEventMessage("session.finish"),
                          error)) {
+        const std::wstring sessionId = impl_->SessionId();
+        QwenRealtimeDebugLog(
+            "event=session_finish_failed attempt=%llu session_id=%s phase=finalize audio_bytes=%zu error=%s",
+            static_cast<unsigned long long>(impl_->cfg.attemptId),
+            WideToUtf8(sessionId).c_str(), impl_->audioBytes.load(),
+            WideToUtf8(error).c_str());
         return false;
     }
+    const std::wstring sessionId = impl_->SessionId();
+    QwenRealtimeDebugLog(
+        "event=session_finish_sent attempt=%llu session_id=%s phase=finalize audio_bytes=%zu",
+        static_cast<unsigned long long>(impl_->cfg.attemptId),
+        WideToUtf8(sessionId).c_str(), impl_->audioBytes.load());
     return true;
 }
 
@@ -748,47 +783,47 @@ bool RealtimeClient::Finish(DWORD finalTimeoutMs, std::wstring& finalText, std::
         return false;
     }
 
-    const ULONGLONG deadline = GetTickCount64() + std::max<DWORD>(finalTimeoutMs, 1000);
-    while (true) {
-        const ULONGLONG now = GetTickCount64();
-        if (now >= deadline) {
-            if (!finalText.empty()) return true;
-            error = L"timed out waiting for final transcript";
-            Close();
-            return false;
-        }
-
+    const ULONGLONG deadline = GetTickCount64() + (std::max<DWORD>(finalTimeoutMs, 1000));
+    while (GetTickCount64() < deadline) {
+        const DWORD waitMs = static_cast<DWORD>((std::min<ULONGLONG>)(
+            deadline - GetTickCount64(), 500));
         RealtimeEvent ev;
-        if (!PollEvent(static_cast<DWORD>(std::min<ULONGLONG>(deadline - now, kReceiveSliceMs)), ev, error)) {
-            if (error.empty()) continue;
-            Close();
+        std::wstring receiveError;
+        if (!PollEvent(waitMs, ev, receiveError)) {
+            error = receiveError.empty() ? L"WebSocket receive failed" : receiveError;
             return false;
         }
-        if (!ev.partialText.empty()) {
-            // Streamed partial is handled by caller if needed.
+        if (ev.peerClosed) {
+            error = L"WebSocket peer closed before session.finished";
+            return false;
         }
-        if (ev.transcriptionCompleted) {
-            finalText = ev.finalText;
-        }
-        if (ev.sessionFinished) {
-            return true;
-        }
+        if (ev.transcriptionCompleted) finalText = ev.finalText;
+        if (ev.sessionFinished) return true;
     }
+    Abort();
+    error = L"timed out waiting for final transcript";
+    return false;
 }
 
 void RealtimeClient::Abort() {
     if (!impl_) return;
-    HINTERNET ws = impl_->conn.TakeWebSocket();
-    if (ws) {
-        WinHttpCloseHandle(ws);
-    }
+    const std::wstring sessionId = impl_->SessionId();
+    QwenRealtimeDebugLog(
+        "event=client_abort attempt=%llu session_id=%s phase=abort audio_bytes=%zu",
+        static_cast<unsigned long long>(impl_->cfg.attemptId),
+        WideToUtf8(sessionId).c_str(), impl_->audioBytes.load());
+    impl_->transport.Abort();
     impl_->connected.store(false);
 }
 
 void RealtimeClient::Close() {
     if (!impl_) return;
-    impl_->conn.Close();
+    impl_->transport.Close();
     impl_->connected.store(false);
+}
+
+bool RealtimeClient::LastFailureRetryable() const {
+    return impl_ && impl_->lastFailureRetryable.load();
 }
 
 size_t ChunkBytesForConfig(const QwenConfig& cfg) {
@@ -816,6 +851,11 @@ std::wstring Recognize(const std::vector<BYTE>& pcm, const QwenConfig& cfg, DWOR
         if (!client.SendAudioChunk(pcm.data() + offset, bytes, error)) {
             return MakeError(error);
         }
+        // The realtime endpoint expects a realtime-like stream.  Pace replay
+        // and recorded fallback traffic instead of flooding the WebSocket.
+        if (offset + bytes < pcm.size()) {
+            Sleep(static_cast<DWORD>(std::clamp(cfg.chunkMs, 20, 1000)));
+        }
     }
 
     std::wstring finalText;
@@ -835,7 +875,8 @@ TestResult TestConnection(const QwenConfig& cfg) {
     RealtimeClient client(cfg);
     std::wstring error;
     if (!client.Connect(error)) {
-        result.message = MakeError(error);
+        result.message = MakeError(error.empty() ? L"WebSocket handshake failed" : error);
+        client.Close();
         return result;
     }
 

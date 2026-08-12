@@ -40,6 +40,9 @@ constexpr wchar_t kQwenBeijingHttpBaseUrl[] =
     L"https://llm-c6rtn7zy4nw0u39k.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation";
 constexpr wchar_t kQwenBeijingAudioStreamingBaseUrl[] =
     L"wss://llm-c6rtn7zy4nw0u39k.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference";
+constexpr wchar_t kQwenBeijingRealtimeBaseUrl[] =
+    L"wss://llm-c6rtn7zy4nw0u39k.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime";
+constexpr wchar_t kQwenDefaultLanguageHints[] = L"zh,en,yue";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kReloadMessage = WM_APP + 2;
 constexpr UINT kAsrResultMessage = WM_APP + 3;
@@ -121,6 +124,39 @@ constexpr int ActionBtnW = 140;
 constexpr int FooterBtnW = 84;
 constexpr int FooterHeight = 78;
 constexpr int FooterMinTop = 640;
+constexpr int CloudAsrHintY = 48;
+constexpr int CloudAsrHintW = 740;
+constexpr int QwenLanguageY = 280;
+constexpr int QwenLanguageHintY = 314;
+constexpr int QwenChunkY = 344;
+constexpr int QwenChunkHintY = 378;
+constexpr int QwenLanguageHintsY = 408;
+constexpr int QwenLanguageHintsHintY = 442;
+constexpr int QwenAdvancedButtonY = 476;
+constexpr int QwenAdvancedHintY = 514;
+constexpr int QwenHintH = 24;
+constexpr int QwenAdvancedDialogW = 720;
+constexpr int QwenAdvancedDialogH = 700;
+constexpr int QwenAdvancedDialogLeft = 24;
+constexpr int QwenAdvancedDialogLabelW = 620;
+constexpr int QwenAdvancedDialogInputLeft = 170;
+constexpr int QwenAdvancedDialogInputW = 500;
+constexpr int QwenAdvancedDialogVocabIdLabelY = 28;
+constexpr int QwenAdvancedDialogVocabIdY = 56;
+constexpr int QwenAdvancedDialogVocabIdHintY = 92;
+constexpr int QwenAdvancedDialogVocabJsonLabelY = 146;
+constexpr int QwenAdvancedDialogVocabJsonY = 174;
+constexpr int QwenAdvancedDialogVocabJsonH = 96;
+constexpr int QwenAdvancedDialogVocabJsonHintY = 276;
+constexpr int QwenAdvancedDialogStreamingGroupY = 332;
+constexpr int QwenAdvancedDialogStreamingGroupH = 244;
+constexpr int QwenAdvancedDialogStreamingRow1Y = 364;
+constexpr int QwenAdvancedDialogStreamingHint1Y = 398;
+constexpr int QwenAdvancedDialogStreamingRow2Y = 438;
+constexpr int QwenAdvancedDialogStreamingHint2Y = 472;
+constexpr int QwenAdvancedDialogNoiseY = 508;
+constexpr int QwenAdvancedDialogNoiseHintY = 542;
+constexpr int QwenAdvancedDialogFooterY = 590;
 constexpr int QwenFreeShellPathW = 400;
 constexpr int QwenFreeShellBrowseGap = 12;
 constexpr int QwenFreeOptionCheckW = 200;
@@ -234,6 +270,11 @@ constexpr int IDC_QWEN_HEARTBEAT = 2124;
 constexpr int IDC_QWEN_SPEECH_NOISE_THRESHOLD = 2125;
 constexpr int IDC_QWEN_LANGUAGE_HINTS = 2126;
 constexpr int IDC_QWEN_SPEECH_NOISE_ENABLE = 2127;
+constexpr int IDC_QWEN_OPEN_LOG = 2128;
+constexpr int IDC_VOLC_OPEN_LOG = 2129;
+constexpr int IDC_QWEN_INPUT_CONTEXT = 2130;
+constexpr int IDC_QWEN_LANGUAGE_HINTS_RESET = 2131;
+constexpr int IDC_QWEN_ADVANCED = 2132;
 constexpr int IDC_MIMO_API_KEY = 2090;
 constexpr int IDC_MIMO_SHOW_KEY = 2091;
 constexpr int IDC_MIMO_BASE_URL = 2092;
@@ -304,14 +345,14 @@ struct Config {
     std::wstring volcCorrectTableId;
     std::wstring volcCorrectTableName;
     std::wstring qwenApiKey;
-    std::wstring qwenBaseUrl = L"wss://dashscope.aliyuncs.com/api-ws/v1/realtime";
+    std::wstring qwenBaseUrl = kQwenBeijingRealtimeBaseUrl;
     std::wstring qwenHttpBaseUrl = kQwenBeijingHttpBaseUrl;
     std::wstring qwenAudioStreamingBaseUrl = kQwenBeijingAudioStreamingBaseUrl;
     std::wstring qwenModel = L"qwen-audio-3.0-asr-flash-streaming";
     std::wstring qwenTransport = L"audio_streaming";
     std::wstring qwenLanguage;
     int qwenChunkMs = 100;
-    std::wstring qwenLanguageHints;
+    std::wstring qwenLanguageHints = kQwenDefaultLanguageHints;
     std::wstring qwenVocabularyId;
     std::wstring qwenVocabulary;
     bool qwenSemanticPunctuation = false;
@@ -320,6 +361,16 @@ struct Config {
     bool qwenHeartbeat = false;
     bool qwenSpeechNoiseThresholdEnabled = false;
     float qwenSpeechNoiseThreshold = 0.0f;
+    // Sending the focused input-field text is opt-in.  Password controls and
+    // failed/timed-out UI Automation reads are always excluded.
+    bool qwenEnableInputContext = false;
+    // Runtime-only snapshot captured when an ASR attempt begins. Never persist
+    // this field: it may contain sensitive text from the focused control.
+    std::wstring qwenInputContextSnapshot;
+    bool qwenInputContextSnapshotCaptured = false;
+    // Runtime-only correlation id. It is copied into provider sessions and
+    // logs, but must never be loaded from or saved to the config file.
+    uint64_t asrAttemptId = 0;
     std::wstring mimoApiKey;
     std::wstring mimoBaseUrl = L"https://token-plan-ams.xiaomimimo.com/v1";
     std::wstring mimoModel = L"mimo-v2.5-asr";

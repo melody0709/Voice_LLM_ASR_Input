@@ -30,6 +30,9 @@ public:
     virtual void Abort() = 0;
     virtual bool IsRunning() const = 0;
     virtual DWORD CurrentWatchdogMs() const = 0;
+    // Optional provider-specific upper bound for one continuous microphone
+    // turn. Zero means the provider imposes no client-side recording limit.
+    virtual DWORD MaxRecordingMs() const { return 0; }
     virtual const wchar_t* ProviderName() const = 0;
     virtual void SetPartialCallback(AsrPartialCallback cb, void* userData) = 0;
     virtual void SetFinalCallback(AsrFinalCallback cb, void* userData) = 0;

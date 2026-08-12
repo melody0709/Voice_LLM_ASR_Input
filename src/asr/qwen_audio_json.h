@@ -188,6 +188,13 @@ inline bool DecodeNarrowString(std::string_view text, size_t& pos, std::string& 
 
 } // namespace detail
 
+// Shared Unicode scalar to UTF-8 encoder used by the provider parsers. Keep
+// one implementation so JSON escape handling cannot diverge between the
+// Audio 3 and Qwen3 protocol stacks.
+inline void AppendUtf8(std::string& out, uint32_t cp) {
+    detail::AppendUtf8(out, cp);
+}
+
 inline bool IsValidValue(const std::wstring& value) {
     const std::wstring trimmed = Trim(value);
     if (trimmed.empty()) return false;

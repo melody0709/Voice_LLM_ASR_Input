@@ -10,6 +10,7 @@
 #include "mimo_asr.h"
 #include "qwen_asr.h"
 #include "qwen_audio_http.h"
+#include "qwen_context.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -252,6 +253,14 @@ public:
 
     bool Start(std::wstring& error) override {
         cancellation_.Reset();
+        inputContextText_.clear();
+        if (config_.qwenEnableInputContext) {
+            if (config_.qwenInputContextSnapshotCaptured) {
+                inputContextText_ = config_.qwenInputContextSnapshot;
+            } else {
+                inputContextText_ = qwen_context::CaptureInputFieldText(&g_inputContextResult);
+            }
+        }
         return BatchAsrSessionBase::Start(error);
     }
 
@@ -285,6 +294,7 @@ public:
         cfg.languageHints = config_.qwenLanguageHints.empty() ? config_.qwenLanguage : config_.qwenLanguageHints;
         cfg.vocabularyId = config_.qwenVocabularyId;
         cfg.vocabulary = config_.qwenVocabulary;
+        cfg.inputContextText = inputContextText_;
         HiResTimer timer;
         const DWORD timeoutMs = ComputeCloudAsrRecordedRequestTimeoutMs(0.0, uploadPcm.size());
         qwen_audio_http::Result r;
@@ -305,6 +315,7 @@ private:
     Config config_;
     AsrEngine& engine_;
     CloudHttpCancellation cancellation_;
+    std::wstring inputContextText_;
 };
 
 class DoubaoImeRecordedSession final : public BatchAsrSessionBase {
@@ -386,7 +397,7 @@ std::unique_ptr<IAsrSession> CreateBatchAsrSession(
         return std::make_unique<BaiduAsrSession>(config, localEngine);
     }
     if (config.asrBackend == L"qwen") {
-        if (config.qwenTransport == L"audio_http" || config.qwenModel == L"qwen-audio-3.0-asr-flash") {
+        if (config.qwenModel == L"qwen-audio-3.0-asr-flash") {
             return std::make_unique<QwenAudioAsrSession>(config, localEngine);
         }
         return std::make_unique<QwenAsrSession>(config, localEngine);

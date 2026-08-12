@@ -150,24 +150,38 @@ bool WasapiCapture::Start(std::wstring& error) {
 
 void WasapiCapture::Stop() {
     m_running.store(false);
+    // Invalidate the per-capture identity before joining the worker.  Any
+    // late failure notification from this capture must not be attributed to
+    // the next Start() call on the same object.
+    m_captureGeneration.store(0, std::memory_order_release);
     if (m_event) SetEvent(m_event);
     if (m_captureThread.joinable()) m_captureThread.join();
     if (m_audioClient) m_audioClient->Stop();
 }
 
 void WasapiCapture::ReportRuntimeFailure(DWORD code) {
+    // Capture the identity before changing m_running.  Stop() may clear the
+    // per-object generation while joining the worker; a failure that won the
+    // terminal transition must still be posted with the generation it saw.
+    const uint64_t generation = m_captureGeneration.load(std::memory_order_acquire);
+    if (generation == 0) return;
+
     // Stop the worker before notifying the UI.  This makes the failure
     // terminal for the current capture and prevents repeated messages while
     // the main thread is stopping/releasing the WASAPI handles.
     if (!m_running.exchange(false, std::memory_order_acq_rel)) return;
+
+    // Wake a thread that is waiting on the event immediately.  Stop() also
+    // signals this event, but ReportRuntimeFailure can be the first terminal
+    // transition and should not leave the worker asleep for its 200 ms poll.
+    if (m_event) SetEvent(m_event);
 
     g_audioCaptureFailureCode.store(code, std::memory_order_relaxed);
     g_audioCaptureFailureWasapi.store(true, std::memory_order_relaxed);
     g_audioCaptureFailurePending.store(true, std::memory_order_release);
 
     const HWND target = g_mainWindow;
-    const uint64_t generation = m_captureGeneration.load(std::memory_order_acquire);
-    if (!target || generation == 0) return;
+    if (!target) return;
 
     PostMessageW(target,
                  kAudioCaptureErrorMessage,

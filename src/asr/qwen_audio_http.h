@@ -16,6 +16,9 @@ struct Config {
     std::wstring languageHints;
     std::wstring vocabularyId;
     std::wstring vocabulary;
+    // Optional focused input-field context. It is serialized as an
+    // input_text message before the current input_audio message.
+    std::wstring inputContextText;
 };
 
 // Pure request helpers used by offline protocol tests. They do not perform
@@ -24,6 +27,7 @@ std::vector<BYTE> BuildWavForPcm(const std::vector<BYTE>& pcm16k16Mono);
 std::string EncodeBase64ForTest(const std::vector<BYTE>& data);
 std::string BuildRequestJsonForTest(const Config& config, const std::string& audioBase64);
 bool IsNoSpeechResponseForTest(DWORD statusCode, const std::string& responseBody);
+std::wstring ParseResponseTextForTest(const std::string& responseBody);
 
 struct Result {
     bool ok = false;

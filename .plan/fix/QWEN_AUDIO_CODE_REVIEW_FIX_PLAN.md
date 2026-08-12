@@ -45,9 +45,16 @@
 
 ## 实施结果
 
-- [x] WebSocket 操作生命周期锁、发送/接收侧锁已加入；Send/Receive 仍保持双工并发，Close/Abort 等待 in-flight 操作结束。
+- [x] WebSocket 操作生命周期锁、发送/接收侧锁已加入；Send/Receive 仍保持双工并发，Abort 只发取消信号，worker/drain 退出后由 Close 独占释放句柄。
 - [x] 不可重试的初始连接错误不再执行第二次连接。
 - [x] 删除 HTTP 配置中的 streaming 专用字段及其无效赋值。
 - [x] 删除重复的 streaming `AppendUtf8()`，统一 Event 字段缩进，并修正 Settings 变量命名。
 - [x] 增加 HTTP 请求不携带 streaming-only 参数的离线回归断言。
 - [x] `build.bat --test` 与 `git diff --check` 通过。
+
+## 后续诊断增强
+
+- [x] 新增 `%TEMP%\qwen_audio_debug.log`，仅在全局 Debug Mode 开启时写入，并复用 5 MB / 2 份归档轮转。
+- [x] 握手日志记录 endpoint host/path、model、连接阶段、WinHTTP 错误码、HTTP 状态码、WebSocket upgrade、`run-task`/`task-started` 和重试结果；不记录 API Key、PCM 或完整 transcript。
+- [x] Qwen Model 右侧新增 `Open log` 按钮，打开 `qwen_audio_debug.log`。
+- [x] Volcano Engine Model 右侧新增 `Open log` 按钮，打开现有 `volc_asr_debug.log`。

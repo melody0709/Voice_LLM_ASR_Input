@@ -18,11 +18,13 @@
 namespace {
 
 constexpr DWORD kQwenRecordingWatchdogMs = 18000;
+constexpr DWORD kQwenManualMaxRecordingMs = 55000;
 constexpr size_t kQwenMaxReplayBytes = 120u * 32000u;
 constexpr size_t kQwenEmptyRetryMinBytes = 3u * 32000u;
 
 qwen_asr::QwenConfig BuildQwenConfig(const Config& config) {
     qwen_asr::QwenConfig qcfg;
+    qcfg.attemptId = config.asrAttemptId;
     qcfg.apiKey = config.qwenApiKey;
     qcfg.baseUrl = config.qwenBaseUrl;
     qcfg.model = config.qwenModel;
@@ -105,6 +107,10 @@ public:
             : ComputeCloudAsrLegacyFinalizeTimeoutMs(recordingMs_.load(), capturedPcmBytes_.load());
     }
 
+    DWORD MaxRecordingMs() const override {
+        return qcfg_.turnDetection == L"manual" ? kQwenManualMaxRecordingMs : 0;
+    }
+
     const wchar_t* ProviderName() const override {
         return L"Qwen ASR";
     }
@@ -150,10 +156,12 @@ private:
             SetActiveClient(&client);
             std::wstring error;
             if (!client.Connect(error)) {
+                const bool connectRetryable = client.LastFailureRetryable();
                 client.Close();
                 ClearActiveClient(&client);
                 result.error = QwenErrorText(error);
                 result.transportError = true;
+                if (!connectRetryable) break;
                 continue;
             }
 
@@ -164,6 +172,9 @@ private:
                 if (!client.SendAudioChunk(pcm.data() + offset, bytes, error)) {
                     sendOk = false;
                     break;
+                }
+                if (offset + bytes < pcm.size()) {
+                    Sleep(static_cast<DWORD>(std::clamp(retryCfg.chunkMs, 20, 1000)));
                 }
             }
             if (!sendOk || abort_.load()) {
@@ -230,11 +241,14 @@ private:
                 connected = true;
                 break;
             }
+            const bool connectRetryable = client->LastFailureRetryable();
             client->Close();
             ClearActiveClient(client.get());
-            if (attempt + 1 < kMaxConnectAttempts && !abort_.load()) {
+            if (attempt + 1 < kMaxConnectAttempts && connectRetryable && !abort_.load()) {
                 NotifyStatus(L"Reconnecting... Qwen ASR");
                 Sleep(500);
+            } else if (!connectRetryable) {
+                break;
             }
         }
 
@@ -270,6 +284,14 @@ private:
                     if (!drainDone.load() && !abort_.load()) {
                         std::lock_guard<std::mutex> lock(drainMutex);
                         drainError = receiveError;
+                        drainFailed.store(true);
+                    }
+                    break;
+                }
+                if (ev.peerClosed) {
+                    if (!drainDone.load() && !abort_.load()) {
+                        std::lock_guard<std::mutex> lock(drainMutex);
+                        drainError = L"WebSocket peer closed before session.finished";
                         drainFailed.store(true);
                     }
                     break;

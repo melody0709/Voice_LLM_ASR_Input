@@ -1,18 +1,22 @@
 #pragma once
 
 #include <windows.h>
+#include <cstdint>
 #include <memory>
 #include <string>
 
 namespace qwen_audio_streaming {
 
 struct Config {
+    uint64_t attemptId = 0;
     std::wstring apiKey;
     std::wstring baseUrl;
     std::wstring model = L"qwen-audio-3.0-asr-flash-streaming";
     std::wstring languageHints;
     std::wstring vocabularyId;
     std::wstring vocabulary;
+    // Optional focused input-field context sent in run-task.payload.input.
+    std::wstring inputContextText;
     bool semanticPunctuation = false;
     int maxSentenceSilenceMs = 1300;
     bool multiThresholdMode = false;
@@ -25,6 +29,7 @@ struct Event {
     std::wstring action;
     std::wstring text;
     std::wstring message;
+    std::wstring errorCode;
     bool taskStarted = false;
     bool taskFinished = false;
     bool failed = false;

@@ -26,7 +26,7 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "winmm.lib")
 
-static constexpr int kCurrentConfigVersion = 10;
+static constexpr int kCurrentConfigVersion = 12;
 
 namespace {
 
@@ -518,7 +518,8 @@ void LoadConfig() {
     g_config.qwenAudioStreamingBaseUrl = Utf8ToWide(ExtractJsonString(json, "qwen_audio_streaming_base_url", WideToUtf8(g_config.qwenAudioStreamingBaseUrl)));
     g_config.qwenLanguage = Utf8ToWide(ExtractJsonString(json, "qwen_language", ""));
     g_config.qwenChunkMs = ExtractJsonInt(json, "qwen_chunk_ms", g_config.qwenChunkMs);
-    g_config.qwenLanguageHints = Utf8ToWide(ExtractJsonString(json, "qwen_language_hints", ""));
+    g_config.qwenLanguageHints = Utf8ToWide(ExtractJsonString(
+        json, "qwen_language_hints", WideToUtf8(g_config.qwenLanguageHints)));
     g_config.qwenVocabularyId = Utf8ToWide(ExtractJsonString(json, "qwen_vocabulary_id", ""));
     g_config.qwenVocabulary = Utf8ToWide(ExtractJsonString(json, "qwen_vocabulary", ""));
     g_config.qwenSemanticPunctuation = ExtractJsonBool(json, "qwen_semantic_punctuation", g_config.qwenSemanticPunctuation);
@@ -527,9 +528,26 @@ void LoadConfig() {
     g_config.qwenHeartbeat = ExtractJsonBool(json, "qwen_heartbeat", g_config.qwenHeartbeat);
     g_config.qwenSpeechNoiseThresholdEnabled = ExtractJsonBool(json, "qwen_speech_noise_threshold_enabled", g_config.qwenSpeechNoiseThresholdEnabled);
     g_config.qwenSpeechNoiseThreshold = std::clamp(ExtractJsonFloat(json, "qwen_speech_noise_threshold", g_config.qwenSpeechNoiseThreshold), -1.0f, 1.0f);
-    if (g_config.qwenBaseUrl.empty()) g_config.qwenBaseUrl = L"wss://dashscope.aliyuncs.com/api-ws/v1/realtime";
+    g_config.qwenEnableInputContext = ExtractJsonBool(json, "qwen_enable_input_context", g_config.qwenEnableInputContext);
+
+    // Older builds used the public DashScope endpoint for the realtime
+    // profile.  Migrate only that exact legacy default; preserve any explicit
+    // user-customized endpoint.
+    constexpr wchar_t kOldQwenRealtimeBaseUrl[] =
+        L"wss://dashscope.aliyuncs.com/api-ws/v1/realtime";
+    constexpr wchar_t kOldQwenHttpBaseUrl[] =
+        L"https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation";
+    constexpr wchar_t kOldQwenAudioStreamingBaseUrl[] =
+        L"wss://dashscope.aliyuncs.com/api-ws/v1/inference";
+    if (g_config.qwenBaseUrl.empty() || g_config.qwenBaseUrl == kOldQwenRealtimeBaseUrl) {
+        g_config.qwenBaseUrl = kQwenBeijingRealtimeBaseUrl;
+    }
     if (g_config.qwenHttpBaseUrl.empty()) g_config.qwenHttpBaseUrl = kQwenBeijingHttpBaseUrl;
+    if (g_config.qwenHttpBaseUrl == kOldQwenHttpBaseUrl) g_config.qwenHttpBaseUrl = kQwenBeijingHttpBaseUrl;
     if (g_config.qwenAudioStreamingBaseUrl.empty()) g_config.qwenAudioStreamingBaseUrl = kQwenBeijingAudioStreamingBaseUrl;
+    if (g_config.qwenAudioStreamingBaseUrl == kOldQwenAudioStreamingBaseUrl) {
+        g_config.qwenAudioStreamingBaseUrl = kQwenBeijingAudioStreamingBaseUrl;
+    }
     qwen_audio_profile::NormalizePersistedProfile(
         g_config.qwenModel,
         g_config.qwenTransport,
@@ -596,6 +614,9 @@ void LoadConfig() {
     if (g_config.configVersion < 9 &&
         ShouldFallbackFromLegacyModelDir(g_config.modelDir)) {
         g_config.modelDir = DefaultModelDir(g_config.modelId);
+    }
+    if (g_config.configVersion < 12 && g_config.qwenLanguageHints.empty()) {
+        g_config.qwenLanguageHints = kQwenDefaultLanguageHints;
     }
     if (g_config.modelDir.empty()) {
         g_config.modelDir = DefaultModelDir(g_config.modelId);
@@ -696,6 +717,7 @@ void SaveConfig() {
          << "  \"qwen_heartbeat\": " << (g_config.qwenHeartbeat ? "true" : "false") << ",\n"
          << "  \"qwen_speech_noise_threshold_enabled\": " << (g_config.qwenSpeechNoiseThresholdEnabled ? "true" : "false") << ",\n"
          << "  \"qwen_speech_noise_threshold\": " << g_config.qwenSpeechNoiseThreshold << ",\n"
+         << "  \"qwen_enable_input_context\": " << (g_config.qwenEnableInputContext ? "true" : "false") << ",\n"
          << "  \"mimo_api_key\": \"" << EscapeJson(llm::EncryptString(g_config.mimoApiKey)) << "\",\n"
          << "  \"mimo_base_url\": \"" << EscapeJson(g_config.mimoBaseUrl) << "\",\n"
          << "  \"mimo_model\": \"" << EscapeJson(g_config.mimoModel) << "\",\n"

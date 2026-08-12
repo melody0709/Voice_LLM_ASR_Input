@@ -8,6 +8,7 @@
 #include "hotkey.h"
 #include "settings.h"
 #include "input_context.h"
+#include "qwen_context.h"
 #include "asr_session.h"
 #include "asr_streaming_session.h"
 #include "asr_result.h"
@@ -19,6 +20,7 @@
 #include "qwen_streaming_session.h"
 #include "qwen_audio_streaming_session.h"
 #include "qwen_free_streaming_session.h"
+#include "qwen_audio_profile.h"
 #include "volcengine_streaming_session.h"
 #include "volcengine_asr.h"
 #include "streaming_vad_trimmer.h"
@@ -150,7 +152,7 @@ static bool s_debugConsoleOpen = false;
 
 static bool IsStreamingCloudBackend(const Config& config) {
     if (config.asrBackend == L"qwen" &&
-        (config.qwenTransport == L"audio_http" || config.qwenModel == L"qwen-audio-3.0-asr-flash")) {
+        config.qwenModel == L"qwen-audio-3.0-asr-flash") {
         return false;
     }
     return config.asrBackend == L"qwen" || config.asrBackend == L"volcengine" ||
@@ -209,7 +211,7 @@ static void DebugPrintTextLine(const wchar_t* prefix, const std::wstring& text) 
 }
 
 static void DebugPrintInputContext() {
-    if (g_config.volcEnableInputContext) {
+    if (g_config.volcEnableInputContext || g_config.qwenEnableInputContext) {
         auto& ic = g_inputContextResult;
         printf("  Context: %s %.0fms", input_context::LayerName(ic.successLayer), ic.elapsedMs);
         if (!ic.focusWindowClass.empty())
@@ -406,8 +408,7 @@ static void CaptureOneShotStreamingFinal(std::wstring text,
 static std::unique_ptr<IStreamingAsrSession> CreateStreamingSessionForOneShot(
     const Config& config) {
     if (config.asrBackend == L"qwen") {
-        if (config.qwenTransport == L"audio_streaming" ||
-            config.qwenModel == L"qwen-audio-3.0-asr-flash-streaming") {
+        if (config.qwenModel == L"qwen-audio-3.0-asr-flash-streaming") {
             return CreateQwenAudioStreamingSession(config, g_mainWindow, nullptr, nullptr);
         }
         return CreateQwenStreamingSession(config, g_mainWindow, nullptr, nullptr);
@@ -679,15 +680,30 @@ static RecognitionAttemptContext g_activeAttempt;
 
 static uint64_t BeginAsrAttempt(const Config& config,
                                 SelectionContext selection = {}) {
-    uint64_t attemptId = 0;
+    const uint64_t attemptId = ++g_asrAttemptSeq;
+    Config attemptConfig = config;
+    attemptConfig.asrAttemptId = attemptId;
+    if (config.asrBackend == L"qwen" && config.qwenEnableInputContext &&
+        (config.qwenModel == qwen_audio_profile::kHttpModel ||
+         config.qwenModel == qwen_audio_profile::kStreamingModel)) {
+        attemptConfig.qwenInputContextSnapshotCaptured = true;
+        attemptConfig.qwenInputContextSnapshot =
+            qwen_context::CaptureInputFieldText(&g_inputContextResult);
+        asr_runtime_log::Write(
+            "event=input_context_snapshot captured=%d chars=%zu layer=%d timed_out=%d password=%d",
+            attemptConfig.qwenInputContextSnapshot.empty() ? 0 : 1,
+            attemptConfig.qwenInputContextSnapshot.size(),
+            g_inputContextResult.successLayer,
+            g_inputContextResult.timedOut ? 1 : 0,
+            g_inputContextResult.isPassword ? 1 : 0);
+    }
     {
         std::lock_guard<std::mutex> lock(g_asrAttemptMutex);
         g_activeAttempt = {};
-        g_activeAttempt.id = ++g_asrAttemptSeq;
-        g_activeAttempt.primaryConfig = config;
+        g_activeAttempt.id = attemptId;
+        g_activeAttempt.primaryConfig = std::move(attemptConfig);
         g_activeAttempt.selection = std::move(selection);
         g_activeAttempt.startedTick = GetTickCount64();
-        attemptId = g_activeAttempt.id;
     }
     asr_runtime_log::Write(
         "event=attempt_start attempt=%llu primary=%s fallback=%s",
@@ -1476,12 +1492,12 @@ void StartRecordingSession() {
     AbortAndResetActiveStreamingSession();
     ResetStreamingVadTrimmerState();
     ResetStreamingPartialHudState();
+    const Config attemptConfig = ActiveAsrAttemptConfig();
 
-    if (g_config.asrBackend == L"qwen" && IsStreamingCloudBackend(g_config)) {
-        auto session = (g_config.qwenTransport == L"audio_streaming" ||
-                        g_config.qwenModel == L"qwen-audio-3.0-asr-flash-streaming")
-            ? CreateQwenAudioStreamingSession(g_config, g_mainWindow, RefineWithLlmAsync, &g_lastRawAsrText)
-            : CreateQwenStreamingSession(g_config, g_mainWindow, RefineWithLlmAsync, &g_lastRawAsrText);
+    if (attemptConfig.asrBackend == L"qwen" && IsStreamingCloudBackend(attemptConfig)) {
+        auto session = (attemptConfig.qwenModel == L"qwen-audio-3.0-asr-flash-streaming")
+            ? CreateQwenAudioStreamingSession(attemptConfig, g_mainWindow, RefineWithLlmAsync, &g_lastRawAsrText)
+            : CreateQwenStreamingSession(attemptConfig, g_mainWindow, RefineWithLlmAsync, &g_lastRawAsrText);
         session->SetPartialCallback(StreamingPartialHudCallback, &g_qwenPartialHudContext);
         session->SetFinalCallback(StreamingFinalCallback, reinterpret_cast<void*>(static_cast<UINT_PTR>(attemptId)));
 
@@ -2073,11 +2089,31 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             KillTimer(hwnd, kStreamingWatchdogTimer);
             if (g_recording) {
                 DWORD watchdogMs = 18000;
+                DWORD recordingLimitMs = 0;
                 EnterCriticalSection(&g_streamingSessionCs);
                 if (g_activeStreamingSession) {
                     watchdogMs = g_activeStreamingSession->CurrentWatchdogMs();
+                    recordingLimitMs = g_activeStreamingSession->MaxRecordingMs();
                 }
                 LeaveCriticalSection(&g_streamingSessionCs);
+                if (recordingLimitMs > 0) {
+                    const ULONGLONG elapsedMs = GetTickCount64() - g_sessionStartTick;
+                    if (elapsedMs >= recordingLimitMs) {
+                        const uint64_t attemptId = ActiveAsrAttemptId();
+                        const Config attemptConfig = ActiveAsrAttemptConfig();
+                        asr_runtime_log::Write(
+                            "event=recording_limit_reached attempt=%llu backend=%s model=%s elapsed_ms=%llu limit_ms=%lu",
+                            static_cast<unsigned long long>(attemptId),
+                            AsrBackendLogName(attemptConfig.asrBackend),
+                            WideToUtf8(attemptConfig.qwenModel).c_str(),
+                            static_cast<unsigned long long>(elapsedMs),
+                            static_cast<unsigned long>(recordingLimitMs));
+                        StopRecordingSession();
+                        return 0;
+                    }
+                    const DWORD remainingMs = static_cast<DWORD>(recordingLimitMs - elapsedMs);
+                    watchdogMs = (std::min)(watchdogMs, (std::max<DWORD>)(remainingMs, 1));
+                }
                 SetTimer(hwnd, kStreamingWatchdogTimer, watchdogMs, nullptr);
                 return 0;
             }

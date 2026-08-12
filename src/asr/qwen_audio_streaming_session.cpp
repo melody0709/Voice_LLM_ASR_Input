@@ -1,5 +1,6 @@
 #include "qwen_audio_streaming_session.h"
 
+#include "asr_runtime_log.h"
 #include "asr_result.h"
 #include "asr_streaming_session_base.h"
 #include "cloud_asr_common.h"
@@ -9,6 +10,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdarg>
 #include <cwctype>
 #include <memory>
 #include <mutex>
@@ -23,14 +25,26 @@ constexpr size_t kMaxReplayBytes = 120u * 32000u;
 constexpr size_t kEmptyRetryMinBytes = 3u * 32000u;
 constexpr DWORD kInitialConnectAttempts = 2;
 
+void QwenAudioSessionDebugLog(const char* format, ...) {
+    if (!format) return;
+    va_list args;
+    va_start(args, format);
+    asr_runtime_log::WriteNamedV(L"qwen_audio_debug.log", format, args);
+    va_end(args);
+}
+
 qwen_audio_streaming::Config BuildConfig(const Config& c) {
     qwen_audio_streaming::Config out;
+    out.attemptId = c.asrAttemptId;
     out.apiKey = c.qwenApiKey;
     out.baseUrl = c.qwenAudioStreamingBaseUrl;
     out.model = c.qwenModel;
     out.languageHints = c.qwenLanguageHints.empty() ? c.qwenLanguage : c.qwenLanguageHints;
     out.vocabularyId = c.qwenVocabularyId;
     out.vocabulary = c.qwenVocabulary;
+    out.inputContextText = c.qwenInputContextSnapshotCaptured
+        ? c.qwenInputContextSnapshot
+        : L"";
     out.semanticPunctuation = c.qwenSemanticPunctuation;
     out.maxSentenceSilenceMs = c.qwenMaxSentenceSilenceMs;
     out.multiThresholdMode = c.qwenMultiThresholdMode;
@@ -200,6 +214,11 @@ private:
                     break;
                 }
                 if (event.failed) {
+                    QwenAudioSessionDebugLog(
+                        "event=task_failed retryable=%d error_code=%s message=%s",
+                        event.retryable ? 1 : 0,
+                        WideToUtf8(event.errorCode).c_str(),
+                        WideToUtf8(event.message).c_str());
                     std::lock_guard<std::mutex> lock(stateMutex);
                     taskError = event.message.empty() ? L"task failed" : event.message;
                     failed.store(true);
@@ -215,6 +234,12 @@ private:
             if (!client.SendAudio(pcm.data() + offset, bytes, error)) {
                 sendOk = false;
                 break;
+            }
+            // Replay the same real-time cadence as the primary stream. A
+            // burst upload can trigger provider-side backpressure and create
+            // a misleading task failure even when the socket is healthy.
+            if (offset + bytes < pcm.size()) {
+                Sleep(static_cast<DWORD>(std::clamp(config_.qwenChunkMs, 20, 1000)));
             }
         }
         if (sendOk && !abort_.load()) {
@@ -300,6 +325,14 @@ private:
         bool connected = false;
         bool connectRetryable = true;
 
+        if (config_.qwenEnableInputContext) {
+            QwenAudioSessionDebugLog(
+                "event=input_context using_snapshot=%d captured=%d chars=%zu",
+                config_.qwenInputContextSnapshotCaptured ? 1 : 0,
+                cfg_.inputContextText.empty() ? 0 : 1,
+                cfg_.inputContextText.size());
+        }
+
         if (cfg_.apiKey.empty()) {
             std::wstring missingKeyError = L"missing DashScope API key";
             BufferUntilStop(replay, clientBuffer_, false, missingKeyError);
@@ -309,13 +342,23 @@ private:
         }
 
         for (DWORD attempt = 0; attempt < kInitialConnectAttempts && !abort_.load(); ++attempt) {
+            QwenAudioSessionDebugLog("event=session_connect_attempt attempt=%lu max_attempts=%lu model=%s",
+                                     static_cast<unsigned long>(attempt + 1),
+                                     static_cast<unsigned long>(kInitialConnectAttempts),
+                                     WideToUtf8(cfg_.model).c_str());
             client = std::make_unique<qwen_audio_streaming::Client>(cfg_);
             SetActiveClient(client.get());
             if (client->Connect(connectError)) {
                 connected = true;
+                QwenAudioSessionDebugLog("event=session_connect_ok attempt=%lu",
+                                         static_cast<unsigned long>(attempt + 1));
                 break;
             }
             connectRetryable = client->LastFailureRetryable();
+            QwenAudioSessionDebugLog("event=session_connect_failed attempt=%lu retryable=%d error=%s",
+                                     static_cast<unsigned long>(attempt + 1),
+                                     connectRetryable ? 1 : 0,
+                                     WideToUtf8(connectError).c_str());
             client->Close();
             ClearActiveClient(client.get());
             if (!connectRetryable) break;
