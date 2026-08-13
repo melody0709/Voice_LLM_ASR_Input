@@ -6,6 +6,8 @@
 
 #include "asr_runtime_log.h"
 #include "qwen_audio_json.h"
+#include "qwen_context.h"
+#include "qwen_special_word_filter.h"
 #include "utils.h"
 #include "winhttp_websocket_transport.h"
 
@@ -14,11 +16,13 @@
 #include <cctype>
 #include <cmath>
 #include <cstdarg>
+#include <condition_variable>
 #include <cwctype>
 #include <initializer_list>
 #include <sstream>
 #include <mutex>
 #include <thread>
+#include <chrono>
 #include <vector>
 #include <winhttp.h>
 #include <objbase.h>
@@ -30,6 +34,12 @@ namespace {
 
 constexpr DWORD kConnectTimeoutMs = 8000;
 constexpr DWORD kSendTimeoutMs = 5000;
+
+// Settings changes invalidate the authenticated transport identity.  The
+// epoch is captured when a Client is created so an in-flight task that began
+// under the previous identity cannot be admitted to the idle pool after the
+// change, even if it finishes after InvalidateReusableConnections().
+std::atomic<uint64_t> g_reuseEpoch{1};
 
 struct Url { std::wstring host, path; INTERNET_PORT port = INTERNET_DEFAULT_HTTPS_PORT; };
 
@@ -158,12 +168,45 @@ std::string BuildRunTaskMessageImpl(const Config& cfg, const std::string& taskId
     json += ",\"multi_threshold_mode_enabled\":" + std::string(cfg.multiThresholdMode && !cfg.semanticPunctuation ? "true" : "false");
     if (cfg.heartbeat) json += ",\"heartbeat\":true";
     if (cfg.speechNoiseThresholdEnabled) json += ",\"speech_noise_threshold\":" + std::to_string(std::clamp(cfg.speechNoiseThreshold, -1.0f, 1.0f));
+    qwen_special_word_filter::Config specialFilter;
+    std::wstring filterError;
+    if (qwen_special_word_filter::Normalize(
+            cfg.specialWordReplaceList,
+            cfg.specialWordEmptyList,
+            cfg.systemReservedFilter,
+            specialFilter, &filterError) &&
+        qwen_special_word_filter::HasAny(specialFilter)) {
+        json += ",\"special_word_filter\":" +
+            qwen_special_word_filter::BuildJson(specialFilter);
+    }
     std::wstring context = Trim(cfg.inputContextText);
-    if (context.size() > 400) context.resize(400);
+    if (context.size() > qwen_context::kMaxContextCharacters) {
+        context = input_context::TakeFirstN(context, qwen_context::kMaxContextCharacters);
+    }
     if (context.empty()) {
         json += "},\"input\":{}}}";
     } else {
         json += "},\"input\":{\"context\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"";
+        json += EscapeJson(context);
+        json += "\"}]}]}}}";
+    }
+    return json;
+}
+
+std::string BuildContinueTaskMessageImpl(const std::string& taskId,
+                                         const std::wstring& contextText) {
+    std::wstring context = Trim(contextText);
+    if (context.size() > qwen_context::kMaxContextCharacters) {
+        context = input_context::TakeFirstN(context, qwen_context::kMaxContextCharacters);
+    }
+    std::string json = "{\"header\":{\"action\":\"continue-task\",\"task_id\":\"" +
+        taskId + "\",\"streaming\":\"duplex\"},\"payload\":{\"input\":{";
+    if (context.empty()) {
+        // An explicit empty context lets the worker clear a stale initial
+        // snapshot when the focused field was cleared before key release.
+        json += "\"context\":[]}}}";
+    } else {
+        json += "\"context\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"";
         json += EscapeJson(context);
         json += "\"}]}]}}}";
     }
@@ -200,6 +243,11 @@ Event ParseServerEventMessageImpl(const std::string& message) {
 
 std::string BuildRunTaskMessage(const Config& config, const std::string& taskId) {
     return BuildRunTaskMessageImpl(config, taskId);
+}
+
+std::string BuildContinueTaskMessage(const std::string& taskId,
+                                     const std::wstring& contextText) {
+    return BuildContinueTaskMessageImpl(taskId, contextText);
 }
 
 std::string BuildFinishTaskMessage(const std::string& taskId) {
@@ -248,10 +296,15 @@ bool TranscriptAccumulator::HasCommittedText() const {
 }
 
 struct Client::Impl {
-    explicit Impl(Config c) : config(std::move(c)) {}
+    explicit Impl(Config c)
+        : config(std::move(c)), reuseEpoch(g_reuseEpoch.load(std::memory_order_acquire)) {}
     Config config;
+    const uint64_t reuseEpoch;
     winhttp_websocket::Transport transport;
     std::atomic<bool> connected{false};
+    std::atomic<bool> taskFinished{false};
+    std::atomic<bool> reusable{false};
+    std::atomic<bool> reuseAllowed{true};
     std::atomic<bool> cancelled{false};
     std::atomic<bool> lastFailureRetryable{true};
     std::atomic<size_t> audioBytes{0};
@@ -277,6 +330,8 @@ bool Client::Connect(std::wstring& error) {
     const ULONGLONG connectStartTick = GetTickCount64();
     impl_->cancelled.store(false);
     impl_->connected.store(false);
+    impl_->taskFinished.store(false);
+    impl_->reuseAllowed.store(true);
     impl_->lastFailureRetryable.store(true);
     impl_->audioBytes.store(0);
     const std::string modelLog = WideToUtf8(impl_->config.model);
@@ -301,50 +356,62 @@ bool Client::Connect(std::wstring& error) {
                           modelLog.c_str(), TruncateLogText(error).c_str());
         return false;
     }
+    const bool reuseTransport = impl_->reusable.load() && impl_->transport.IsConnected();
+    // Once Connect claims an idle client, it is no longer visible to the
+    // manager.  Any failure below will close the transport instead of putting
+    // a half-started task back into the idle slot.
+    impl_->reusable.store(false);
     const std::string hostLog = WideToUtf8(url.host);
     const std::string pathLog = WideToUtf8(url.path);
-    QwenAudioDebugLog("event=connect_start attempt=%llu phase=handshake model=%s host=%s path=%s port=%u",
+    QwenAudioDebugLog("event=connect_start attempt=%llu phase=%s model=%s host=%s path=%s port=%u reuse=%d",
                       static_cast<unsigned long long>(impl_->config.attemptId),
+                      reuseTransport ? "reuse" : "handshake",
                       modelLog.c_str(), hostLog.c_str(), pathLog.c_str(),
-                      static_cast<unsigned>(url.port));
+                      static_cast<unsigned>(url.port), reuseTransport ? 1 : 0);
 
-    winhttp_websocket::ConnectOptions connectOptions;
-    connectOptions.host = url.host;
-    connectOptions.port = url.port;
-    connectOptions.pathAndQuery = url.path;
-    connectOptions.headers = L"Authorization: Bearer " + impl_->config.apiKey + L"\r\n";
-    connectOptions.secure = true;
-    connectOptions.timeoutMs = kConnectTimeoutMs;
-    connectOptions.closeTimeoutMs = 1000;
-    connectOptions.keepAliveMs = 30000;
     winhttp_websocket::HandshakeDiagnostics diagnostics;
-    if (!impl_->transport.Connect(connectOptions, diagnostics, error)) {
-        const bool statusRetryable = diagnostics.statusCode == 408 || diagnostics.statusCode == 409 ||
-            diagnostics.statusCode == 425 || diagnostics.statusCode == 429 ||
-            (diagnostics.statusCode >= 500 && diagnostics.statusCode <= 599);
-        if (diagnostics.statusCode != 0) {
-            impl_->lastFailureRetryable.store(statusRetryable);
+    if (!reuseTransport) {
+        winhttp_websocket::ConnectOptions connectOptions;
+        connectOptions.host = url.host;
+        connectOptions.port = url.port;
+        connectOptions.pathAndQuery = url.path;
+        connectOptions.headers = L"Authorization: Bearer " + impl_->config.apiKey + L"\r\n";
+        connectOptions.secure = true;
+        connectOptions.timeoutMs = kConnectTimeoutMs;
+        connectOptions.closeTimeoutMs = 1000;
+        connectOptions.keepAliveMs = 30000;
+        if (!impl_->transport.Connect(connectOptions, diagnostics, error)) {
+            const bool statusRetryable = diagnostics.statusCode == 408 || diagnostics.statusCode == 409 ||
+                diagnostics.statusCode == 425 || diagnostics.statusCode == 429 ||
+                (diagnostics.statusCode >= 500 && diagnostics.statusCode <= 599);
+            if (diagnostics.statusCode != 0) {
+                impl_->lastFailureRetryable.store(statusRetryable);
+            }
+            QwenAudioDebugLog(
+                "event=connect_end attempt=%llu ok=0 phase=handshake status=%lu retryable=%d request_id=%s trace_id=%s secure_flags=%lu body=%s error=%s elapsed_ms=%llu",
+                static_cast<unsigned long long>(impl_->config.attemptId),
+                static_cast<unsigned long>(diagnostics.statusCode),
+                impl_->lastFailureRetryable.load() ? 1 : 0,
+                WideToUtf8(diagnostics.requestId).c_str(),
+                WideToUtf8(diagnostics.traceId).c_str(),
+                static_cast<unsigned long>(diagnostics.secureFailureFlags),
+                diagnostics.responseBody.c_str(),
+                TruncateLogText(error).c_str(),
+                static_cast<unsigned long long>(GetTickCount64() - connectStartTick));
+            return false;
         }
         QwenAudioDebugLog(
-            "event=connect_end attempt=%llu ok=0 phase=handshake status=%lu retryable=%d request_id=%s trace_id=%s secure_flags=%lu body=%s error=%s elapsed_ms=%llu",
+            "event=handshake_response attempt=%llu phase=handshake status=%lu request_id=%s trace_id=%s secure_flags=%lu",
             static_cast<unsigned long long>(impl_->config.attemptId),
             static_cast<unsigned long>(diagnostics.statusCode),
-            impl_->lastFailureRetryable.load() ? 1 : 0,
             WideToUtf8(diagnostics.requestId).c_str(),
             WideToUtf8(diagnostics.traceId).c_str(),
-            static_cast<unsigned long>(diagnostics.secureFailureFlags),
-            diagnostics.responseBody.c_str(),
-            TruncateLogText(error).c_str(),
-            static_cast<unsigned long long>(GetTickCount64() - connectStartTick));
-        return false;
+            static_cast<unsigned long>(diagnostics.secureFailureFlags));
+    } else {
+        QwenAudioDebugLog("event=connection_reused attempt=%llu phase=transport_idle model=%s",
+                          static_cast<unsigned long long>(impl_->config.attemptId),
+                          modelLog.c_str());
     }
-    QwenAudioDebugLog(
-        "event=handshake_response attempt=%llu phase=handshake status=%lu request_id=%s trace_id=%s secure_flags=%lu",
-        static_cast<unsigned long long>(impl_->config.attemptId),
-        static_cast<unsigned long>(diagnostics.statusCode),
-        WideToUtf8(diagnostics.requestId).c_str(),
-        WideToUtf8(diagnostics.traceId).c_str(),
-        static_cast<unsigned long>(diagnostics.secureFailureFlags));
 
     const std::string taskId = TaskId();
     impl_->SetTaskId(taskId);
@@ -353,6 +420,10 @@ bool Client::Connect(std::wstring& error) {
     if (!impl_->transport.Send(WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
                                task.data(), task.size(), kSendTimeoutMs,
                                sendError, error)) {
+        impl_->transport.Close();
+        impl_->connected.store(false);
+        impl_->reusable.store(false);
+        impl_->reuseAllowed.store(false);
         QwenAudioDebugLog("event=connect_failed attempt=%llu task_id=%s phase=run_task_send error=%lu error_text=%s elapsed_ms=%llu",
                           static_cast<unsigned long long>(impl_->config.attemptId),
                           taskId.c_str(),
@@ -404,10 +475,16 @@ bool Client::Connect(std::wstring& error) {
 
 bool Client::SendAudio(const BYTE* data, size_t bytes, std::wstring& error) {
     if (!data || bytes == 0) return true;
+    if (impl_->cancelled.load() || !impl_->connected.load()) {
+        error = L"WebSocket operation cancelled";
+        return false;
+    }
     const std::string taskId = impl_->TaskIdSnapshot();
     DWORD sendError = NO_ERROR;
     if (!impl_->transport.Send(WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE,
                                data, bytes, kSendTimeoutMs, sendError, error)) {
+        impl_->reusable.store(false);
+        impl_->reuseAllowed.store(false);
         QwenAudioDebugLog("event=send_audio_failed attempt=%llu task_id=%s phase=streaming chunk_bytes=%zu audio_bytes=%zu error=%lu error_text=%s",
                           static_cast<unsigned long long>(impl_->config.attemptId),
                           taskId.c_str(), bytes, impl_->audioBytes.load(),
@@ -416,6 +493,38 @@ bool Client::SendAudio(const BYTE* data, size_t bytes, std::wstring& error) {
         return false;
     }
     impl_->audioBytes.fetch_add(bytes);
+    return true;
+}
+
+bool Client::ContinueContext(const std::wstring& contextText, std::wstring& error) {
+    error.clear();
+    if (impl_->cancelled.load() || !impl_->connected.load()) {
+        error = L"WebSocket operation cancelled";
+        return false;
+    }
+    if (impl_->taskFinished.load()) {
+        error = L"task already finished";
+        return false;
+    }
+    const std::string taskId = impl_->TaskIdSnapshot();
+    const std::string msg = BuildContinueTaskMessage(taskId, contextText);
+    DWORD sendError = NO_ERROR;
+    if (!impl_->transport.Send(WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
+                               msg.data(), msg.size(), kSendTimeoutMs,
+                               sendError, error)) {
+        impl_->reusable.store(false);
+        impl_->reuseAllowed.store(false);
+        QwenAudioDebugLog(
+            "event=continue_task_failed attempt=%llu task_id=%s phase=context_update error=%lu error_text=%s",
+            static_cast<unsigned long long>(impl_->config.attemptId), taskId.c_str(),
+            static_cast<unsigned long>(sendError),
+            WideToUtf8(winhttp_websocket::FormatWinHttpError(sendError)).c_str());
+        return false;
+    }
+    QwenAudioDebugLog(
+        "event=continue_task_sent attempt=%llu task_id=%s phase=context_update context_chars=%zu",
+        static_cast<unsigned long long>(impl_->config.attemptId), taskId.c_str(),
+        contextText.size());
     return true;
 }
 
@@ -431,10 +540,16 @@ bool Client::Poll(DWORD timeoutMs, Event& event, std::wstring& error) {
             return false;
         }
         if (received.kind == winhttp_websocket::ReceiveKind::Cancelled) {
+            impl_->reusable.store(false);
+            impl_->reuseAllowed.store(false);
+            impl_->connected.store(false);
             error = L"WebSocket operation cancelled";
             return false;
         }
         if (received.kind == winhttp_websocket::ReceiveKind::Error) {
+            impl_->reusable.store(false);
+            impl_->reuseAllowed.store(false);
+            impl_->connected.store(false);
             error = L"WebSocket receive failed: " +
                 winhttp_websocket::FormatWinHttpError(received.winhttpError);
             QwenAudioDebugLog("event=receive_failed attempt=%llu task_id=%s phase=streaming audio_bytes=%zu error=%lu error_text=%s timeout_ms=%lu",
@@ -446,6 +561,9 @@ bool Client::Poll(DWORD timeoutMs, Event& event, std::wstring& error) {
             return false;
         }
         if (received.kind == winhttp_websocket::ReceiveKind::PeerClosed) {
+            impl_->reusable.store(false);
+            impl_->reuseAllowed.store(false);
+            impl_->connected.store(false);
             event.failed = true;
             event.retryable = true;
             event.peerClosed = true;
@@ -467,6 +585,14 @@ bool Client::Poll(DWORD timeoutMs, Event& event, std::wstring& error) {
     }
     const Event parsed = ParseServerEventMessage(message);
     event = parsed;
+    if (event.taskFinished) {
+        impl_->taskFinished.store(true);
+    }
+    if (event.failed) {
+        impl_->taskFinished.store(false);
+        impl_->reusable.store(false);
+        impl_->reuseAllowed.store(false);
+    }
     if (event.failed) error = event.message;
     return true;
 }
@@ -482,6 +608,8 @@ bool Client::Finish(std::wstring& error) {
     if (!impl_->transport.Send(WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
                                msg.data(), msg.size(), kSendTimeoutMs,
                                sendError, error)) {
+        impl_->reusable.store(false);
+        impl_->reuseAllowed.store(false);
         QwenAudioDebugLog("event=finish_task_failed attempt=%llu task_id=%s phase=finalize audio_bytes=%zu error=%lu error_text=%s",
                           static_cast<unsigned long long>(impl_->config.attemptId),
                           taskId.c_str(), impl_->audioBytes.load(),
@@ -497,6 +625,9 @@ bool Client::Finish(std::wstring& error) {
 
 void Client::Abort() {
     impl_->cancelled.store(true);
+    impl_->reusable.store(false);
+    impl_->reuseAllowed.store(false);
+    impl_->taskFinished.store(false);
     const std::string taskId = impl_->TaskIdSnapshot();
     QwenAudioDebugLog("event=client_abort attempt=%llu task_id=%s phase=abort audio_bytes=%zu",
                       static_cast<unsigned long long>(impl_->config.attemptId),
@@ -506,12 +637,204 @@ void Client::Abort() {
 }
 
 void Client::Close() {
+    impl_->reusable.store(false);
+    impl_->reuseAllowed.store(false);
+    impl_->taskFinished.store(false);
     impl_->transport.Close();
     impl_->connected.store(false);
 }
 
+bool Client::PrepareForReuse() {
+    if (impl_->cancelled.load() || !impl_->connected.load() ||
+        !impl_->taskFinished.load() || !impl_->reuseAllowed.load() ||
+        !impl_->transport.IsConnected() ||
+        impl_->reuseEpoch != g_reuseEpoch.load(std::memory_order_acquire)) {
+        return false;
+    }
+    impl_->connected.store(false);
+    impl_->reusable.store(true);
+    QwenAudioDebugLog("event=connection_idle attempt=%llu task_id=%s idle_timeout_s=60",
+                      static_cast<unsigned long long>(impl_->config.attemptId),
+                      impl_->TaskIdSnapshot().c_str());
+    return true;
+}
+
+bool Client::IsReusable() const {
+    return impl_->reusable.load() && impl_->transport.IsConnected();
+}
+
+bool Client::MatchesReuseIdentity(const Config& config) const {
+    return impl_->config.apiKey == config.apiKey &&
+        Trim(impl_->config.baseUrl) == Trim(config.baseUrl) &&
+        impl_->config.model == config.model;
+}
+
+bool Client::ReconfigureForReuse(Config config) {
+    if (!IsReusable() || !MatchesReuseIdentity(config) ||
+        impl_->reuseEpoch != g_reuseEpoch.load(std::memory_order_acquire)) {
+        return false;
+    }
+    impl_->config = std::move(config);
+    impl_->cancelled.store(false);
+    impl_->connected.store(false);
+    impl_->taskFinished.store(true);
+    impl_->reuseAllowed.store(true);
+    impl_->audioBytes.store(0);
+    impl_->SetTaskId({});
+    return true;
+}
+
 bool Client::LastFailureRetryable() const {
     return impl_->lastFailureRetryable.load();
+}
+
+namespace {
+
+constexpr ULONGLONG kReusableIdleTimeoutMs = 60 * 1000;
+#if defined(VOXTYPE_DISABLE_QWEN_AUDIO_CONNECTION_REUSE)
+constexpr bool kConnectionReuseEnabled = false;
+#else
+constexpr bool kConnectionReuseEnabled = true;
+#endif
+
+class ReusableConnectionManager {
+public:
+    ReusableConnectionManager()
+        : janitor_([this] { JanitorLoop(); }) {}
+
+    ~ReusableConnectionManager() {
+        std::unique_ptr<Client> idle;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopping_ = true;
+            idle = std::move(idle_);
+        }
+        cv_.notify_all();
+        if (janitor_.joinable()) janitor_.join();
+        if (idle) idle->Close();
+    }
+
+    std::unique_ptr<Client> Acquire(const Config& config) {
+        if (!kConnectionReuseEnabled) return nullptr;
+
+        std::unique_ptr<Client> candidate;
+        std::unique_ptr<Client> discarded;
+        bool identityMismatch = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!idle_) return nullptr;
+            const ULONGLONG age = GetTickCount64() - idleSince_;
+            if (age >= kReusableIdleTimeoutMs) {
+                discarded = std::move(idle_);
+            } else if (!idle_->MatchesReuseIdentity(config)) {
+                identityMismatch = true;
+                discarded = std::move(idle_);
+            } else {
+                candidate = std::move(idle_);
+            }
+        }
+
+        if (discarded) {
+            QwenAudioDebugLog("event=connection_idle_discard reason=%s",
+                              identityMismatch ? "identity_changed" : "idle_timeout");
+            discarded->Close();
+        }
+        if (!candidate) return nullptr;
+        if (!candidate->ReconfigureForReuse(config)) {
+            QwenAudioDebugLog("event=connection_idle_discard reason=transport_not_reusable");
+            candidate->Close();
+            return nullptr;
+        }
+        QwenAudioDebugLog("event=connection_reuse_hit model=%s",
+                          WideToUtf8(config.model).c_str());
+        return candidate;
+    }
+
+    void Release(std::unique_ptr<Client> client) {
+        if (!client) return;
+        std::unique_ptr<Client> replaced;
+        bool accepted = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            // Keep the admission check under the same mutex as Invalidate():
+            // either the task wins the race and is immediately invalidated,
+            // or it observes the new epoch and is closed instead of becoming
+            // a stale idle candidate.
+            if (kConnectionReuseEnabled && client->PrepareForReuse()) {
+                replaced = std::move(idle_);
+                idleSince_ = GetTickCount64();
+                idle_ = std::move(client);
+                accepted = true;
+            }
+        }
+        if (!accepted) {
+            client->Close();
+            return;
+        }
+        if (replaced) {
+            QwenAudioDebugLog("event=connection_idle_replaced reason=new_successful_task");
+            replaced->Close();
+        }
+        cv_.notify_all();
+    }
+
+    void Invalidate() {
+        std::unique_ptr<Client> discarded;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            g_reuseEpoch.fetch_add(1, std::memory_order_acq_rel);
+            discarded = std::move(idle_);
+        }
+        if (discarded) {
+            QwenAudioDebugLog("event=connection_idle_discard reason=config_changed");
+            discarded->Close();
+        }
+    }
+
+private:
+    void JanitorLoop() {
+        while (true) {
+            std::unique_ptr<Client> expired;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                cv_.wait_for(lock, std::chrono::seconds(1), [this] { return stopping_; });
+                if (stopping_) return;
+                if (idle_ && GetTickCount64() - idleSince_ >= kReusableIdleTimeoutMs) {
+                    expired = std::move(idle_);
+                }
+            }
+            if (expired) {
+                QwenAudioDebugLog("event=connection_idle_discard reason=idle_timeout");
+                expired->Close();
+            }
+        }
+    }
+
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::unique_ptr<Client> idle_;
+    ULONGLONG idleSince_ = 0;
+    bool stopping_ = false;
+    std::thread janitor_;
+};
+
+ReusableConnectionManager& ConnectionManager() {
+    static ReusableConnectionManager manager;
+    return manager;
+}
+
+} // namespace
+
+std::unique_ptr<Client> AcquireReusableClient(const Config& config) {
+    return ConnectionManager().Acquire(config);
+}
+
+void ReleaseReusableClient(std::unique_ptr<Client> client) {
+    ConnectionManager().Release(std::move(client));
+}
+
+void InvalidateReusableConnections() {
+    ConnectionManager().Invalidate();
 }
 
 TestResult TestConnection(const Config& cfg) {

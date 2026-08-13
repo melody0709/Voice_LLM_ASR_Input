@@ -17,6 +17,12 @@ struct Config {
     std::wstring vocabulary;
     // Optional focused input-field context sent in run-task.payload.input.
     std::wstring inputContextText;
+    // Optional one-shot context refresh sent while the task is still running.
+    bool enableContinueContext = false;
+    // Audio 3 special-word filter, represented as newline-delimited lists.
+    std::wstring specialWordReplaceList;
+    std::wstring specialWordEmptyList;
+    bool systemReservedFilter = false;
     bool semanticPunctuation = false;
     int maxSentenceSilenceMs = 1300;
     bool multiThresholdMode = false;
@@ -61,6 +67,8 @@ private:
 // Pure protocol helpers are exposed so offline tests can validate the exact
 // JSON/frame contract without opening a network connection.
 std::string BuildRunTaskMessage(const Config& config, const std::string& taskId);
+std::string BuildContinueTaskMessage(const std::string& taskId,
+                                     const std::wstring& contextText);
 std::string BuildFinishTaskMessage(const std::string& taskId);
 Event ParseServerEventMessage(const std::string& message);
 
@@ -73,10 +81,21 @@ public:
 
     bool Connect(std::wstring& error);
     bool SendAudio(const BYTE* data, size_t bytes, std::wstring& error);
+    bool ContinueContext(const std::wstring& contextText, std::wstring& error);
     bool Poll(DWORD timeoutMs, Event& event, std::wstring& error);
     bool Finish(std::wstring& error);
     void Abort();
     void Close();
+    // Mark a successfully finished task as idle.  The underlying WebSocket
+    // remains open and may be used for a later run-task with the same
+    // endpoint/model/API identity.
+    bool PrepareForReuse();
+    bool IsReusable() const;
+    bool MatchesReuseIdentity(const Config& config) const;
+    // Update task-specific parameters while the client is idle.  This keeps
+    // vocabulary/language/context changes from being inherited by the next
+    // recording while retaining the authenticated transport.
+    bool ReconfigureForReuse(Config config);
     // Valid after Connect() returns false. This distinguishes a transient
     // transport/handshake failure from a server-side task rejection.
     bool LastFailureRetryable() const;
@@ -88,5 +107,12 @@ private:
 
 struct TestResult { bool ok = false; std::wstring message; };
 TestResult TestConnection(const Config& config);
+
+// Audio 3 Streaming-only idle connection manager.  The manager never owns
+// Qwen3 Realtime or HTTP clients; callers explicitly transfer a successfully
+// finalized streaming client into and out of it.
+std::unique_ptr<Client> AcquireReusableClient(const Config& config);
+void ReleaseReusableClient(std::unique_ptr<Client> client);
+void InvalidateReusableConnections();
 
 } // namespace qwen_audio_streaming

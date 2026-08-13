@@ -6,6 +6,7 @@
 #include "cloud_asr_common.h"
 #include "globals.h"
 #include "pending_pcm_buffer.h"
+#include "qwen_context.h"
 #include "qwen_finalize_policy.h"
 #include "qwen_audio_streaming.h"
 
@@ -46,6 +47,15 @@ qwen_audio_streaming::Config BuildConfig(const Config& c) {
     out.inputContextText = c.qwenInputContextSnapshotCaptured
         ? c.qwenInputContextSnapshot
         : L"";
+    // A dynamic context refresh is only meaningful when the user has also
+    // opted in to sending focused-field context at all.  Keep the privacy
+    // boundary explicit even if an old config file enables only the refresh
+    // flag.
+    out.enableContinueContext =
+        c.qwenEnableContinueContext && c.qwenEnableInputContext;
+    out.specialWordReplaceList = c.qwenSpecialWordReplaceList;
+    out.specialWordEmptyList = c.qwenSpecialWordEmptyList;
+    out.systemReservedFilter = c.qwenSystemReservedFilter;
     out.semanticPunctuation = c.qwenSemanticPunctuation;
     out.maxSentenceSilenceMs = c.qwenMaxSentenceSilenceMs;
     out.multiThresholdMode = c.qwenMultiThresholdMode;
@@ -140,6 +150,22 @@ private:
     void AbortActiveClient() {
         std::lock_guard<std::mutex> lock(clientMutex_);
         if (activeClient_) activeClient_->Abort();
+    }
+
+    // Ownership transfer and active-client clearing must be one serialized
+    // operation.  Otherwise Session::Abort() could retain a raw pointer while
+    // the idle manager acquires (or destroys) the same Client.
+    void FinishClient(std::unique_ptr<qwen_audio_streaming::Client>& client,
+                      bool allowReuse) {
+        std::lock_guard<std::mutex> lock(clientMutex_);
+        qwen_audio_streaming::Client* expected = client.get();
+        if (allowReuse && !abort_.load()) {
+            activeClient_ = nullptr;
+            qwen_audio_streaming::ReleaseReusableClient(std::move(client));
+        } else {
+            if (client) client->Close();
+            if (activeClient_ == expected) activeClient_ = nullptr;
+        }
     }
 
     static bool AppendReplay(CloudAsrReplayBuffer& replay,
@@ -347,7 +373,13 @@ private:
                                      static_cast<unsigned long>(attempt + 1),
                                      static_cast<unsigned long>(kInitialConnectAttempts),
                                      WideToUtf8(cfg_.model).c_str());
-            client = std::make_unique<qwen_audio_streaming::Client>(cfg_);
+            client = qwen_audio_streaming::AcquireReusableClient(cfg_);
+            if (!client) {
+                client = std::make_unique<qwen_audio_streaming::Client>(cfg_);
+            } else {
+                QwenAudioSessionDebugLog("event=session_connection_reuse_candidate attempt=%lu",
+                                         static_cast<unsigned long>(attempt + 1));
+            }
             SetActiveClient(client.get());
             if (client->Connect(connectError)) {
                 connected = true;
@@ -536,39 +568,74 @@ private:
         }
 
         if (!noSpeech.load() && !failed && !drainFailed.load() && !abort_.load()) {
-            std::wstring finishError;
-            if (!client->Finish(finishError)) {
-                {
-                    std::lock_guard<std::mutex> lock(stateMutex);
-                    error = finishError.empty() ? L"finish-task send failed" : finishError;
+            // The focused control may have changed while the user was
+            // holding the hotkey.  Refresh it once, from the session worker,
+            // immediately before finish-task.  This keeps UI Automation and
+            // network writes out of the audio callback and avoids polling.
+            if (cfg_.enableContinueContext && !taskFinished.load() && !abort_.load()) {
+                InputContextResult diagnostics;
+                const std::wstring refreshed =
+                    qwen_context::CaptureInputFieldText(&diagnostics);
+                const bool readable = diagnostics.successLayer >= 0 &&
+                    !diagnostics.timedOut && !diagnostics.isPassword;
+                if (readable && refreshed != cfg_.inputContextText) {
+                    std::wstring contextError;
+                    if (!client->ContinueContext(refreshed, contextError)) {
+                        QwenAudioSessionDebugLog(
+                            "event=continue_task_ignored attempt=%llu reason=send_failed error_chars=%zu",
+                            static_cast<unsigned long long>(cfg_.attemptId),
+                            contextError.size());
+                    } else {
+                        QwenAudioSessionDebugLog(
+                            "event=continue_task_context_refreshed attempt=%llu chars=%zu layer=%d",
+                            static_cast<unsigned long long>(cfg_.attemptId), refreshed.size(),
+                            diagnostics.successLayer);
+                    }
                 }
-                failed = true;
-                retryWithReplay = replayEnabled;
-            } else {
+            }
+            // A provider may have completed the task while the final PCM was
+            // being drained.  In that case the terminal event is already the
+            // finalization handshake; do not send finish-task to a completed
+            // task a second time.
+            if (taskFinished.load()) {
                 finishTaskSent = true;
-                const DWORD timeout = CurrentWatchdogMs();
-                const ULONGLONG deadline = GetTickCount64() + timeout;
-                while (!abort_.load() && !drainFailed.load() && !taskFinished.load() &&
-                       GetTickCount64() < deadline) {
-                    Sleep(25);
-                }
-                if (!taskFinished.load()) {
-                    if (terminalReason.load() == qwen_finalize_policy::TerminalReason::None) {
-                        terminalReason.store(qwen_finalize_policy::TerminalReason::Timeout);
+            } else {
+                std::wstring finishError;
+                if (!client->Finish(finishError)) {
+                    {
+                        std::lock_guard<std::mutex> lock(stateMutex);
+                        error = finishError.empty() ? L"finish-task send failed" : finishError;
                     }
                     failed = true;
                     retryWithReplay = replayEnabled;
-                    std::lock_guard<std::mutex> lock(stateMutex);
-                    if (error.empty()) error = L"timed out waiting for task-finished";
+                } else {
+                    finishTaskSent = true;
+                    const DWORD timeout = CurrentWatchdogMs();
+                    const ULONGLONG deadline = GetTickCount64() + timeout;
+                    while (!abort_.load() && !drainFailed.load() && !taskFinished.load() &&
+                           GetTickCount64() < deadline) {
+                        Sleep(25);
+                    }
+                    if (!taskFinished.load()) {
+                        if (terminalReason.load() == qwen_finalize_policy::TerminalReason::None) {
+                            terminalReason.store(qwen_finalize_policy::TerminalReason::Timeout);
+                        }
+                        failed = true;
+                        retryWithReplay = replayEnabled;
+                        std::lock_guard<std::mutex> lock(stateMutex);
+                        if (error.empty()) error = L"timed out waiting for task-finished";
+                    }
                 }
             }
         }
 
+        const bool successfulTask = !failed && !drainFailed.load() &&
+            !noSpeech.load() && !abort_.load() && finishTaskSent &&
+            taskFinished.load();
         drainDone.store(true);
-        if (failed || drainFailed.load() || noSpeech.load() || abort_.load()) client->Abort();
+        if (!successfulTask || abort_.load()) client->Abort();
         if (drain.joinable()) drain.join();
-        client->Close();
-        ClearActiveClient(client.get());
+        FinishClient(client, successfulTask);
 
         std::wstring finalText;
         std::wstring committedText;

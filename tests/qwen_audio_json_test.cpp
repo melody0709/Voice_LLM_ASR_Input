@@ -10,6 +10,7 @@
 #include "qwen_asr.h"
 #include "qwen_context.h"
 #include "qwen_finalize_policy.h"
+#include "qwen_special_word_filter.h"
 #include "winhttp_websocket_transport.h"
 #include "cloud_asr_common.h"
 #include "pending_pcm_buffer.h"
@@ -438,6 +439,23 @@ int main() {
         const std::wstring sanitized = qwen_context::SanitizeText(input);
         Expect(sanitized.size() == 400 && sanitized.front() == L'甲' && sanitized.back() == L'甲',
                "context keeps the first 400 characters and drops character 401");
+
+        std::wstring emojiBoundary(399, L'a');
+        emojiBoundary.push_back(static_cast<wchar_t>(0xD83D));
+        emojiBoundary.push_back(static_cast<wchar_t>(0xDE00));
+        const std::wstring safePrefix = input_context::TakeFirstN(emojiBoundary, 400);
+        Expect(safePrefix.size() == 399 &&
+                   (safePrefix.empty() || !input_context::IsHighSurrogate(safePrefix.back())) &&
+                   (safePrefix.empty() || !input_context::IsLowSurrogate(safePrefix.back())),
+               "context truncation never returns a lone UTF-16 surrogate");
+
+        qwen_audio_http::Config longHttp;
+        longHttp.model = L"qwen-audio-3.0-asr-flash";
+        longHttp.inputContextText = std::wstring(401, L'乙');
+        const std::string httpContext = qwen_audio_http::BuildRequestJsonForTest(longHttp, "AQID");
+        Expect(httpContext.find(WideToUtf8(std::wstring(400, L'乙'))) != std::string::npos &&
+                   httpContext.find(WideToUtf8(std::wstring(401, L'乙'))) == std::string::npos,
+               "HTTP Audio 3 context is capped at 400 characters");
     }
 
     {
@@ -459,6 +477,64 @@ int main() {
         const std::string finishTask = qwen_audio_streaming::BuildFinishTaskMessage("task-1");
         Expect(qwen_audio_json::IsValidValue(Utf8ToWide(finishTask)),
                "streaming finish-task JSON is syntactically valid");
+
+        const std::string continueTask = qwen_audio_streaming::BuildContinueTaskMessage(
+            "task-1", L"新的上下文 \"with quotes\"");
+        Expect(qwen_audio_json::IsValidValue(Utf8ToWide(continueTask)) &&
+                   continueTask.find("\"action\":\"continue-task\"") != std::string::npos &&
+                   continueTask.find("input_text") != std::string::npos &&
+                   continueTask.find("\\\"with quotes\\\"") != std::string::npos,
+               "continue-task carries escaped input context using the documented action");
+        const std::string clearContext =
+            qwen_audio_streaming::BuildContinueTaskMessage("task-1", L"");
+        Expect(qwen_audio_json::IsValidValue(Utf8ToWide(clearContext)) &&
+                   clearContext.find("\"context\":[]") != std::string::npos,
+               "continue-task can explicitly clear a previous context snapshot");
+
+        const std::string longContinue = qwen_audio_streaming::BuildContinueTaskMessage(
+            "task-1", std::wstring(401, L'丙'));
+        Expect(qwen_audio_json::IsValidValue(Utf8ToWide(longContinue)) &&
+                   longContinue.find(WideToUtf8(std::wstring(400, L'丙'))) != std::string::npos &&
+                   longContinue.find(WideToUtf8(std::wstring(401, L'丙'))) == std::string::npos,
+               "continue-task context is capped at 400 characters");
+
+        qwen_special_word_filter::Config filter;
+        std::wstring filterError;
+        Expect(qwen_special_word_filter::Normalize(
+                   L"机密\n机密\n含引号\"",
+                   L"删除词",
+                   true, filter, &filterError) &&
+                   filter.replaceWords.size() == 2 && filter.emptyWords.size() == 1,
+               "special-word filter trims and de-duplicates lists");
+        const std::string filterJson = qwen_special_word_filter::BuildJson(filter);
+        Expect(qwen_audio_json::IsValidValue(Utf8ToWide(filterJson)) &&
+                   filterJson.find("filter_with_signed") != std::string::npos &&
+                   filterJson.find("\"system_reserved_filter\":true") != std::string::npos,
+               "special-word filter uses the official JSON shape");
+
+        qwen_special_word_filter::Config overlap;
+        Expect(!qwen_special_word_filter::Normalize(L"same", L"same", false, overlap, &filterError),
+               "special-word filter rejects words present in both lists");
+        std::wstring thirtyTwo;
+        for (int i = 0; i < 32; ++i) {
+            if (!thirtyTwo.empty()) thirtyTwo.push_back(L'\n');
+            thirtyTwo += L"w" + std::to_wstring(i);
+        }
+        Expect(qwen_special_word_filter::Normalize(thirtyTwo, L"", false, overlap, &filterError),
+               "special-word filter accepts exactly 32 words");
+        Expect(!qwen_special_word_filter::Normalize(thirtyTwo + L"\nw32", L"", false, overlap, &filterError),
+               "special-word filter rejects more than 32 words");
+
+        qwen_audio_streaming::Config noFilter;
+        noFilter.model = L"qwen-audio-3.0-asr-flash-streaming";
+        const std::string noFilterTask = qwen_audio_streaming::BuildRunTaskMessage(noFilter, "task-empty-filter");
+        Expect(noFilterTask.find("special_word_filter") == std::string::npos,
+               "empty special-word filter is omitted from run-task");
+        noFilter.specialWordReplaceList = L"敏感";
+        const std::string withFilterTask = qwen_audio_streaming::BuildRunTaskMessage(noFilter, "task-filter");
+        Expect(withFilterTask.find("special_word_filter") != std::string::npos &&
+                   qwen_audio_json::IsValidValue(Utf8ToWide(withFilterTask)),
+               "Audio 3 streaming run-task includes a valid special-word filter");
 
         const auto started = qwen_audio_streaming::ParseServerEventMessage(
             R"({"header":{"event":"task-started"},"payload":{}})");

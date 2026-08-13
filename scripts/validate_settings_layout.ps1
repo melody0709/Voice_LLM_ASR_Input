@@ -35,8 +35,11 @@ $qwenAdvancedHintY = Get-UiInt 'QwenAdvancedHintY'
 $qwenHintH = Get-UiInt 'QwenHintH'
 $qwenDialogW = Get-UiInt 'QwenAdvancedDialogW'
 $qwenDialogH = Get-UiInt 'QwenAdvancedDialogH'
+$qwenDialogNonClientReserveH = Get-UiInt 'QwenAdvancedDialogNonClientReserveH'
 $qwenDialogInputLeft = Get-UiInt 'QwenAdvancedDialogInputLeft'
 $qwenDialogInputW = Get-UiInt 'QwenAdvancedDialogInputW'
+$qwenDialogSpecialY = Get-UiInt 'QwenAdvancedDialogSpecialY'
+$qwenDialogSpecialH = Get-UiInt 'QwenAdvancedDialogSpecialH'
 $qwenDialogFooterY = Get-UiInt 'QwenAdvancedDialogFooterY'
 $actionButtonH = Get-UiInt 'ActionBtnH'
 
@@ -57,8 +60,12 @@ if (($qwenAdvancedHintY + (2 * $qwenHintH)) -gt ($footerMinTop - 4)) {
 if (($qwenDialogInputLeft + $qwenDialogInputW) -gt ($qwenDialogW - $margin)) {
     throw 'Qwen Advanced input fields exceed the dialog width'
 }
-if (($qwenDialogFooterY + $actionButtonH) -gt ($qwenDialogH - $margin)) {
-    throw 'Qwen Advanced footer buttons exceed the dialog height'
+$qwenDialogClientBottom = $qwenDialogH - $qwenDialogNonClientReserveH
+if (($qwenDialogSpecialY + $qwenDialogSpecialH) -gt ($qwenDialogFooterY - 8)) {
+    throw 'Qwen Advanced sensitive-word fields overlap the footer buttons'
+}
+if (($qwenDialogFooterY + $actionButtonH) -gt ($qwenDialogClientBottom - $margin)) {
+    throw 'Qwen Advanced footer buttons exceed the estimated client area'
 }
 
 foreach ($dpi in @(96, 144, 192, 288)) {
@@ -75,8 +82,11 @@ foreach ($dpi in @(96, 144, 192, 288)) {
     if ((Scale ($qwenDialogInputLeft + $qwenDialogInputW) $scale) -gt (Scale ($qwenDialogW - $margin) $scale)) {
         throw "Qwen Advanced inputs overflow the dialog at $dpi DPI"
     }
-    if ((Scale ($qwenDialogFooterY + $actionButtonH) $scale) -gt (Scale ($qwenDialogH - $margin) $scale)) {
-        throw "Qwen Advanced footer overflows the dialog at $dpi DPI"
+    if ((Scale ($qwenDialogSpecialY + $qwenDialogSpecialH) $scale) -gt (Scale ($qwenDialogFooterY - 8) $scale)) {
+        throw "Qwen Advanced sensitive-word fields overlap the footer at $dpi DPI"
+    }
+    if ((Scale ($qwenDialogFooterY + $actionButtonH) $scale) -gt (Scale ($qwenDialogClientBottom - $margin) $scale)) {
+        throw "Qwen Advanced footer overflows the estimated client area at $dpi DPI"
     }
 }
 

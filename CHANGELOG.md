@@ -8,6 +8,7 @@
 
 - **Qwen Audio 3 profiles**: Added model-profile routing for the legacy DashScope realtime model, `qwen-audio-3.0-asr-flash` HTTP batch recognition, and `qwen-audio-3.0-asr-flash-streaming` binary-PCM realtime recognition. New installs default to Audio 3 streaming while existing Qwen configuration is preserved.
 - **Qwen Audio settings**: Added a model dropdown, Beijing Workspace HTTP/streaming endpoints, language hints, vocabulary ID, Audio 3 immediate-vocabulary JSON, semantic punctuation, sentence silence, multi-threshold, heartbeat, and speech-noise-threshold controls.
+- **Qwen Audio 3 optimization**: Focused-field context now uses the documented 400-character limit with UTF-16 boundary protection; Audio 3 Streaming adds opt-in one-shot `continue-task` context refresh, special-word filtering, effective-language Settings feedback, and a bounded 60-second idle WebSocket reuse manager. Qwen3 Realtime remains Manual and non-reusable.
 
 ### Fixed
 

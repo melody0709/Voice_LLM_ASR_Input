@@ -8,6 +8,7 @@
 #include "utils.h"
 #include "qwen_free_postprocess.h"
 #include "qwen_audio_profile.h"
+#include "qwen_special_word_filter.h"
 #include "asr_runtime_log.h"
 
 #include <algorithm>
@@ -529,6 +530,35 @@ void LoadConfig() {
     g_config.qwenSpeechNoiseThresholdEnabled = ExtractJsonBool(json, "qwen_speech_noise_threshold_enabled", g_config.qwenSpeechNoiseThresholdEnabled);
     g_config.qwenSpeechNoiseThreshold = std::clamp(ExtractJsonFloat(json, "qwen_speech_noise_threshold", g_config.qwenSpeechNoiseThreshold), -1.0f, 1.0f);
     g_config.qwenEnableInputContext = ExtractJsonBool(json, "qwen_enable_input_context", g_config.qwenEnableInputContext);
+    g_config.qwenEnableContinueContext = ExtractJsonBool(json, "qwen_enable_continue_context", g_config.qwenEnableContinueContext);
+    // Dynamic refresh must never bypass the primary focused-field context
+    // opt-in, including when loading an older hand-edited config file.
+    g_config.qwenEnableContinueContext =
+        g_config.qwenEnableContinueContext && g_config.qwenEnableInputContext;
+    g_config.qwenSpecialWordReplaceList = Utf8ToWide(ExtractJsonString(
+        json, "qwen_special_word_replace", WideToUtf8(g_config.qwenSpecialWordReplaceList)));
+    g_config.qwenSpecialWordEmptyList = Utf8ToWide(ExtractJsonString(
+        json, "qwen_special_word_empty", WideToUtf8(g_config.qwenSpecialWordEmptyList)));
+    g_config.qwenSystemReservedFilter = ExtractJsonBool(
+        json, "qwen_system_reserved_filter", g_config.qwenSystemReservedFilter);
+    {
+        qwen_special_word_filter::Config normalized;
+        std::wstring filterError;
+        if (qwen_special_word_filter::Normalize(
+                g_config.qwenSpecialWordReplaceList,
+                g_config.qwenSpecialWordEmptyList,
+                g_config.qwenSystemReservedFilter,
+                normalized, &filterError)) {
+            g_config.qwenSpecialWordReplaceList =
+                qwen_special_word_filter::JoinLines(normalized.replaceWords);
+            g_config.qwenSpecialWordEmptyList =
+                qwen_special_word_filter::JoinLines(normalized.emptyWords);
+        } else {
+            g_config.qwenSpecialWordReplaceList.clear();
+            g_config.qwenSpecialWordEmptyList.clear();
+            g_config.qwenSystemReservedFilter = false;
+        }
+    }
 
     // Older builds used the public DashScope endpoint for the realtime
     // profile.  Migrate only that exact legacy default; preserve any explicit
@@ -718,6 +748,10 @@ void SaveConfig() {
          << "  \"qwen_speech_noise_threshold_enabled\": " << (g_config.qwenSpeechNoiseThresholdEnabled ? "true" : "false") << ",\n"
          << "  \"qwen_speech_noise_threshold\": " << g_config.qwenSpeechNoiseThreshold << ",\n"
          << "  \"qwen_enable_input_context\": " << (g_config.qwenEnableInputContext ? "true" : "false") << ",\n"
+         << "  \"qwen_enable_continue_context\": " << (g_config.qwenEnableContinueContext ? "true" : "false") << ",\n"
+         << "  \"qwen_special_word_replace\": \"" << EscapeJson(g_config.qwenSpecialWordReplaceList) << "\",\n"
+         << "  \"qwen_special_word_empty\": \"" << EscapeJson(g_config.qwenSpecialWordEmptyList) << "\",\n"
+         << "  \"qwen_system_reserved_filter\": " << (g_config.qwenSystemReservedFilter ? "true" : "false") << ",\n"
          << "  \"mimo_api_key\": \"" << EscapeJson(llm::EncryptString(g_config.mimoApiKey)) << "\",\n"
          << "  \"mimo_base_url\": \"" << EscapeJson(g_config.mimoBaseUrl) << "\",\n"
          << "  \"mimo_model\": \"" << EscapeJson(g_config.mimoModel) << "\",\n"

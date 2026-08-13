@@ -137,7 +137,10 @@ constexpr int QwenLanguageHintsHintY = 486;
 constexpr int QwenAdvancedButtonY = 538;
 constexpr int QwenAdvancedHintY = 578;
 constexpr int QwenAdvancedDialogW = 720;
-constexpr int QwenAdvancedDialogH = 700;
+constexpr int QwenAdvancedDialogH = 860;
+// QwenAdvancedDialogH is the outer window height. Reserve room for the
+// caption/frame before validating client-area controls.
+constexpr int QwenAdvancedDialogNonClientReserveH = 48;
 constexpr int QwenAdvancedDialogLeft = 24;
 constexpr int QwenAdvancedDialogLabelW = 620;
 constexpr int QwenAdvancedDialogInputLeft = 170;
@@ -150,14 +153,19 @@ constexpr int QwenAdvancedDialogVocabJsonY = 174;
 constexpr int QwenAdvancedDialogVocabJsonH = 96;
 constexpr int QwenAdvancedDialogVocabJsonHintY = 276;
 constexpr int QwenAdvancedDialogStreamingGroupY = 330;
-constexpr int QwenAdvancedDialogStreamingGroupH = 270;
+constexpr int QwenAdvancedDialogStreamingGroupH = 430;
 constexpr int QwenAdvancedDialogStreamingRow1Y = 362;
 constexpr int QwenAdvancedDialogStreamingHint1Y = 396;
 constexpr int QwenAdvancedDialogStreamingRow2Y = 448;
 constexpr int QwenAdvancedDialogStreamingHint2Y = 482;
 constexpr int QwenAdvancedDialogNoiseY = 534;
 constexpr int QwenAdvancedDialogNoiseHintY = 568;
-constexpr int QwenAdvancedDialogFooterY = 610;
+constexpr int QwenAdvancedDialogContinueY = 604;
+constexpr int QwenAdvancedDialogContinueHintY = 632;
+constexpr int QwenAdvancedDialogSpecialLabelY = 682;
+constexpr int QwenAdvancedDialogSpecialY = 710;
+constexpr int QwenAdvancedDialogSpecialH = 42;
+constexpr int QwenAdvancedDialogFooterY = 764;
 constexpr int QwenFreeShellPathW = 400;
 constexpr int QwenFreeShellBrowseGap = 12;
 constexpr int QwenFreeOptionCheckW = 200;
@@ -276,6 +284,10 @@ constexpr int IDC_VOLC_OPEN_LOG = 2129;
 constexpr int IDC_QWEN_INPUT_CONTEXT = 2130;
 constexpr int IDC_QWEN_LANGUAGE_HINTS_RESET = 2131;
 constexpr int IDC_QWEN_ADVANCED = 2132;
+constexpr int IDC_QWEN_CONTINUE_CONTEXT = 2133;
+constexpr int IDC_QWEN_SPECIAL_REPLACE = 2134;
+constexpr int IDC_QWEN_SPECIAL_EMPTY = 2135;
+constexpr int IDC_QWEN_SYSTEM_FILTER = 2136;
 constexpr int IDC_MIMO_API_KEY = 2090;
 constexpr int IDC_MIMO_SHOW_KEY = 2091;
 constexpr int IDC_MIMO_BASE_URL = 2092;
@@ -362,6 +374,15 @@ struct Config {
     bool qwenHeartbeat = false;
     bool qwenSpeechNoiseThresholdEnabled = false;
     float qwenSpeechNoiseThreshold = 0.0f;
+    // Audio 3-only optional context refresh. It is deliberately opt-in:
+    // when enabled, the streaming worker may send one final focused-field
+    // snapshot with continue-task before finish-task.
+    bool qwenEnableContinueContext = false;
+    // Audio 3-only special-word filter lists. Each field is newline-delimited
+    // and remains empty unless the user explicitly configures filtering.
+    std::wstring qwenSpecialWordReplaceList;
+    std::wstring qwenSpecialWordEmptyList;
+    bool qwenSystemReservedFilter = false;
     // Sending the focused input-field text is opt-in.  Password controls and
     // failed/timed-out UI Automation reads are always excluded.
     bool qwenEnableInputContext = false;

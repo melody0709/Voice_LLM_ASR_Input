@@ -8,6 +8,7 @@
 #include "cloud_asr_common.h"
 #include "cloud_http_common.h"
 #include "qwen_audio_json.h"
+#include "qwen_context.h"
 #include "utils.h"
 
 #include <algorithm>
@@ -161,7 +162,9 @@ Endpoint ParseEndpoint(std::wstring url) {
 std::string BuildRequestImpl(const Config& cfg, const std::string& audio) {
     std::string json = "{\"model\":\"" + JsonEscape(cfg.model) + "\",\"input\":{\"messages\":[";
     std::wstring context = Trim(cfg.inputContextText);
-    if (context.size() > 400) context.resize(400);
+    if (context.size() > qwen_context::kMaxContextCharacters) {
+        context = input_context::TakeFirstN(context, qwen_context::kMaxContextCharacters);
+    }
     if (!context.empty()) {
         json += "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"" +
             JsonEscape(context) + "\"}]},";

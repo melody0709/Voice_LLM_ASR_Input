@@ -14,6 +14,8 @@
 #include <future>
 #include <atomic>
 #include <chrono>
+#include <algorithm>
+#include <limits>
 
 #pragma comment(lib, "uiautomationcore.lib")
 #pragma comment(lib, "oleacc.lib")
@@ -52,9 +54,37 @@ inline std::wstring TruncateForDisplay(const std::wstring& text, size_t maxLen =
     return L"..." + text.substr(text.size() - maxLen + 3);
 }
 
+inline bool IsHighSurrogate(wchar_t ch) {
+    return ch >= 0xD800 && ch <= 0xDBFF;
+}
+
+inline bool IsLowSurrogate(wchar_t ch) {
+    return ch >= 0xDC00 && ch <= 0xDFFF;
+}
+
+// `std::wstring` is UTF-16 on Windows.  UI Automation reports character
+// counts in a way that is usually compatible with UTF-16 code units, but a
+// suffix/prefix cut must still avoid returning a lone surrogate.  Keeping
+// these helpers here lets all provider-specific limits share the same safe
+// boundary behavior.
+inline std::wstring TakeFirstN(const std::wstring& text, size_t n) {
+    if (text.size() <= n) return text;
+    size_t end = n;
+    if (end > 0 && end < text.size() && IsHighSurrogate(text[end - 1]) &&
+        IsLowSurrogate(text[end])) {
+        --end;
+    }
+    return text.substr(0, end);
+}
+
 inline std::wstring TakeLastN(const std::wstring& text, size_t n) {
     if (text.size() <= n) return text;
-    return text.substr(text.size() - n);
+    size_t start = text.size() - n;
+    if (start > 0 && start < text.size() && IsLowSurrogate(text[start]) &&
+        IsHighSurrogate(text[start - 1])) {
+        ++start;
+    }
+    return text.substr(start);
 }
 
 inline std::set<HWND> s_triggeredWindows;
@@ -97,7 +127,9 @@ inline bool IsPasswordElement(IUIAutomationElement* pElement) {
     return false;
 }
 
-inline bool TryGetValueText(IUIAutomationElement* pElement, InputContextResult& result) {
+inline bool TryGetValueText(IUIAutomationElement* pElement,
+                            size_t maxTextCharacters,
+                            InputContextResult& result) {
     if (IsPasswordElement(pElement)) {
         result.isPassword = true;
         result.failReason = "PASSWORD";
@@ -110,7 +142,7 @@ inline bool TryGetValueText(IUIAutomationElement* pElement, InputContextResult& 
         std::wstring text = varValue.bstrVal;
         VariantClear(&varValue);
         result.textLength = static_cast<int>(text.size());
-        result.inputFieldText = TakeLastN(text, 200);
+        result.inputFieldText = TakeLastN(text, maxTextCharacters);
         result.successLayer = 2;
         return true;
     }
@@ -118,7 +150,9 @@ inline bool TryGetValueText(IUIAutomationElement* pElement, InputContextResult& 
     return false;
 }
 
-inline bool TryTextPatternFromPoint(IUIAutomationElement* pElement, POINT pt, InputContextResult& result) {
+inline bool TryTextPatternFromPoint(IUIAutomationElement* pElement, POINT pt,
+                                    size_t maxTextCharacters,
+                                    InputContextResult& result) {
     IUIAutomationTextPattern* pTP = nullptr;
     HRESULT hr = pElement->GetCurrentPatternAs(UIA_TextPatternId, IID_PPV_ARGS(&pTP));
     if (FAILED(hr) || !pTP) return false;
@@ -129,7 +163,9 @@ inline bool TryTextPatternFromPoint(IUIAutomationElement* pElement, POINT pt, In
         int moved = 0;
         pRange->Move(TextUnit_Character, -100, &moved);
         BSTR text = nullptr;
-        pRange->GetText(200, &text);
+        const int readCount = static_cast<int>((std::min)(
+            maxTextCharacters, static_cast<size_t>((std::numeric_limits<int>::max)())));
+        pRange->GetText(readCount, &text);
         pRange->Release();
         pTP->Release();
 
@@ -137,7 +173,7 @@ inline bool TryTextPatternFromPoint(IUIAutomationElement* pElement, POINT pt, In
             std::wstring wtext = text;
             SysFreeString(text);
             result.textLength = static_cast<int>(wtext.size());
-            result.inputFieldText = TakeLastN(wtext, 200);
+            result.inputFieldText = TakeLastN(wtext, maxTextCharacters);
             result.successLayer = 3;
             return true;
         }
@@ -148,7 +184,9 @@ inline bool TryTextPatternFromPoint(IUIAutomationElement* pElement, POINT pt, In
     return false;
 }
 
-inline bool TryTextPatternVisibleRanges(IUIAutomationElement* pElement, InputContextResult& result) {
+inline bool TryTextPatternVisibleRanges(IUIAutomationElement* pElement,
+                                        size_t maxTextCharacters,
+                                        InputContextResult& result) {
     IUIAutomationTextPattern* pTP = nullptr;
     HRESULT hr = pElement->GetCurrentPatternAs(UIA_TextPatternId, IID_PPV_ARGS(&pTP));
     if (FAILED(hr) || !pTP) return false;
@@ -171,24 +209,29 @@ inline bool TryTextPatternVisibleRanges(IUIAutomationElement* pElement, InputCon
         pRanges->GetElement(i, &pRange);
         if (!pRange) continue;
         BSTR text = nullptr;
-        pRange->GetText(500, &text);
+        const size_t readLimit = (std::max)(maxTextCharacters, static_cast<size_t>(1));
+        const int readCount = static_cast<int>((std::min)(
+            readLimit, static_cast<size_t>((std::numeric_limits<int>::max)())));
+        pRange->GetText(readCount, &text);
         if (text) {
             allText += text;
             SysFreeString(text);
         }
         pRange->Release();
-        if (allText.size() >= 400) break;
+        if (allText.size() >= maxTextCharacters) break;
     }
     pRanges->Release();
 
     if (allText.empty()) return false;
     result.textLength = static_cast<int>(allText.size());
-    result.inputFieldText = TakeLastN(allText, 200);
+    result.inputFieldText = TakeLastN(allText, maxTextCharacters);
     result.successLayer = 3;
     return true;
 }
 
-inline bool TryTextPattern2Caret(IUIAutomationElement* pElement, InputContextResult& result) {
+inline bool TryTextPattern2Caret(IUIAutomationElement* pElement,
+                                 size_t maxTextCharacters,
+                                 InputContextResult& result) {
     IUIAutomationTextPattern2* pTP2 = nullptr;
     HRESULT hr = pElement->GetCurrentPatternAs(UIA_TextPattern2Id, IID_PPV_ARGS(&pTP2));
     if (FAILED(hr) || !pTP2) return false;
@@ -204,7 +247,9 @@ inline bool TryTextPattern2Caret(IUIAutomationElement* pElement, InputContextRes
     int moved = 0;
     pCaretRange->Move(TextUnit_Character, -100, &moved);
     BSTR text = nullptr;
-    pCaretRange->GetText(200, &text);
+    const int readCount = static_cast<int>((std::min)(
+        maxTextCharacters, static_cast<size_t>((std::numeric_limits<int>::max)())));
+    pCaretRange->GetText(readCount, &text);
     pCaretRange->Release();
     pTP2->Release();
 
@@ -212,7 +257,7 @@ inline bool TryTextPattern2Caret(IUIAutomationElement* pElement, InputContextRes
         std::wstring wtext = text;
         SysFreeString(text);
         result.textLength = static_cast<int>(wtext.size());
-        result.inputFieldText = TakeLastN(wtext, 200);
+        result.inputFieldText = TakeLastN(wtext, maxTextCharacters);
         result.successLayer = 5;
         return true;
     }
@@ -220,20 +265,22 @@ inline bool TryTextPattern2Caret(IUIAutomationElement* pElement, InputContextRes
     return false;
 }
 
-inline bool TryReadFromElement(IUIAutomationElement* pElement, POINT pt, bool hasPt, InputContextResult& result) {
+inline bool TryReadFromElement(IUIAutomationElement* pElement, POINT pt, bool hasPt,
+                               size_t maxTextCharacters,
+                               InputContextResult& result) {
     if (!pElement) return false;
 
     CONTROLTYPEID ct = 0;
     pElement->get_CurrentControlType(&ct);
     result.controlType = GetControlTypeName(ct);
 
-    if (TryGetValueText(pElement, result)) return true;
+    if (TryGetValueText(pElement, maxTextCharacters, result)) return true;
 
-    if (hasPt && TryTextPatternFromPoint(pElement, pt, result)) return true;
+    if (hasPt && TryTextPatternFromPoint(pElement, pt, maxTextCharacters, result)) return true;
 
-    if (TryTextPatternVisibleRanges(pElement, result)) return true;
+    if (TryTextPatternVisibleRanges(pElement, maxTextCharacters, result)) return true;
 
-    if (TryTextPattern2Caret(pElement, result)) return true;
+    if (TryTextPattern2Caret(pElement, maxTextCharacters, result)) return true;
 
     return false;
 }
@@ -241,6 +288,7 @@ inline bool TryReadFromElement(IUIAutomationElement* pElement, POINT pt, bool ha
 inline bool TryWalkParentsForText(IUIAutomation* pAutomation,
                                    IUIAutomationElement* pStart,
                                    POINT pt, bool hasPt,
+                                   size_t maxTextCharacters,
                                    InputContextResult& result) {
     IUIAutomationTreeWalker* pWalker = nullptr;
     HRESULT hr = pAutomation->get_ControlViewWalker(&pWalker);
@@ -266,7 +314,7 @@ inline bool TryWalkParentsForText(IUIAutomation* pAutomation,
             break;
         }
 
-        if (TryReadFromElement(pParent, pt, hasPt, result)) {
+        if (TryReadFromElement(pParent, pt, hasPt, maxTextCharacters, result)) {
             pParent->Release();
             pWalker->Release();
             return true;
@@ -280,7 +328,9 @@ inline bool TryWalkParentsForText(IUIAutomation* pAutomation,
     return false;
 }
 
-inline InputContextResult ReadInputFieldTextUIA(const std::wstring& windowTitle, HWND fgWnd) {
+inline InputContextResult ReadInputFieldTextUIA(const std::wstring& windowTitle,
+                                                HWND fgWnd,
+                                                size_t maxTextCharacters = 200) {
     InputContextResult result;
     result.windowTitle = windowTitle;
 
@@ -321,7 +371,7 @@ inline InputContextResult ReadInputFieldTextUIA(const std::wstring& windowTitle,
             if (sent != 0 && buf[0] != L'\0') {
                 std::wstring text = buf;
                 result.textLength = static_cast<int>(text.size());
-                result.inputFieldText = TakeLastN(text, 200);
+                result.inputFieldText = TakeLastN(text, maxTextCharacters);
                 result.successLayer = 1;
                 return result;
             }
@@ -350,13 +400,14 @@ inline InputContextResult ReadInputFieldTextUIA(const std::wstring& windowTitle,
     IUIAutomationElement* pFocused = nullptr;
     hr = pAutomation->GetFocusedElement(&pFocused);
     if (SUCCEEDED(hr) && pFocused) {
-        if (TryReadFromElement(pFocused, uiaPt, hasCaretPt, result)) {
+        if (TryReadFromElement(pFocused, uiaPt, hasCaretPt, maxTextCharacters, result)) {
             pFocused->Release();
             pAutomation->Release();
             return result;
         }
 
-        if (TryWalkParentsForText(pAutomation, pFocused, uiaPt, hasCaretPt, result)) {
+        if (TryWalkParentsForText(pAutomation, pFocused, uiaPt, hasCaretPt,
+                                  maxTextCharacters, result)) {
             pFocused->Release();
             pAutomation->Release();
             return result;
@@ -367,13 +418,14 @@ inline InputContextResult ReadInputFieldTextUIA(const std::wstring& windowTitle,
     IUIAutomationElement* pFromPt = nullptr;
     hr = pAutomation->ElementFromPoint(uiaPt, &pFromPt);
     if (SUCCEEDED(hr) && pFromPt) {
-        if (TryReadFromElement(pFromPt, uiaPt, hasCaretPt, result)) {
+        if (TryReadFromElement(pFromPt, uiaPt, hasCaretPt, maxTextCharacters, result)) {
             pFromPt->Release();
             pAutomation->Release();
             return result;
         }
 
-        if (TryWalkParentsForText(pAutomation, pFromPt, uiaPt, hasCaretPt, result)) {
+        if (TryWalkParentsForText(pAutomation, pFromPt, uiaPt, hasCaretPt,
+                                  maxTextCharacters, result)) {
             pFromPt->Release();
             pAutomation->Release();
             return result;
@@ -394,7 +446,7 @@ inline InputContextResult ReadInputFieldTextUIA(const std::wstring& windowTitle,
             if (SUCCEEDED(hr) && value && value[0] != L'\0') {
                 std::wstring text = value;
                 result.textLength = static_cast<int>(text.size());
-                result.inputFieldText = TakeLastN(text, 200);
+                result.inputFieldText = TakeLastN(text, maxTextCharacters);
                 result.successLayer = 4;
                 SysFreeString(value);
                 pAcc->Release();
@@ -413,7 +465,7 @@ inline InputContextResult ReadInputFieldTextUIA(const std::wstring& windowTitle,
 
 inline std::atomic<bool> s_uiaThreadRunning{false};
 
-inline InputContextResult GetInputFieldContext() {
+inline InputContextResult GetInputFieldContext(size_t maxTextCharacters = 200) {
     InputContextResult result;
     HWND fgWnd = GetForegroundWindow();
     result.windowTitle = GetForegroundWindowTitle();
@@ -427,9 +479,9 @@ inline InputContextResult GetInputFieldContext() {
     auto future = promise->get_future();
 
     std::wstring wt = result.windowTitle;
-    std::thread worker([promise, wt, fgWnd]() {
+    std::thread worker([promise, wt, fgWnd, maxTextCharacters]() {
         CoInitializeEx(NULL, COINIT_MULTITHREADED);
-        InputContextResult r = ReadInputFieldTextUIA(wt, fgWnd);
+        InputContextResult r = ReadInputFieldTextUIA(wt, fgWnd, maxTextCharacters);
         CoUninitialize();
         promise->set_value(std::move(r));
     });

@@ -8,6 +8,7 @@
 
 - **Qwen Audio 3 模型 profile**：同一个 Qwen Provider 内支持旧 DashScope realtime、`qwen-audio-3.0-asr-flash` HTTP 整段识别，以及 `qwen-audio-3.0-asr-flash-streaming` 二进制 PCM 实时识别。全新安装默认选择 Audio 3 streaming，已有配置保持原模型。
 - **Qwen Audio 设置**：增加模型下拉菜单、北京 Workspace HTTP/streaming Endpoint、语言提示、Vocabulary ID、Audio 3 即时热词 JSON、语义断句、句间静音、多阈值、heartbeat 和噪声阈值设置。
+- **Qwen Audio 3 优化**：输入框上下文统一使用官方 400 字符上限并保护 UTF-16 代理项；Audio 3 Streaming 增加显式开启的一次性 `continue-task` 刷新、敏感词过滤、有效语言提示和 60 秒有界 WebSocket 复用。Qwen3 Realtime 继续使用 Manual 且不复用连接。
 
 ### 修复
 
