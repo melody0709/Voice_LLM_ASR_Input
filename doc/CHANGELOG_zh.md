@@ -11,6 +11,8 @@
 
 ### 修复
 
+- **Qwen finalize 结果完整性**：Audio 3 streaming 只有在 finalize 阶段发生 peer-close/超时且至少已有一个 `sentence_end=true` 句子时才恢复文本；明确的 `task-failed` 和未提交 partial 仍按失败处理。Qwen3 Realtime 等待 `session.finished`，仅在 peer-close/超时后降级采用已完成文本，避免跳过后续 provider error。
+- **Qwen 文档符合性**：HTTP batch 响应按官方 JSON 路径读取，`sample_rate` 使用官方示例的字符串类型，即时热词校验官方长度/分段限制；自动语言 realtime 会省略可选的 `input_audio_transcription` 对象。
 - **Qwen Audio streaming 初始化**：空的可选 Vocabulary 不再生成缺少值的 `run-task` JSON；请求结构同步为 `parameters` 后接 `input`，使任务可以正常启动并返回 partial。
 - **Qwen Audio profile 迁移**：没有新模型字段的已有配置继续使用旧 realtime；只有完全没有配置文件的新安装才默认 Audio 3 streaming。
 - **Qwen Audio 恢复边界**：服务端 `task-failed` 不再盲目重放 PCM；replay 达到上限后仍等待松键，pending PCM 溢出会明确报告错误而不会静默丢音频。

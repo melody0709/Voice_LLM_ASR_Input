@@ -166,7 +166,7 @@ std::string BuildRequestImpl(const Config& cfg, const std::string& audio) {
         json += "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"" +
             JsonEscape(context) + "\"}]},";
     }
-    json += "{\"role\":\"user\",\"content\":[{\"type\":\"input_audio\",\"input_audio\":{\"data\":\"data:audio/wav;base64," + audio + "\"}}]}],\"parameters\":{\"format\":\"wav\",\"sample_rate\":16000";
+    json += "{\"role\":\"user\",\"content\":[{\"type\":\"input_audio\",\"input_audio\":{\"data\":\"data:audio/wav;base64," + audio + "\"}}]}],\"parameters\":{\"format\":\"wav\",\"sample_rate\":\"16000\"";
     AppendHints(json, cfg.languageHints);
     if (!Trim(cfg.vocabularyId).empty()) json += ",\"vocabulary_id\":\"" + JsonEscape(cfg.vocabularyId) + "\"";
     if (qwen_audio_json::HasValidVocabulary(cfg.vocabulary)) {
@@ -199,10 +199,14 @@ std::string BuildRequestJsonForTest(const Config& config, const std::string& aud
 }
 
 std::wstring ParseResponseTextForTest(const std::string& responseBody) {
-    std::wstring text = qwen_audio_json::ExtractString(responseBody, "text");
-    if (text.empty()) text = qwen_audio_json::ExtractString(responseBody, "transcript");
-    if (text.empty()) text = qwen_audio_json::ExtractString(responseBody, "sentence");
-    if (text.empty()) text = qwen_audio_json::ExtractString(responseBody, "content");
+    static constexpr std::string_view kSentencePath[] = {
+        "output", "output", "sentence", "text"
+    };
+    static constexpr std::string_view kOutputTextPath[] = {"output", "text"};
+    std::wstring text = qwen_audio_json::ExtractStringAtPath(responseBody, kSentencePath);
+    if (text.empty()) {
+        text = qwen_audio_json::ExtractStringAtPath(responseBody, kOutputTextPath);
+    }
     return text;
 }
 

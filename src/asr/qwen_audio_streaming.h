@@ -36,6 +36,9 @@ struct Event {
     bool timeout = false;
     bool sentenceEnd = false;
     bool heartbeat = false;
+    // A WebSocket close frame before task-finished is a transport terminal
+    // condition, not a provider task-failed event.
+    bool peerClosed = false;
     // Provider may encode silence as task-failed/ASR_RESPONSE_HAVE_NO_WORDS.
     bool noSpeech = false;
     // Transport-level close events may be replayed once. A server task failure
@@ -47,6 +50,8 @@ class TranscriptAccumulator {
 public:
     void Apply(const Event& event);
     std::wstring Text() const;
+    std::wstring CommittedText() const;
+    bool HasCommittedText() const;
 
 private:
     std::wstring committed_;

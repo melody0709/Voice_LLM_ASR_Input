@@ -6,6 +6,7 @@
 #include "cloud_asr_common.h"
 #include "globals.h"
 #include "pending_pcm_buffer.h"
+#include "qwen_finalize_policy.h"
 #include "qwen_audio_streaming.h"
 
 #include <algorithm>
@@ -395,14 +396,22 @@ private:
         std::atomic<bool> drainRetryable{true};
         std::atomic<bool> taskFinished{false};
         std::atomic<bool> noSpeech{false};
+        std::atomic<qwen_finalize_policy::TerminalReason> terminalReason{
+            qwen_finalize_policy::TerminalReason::None};
         std::thread drain([&] {
             while (!drainDone.load() && !abort_.load()) {
                 qwen_audio_streaming::Event event;
                 std::wstring receiveError;
                 if (!client->Poll(200, event, receiveError)) {
                     if (event.timeout) continue;
+                    // Abort() is used to wake the receive thread after the
+                    // worker has already chosen a terminal outcome. Do not let
+                    // that expected cancellation overwrite Timeout/PeerClosed
+                    // with a synthetic transport failure.
+                    if (drainDone.load() || abort_.load()) break;
                     std::lock_guard<std::mutex> lock(stateMutex);
                     error = receiveError.empty() ? L"WebSocket receive failed" : receiveError;
+                    terminalReason.store(qwen_finalize_policy::TerminalReason::TransportFailure);
                     drainFailed.store(true);
                     break;
                 }
@@ -428,6 +437,9 @@ private:
                     std::lock_guard<std::mutex> lock(stateMutex);
                     error = event.message.empty() ? L"task failed" : event.message;
                     drainRetryable.store(event.retryable);
+                    terminalReason.store(event.peerClosed
+                        ? qwen_finalize_policy::TerminalReason::PeerClosed
+                        : qwen_finalize_policy::TerminalReason::ProviderFailure);
                     drainFailed.store(true);
                     break;
                 }
@@ -440,10 +452,7 @@ private:
         bool failed = false;
         bool retryWithReplay = false;
         bool replayEnabled = true;
-        // True only when an incomplete finalize happened AFTER finish-task was
-        // sent (task-finished timeout or peer close during finalize). Used to
-        // recover an already-delivered transcript instead of discarding it.
-        bool finalizePhaseError = false;
+        bool finishTaskSent = false;
 
         auto sendChunk = [&](const BYTE* data, size_t bytes) -> bool {
             if (bytes == 0) return true;
@@ -536,6 +545,7 @@ private:
                 failed = true;
                 retryWithReplay = replayEnabled;
             } else {
+                finishTaskSent = true;
                 const DWORD timeout = CurrentWatchdogMs();
                 const ULONGLONG deadline = GetTickCount64() + timeout;
                 while (!abort_.load() && !drainFailed.load() && !taskFinished.load() &&
@@ -543,11 +553,9 @@ private:
                     Sleep(25);
                 }
                 if (!taskFinished.load()) {
-                    // Reached only when finish-task was sent but task-finished
-                    // did not arrive in time (timeout or peer close during
-                    // finalize). Flag so the transcript can be recovered below
-                    // if the server already delivered final sentences.
-                    finalizePhaseError = true;
+                    if (terminalReason.load() == qwen_finalize_policy::TerminalReason::None) {
+                        terminalReason.store(qwen_finalize_policy::TerminalReason::Timeout);
+                    }
                     failed = true;
                     retryWithReplay = replayEnabled;
                     std::lock_guard<std::mutex> lock(stateMutex);
@@ -563,21 +571,26 @@ private:
         ClearActiveClient(client.get());
 
         std::wstring finalText;
+        std::wstring committedText;
+        bool hasCommittedText = false;
         {
             std::lock_guard<std::mutex> lock(textMutex);
             finalText = transcript.Text();
+            committedText = transcript.CommittedText();
+            hasCommittedText = transcript.HasCommittedText();
         }
-        // Recovery: if finish-task was sent but the server ended the session
-        // without task-finished (timeout or peer close) yet already delivered
-        // final sentences (sentence_end=true), prefer the accumulated
-        // transcript over discarding it as a failure. Mid-stream send/receive
-        // failures (finalizePhaseError == false) still go through the replay
-        // retry path because the server may not have received all audio.
-        if (!abort_.load() && !noSpeech.load() && finalizePhaseError && !finalText.empty()) {
+        const auto finalReason = terminalReason.load();
+        // Only an incomplete transport finalization may recover already
+        // committed sentences. An explicit task-failed remains a failure, and
+        // an uncommitted partial is never promoted to a final transcript.
+        if (!abort_.load() && !noSpeech.load() &&
+            qwen_finalize_policy::CanRecoverAudioStreaming(
+                finishTaskSent, taskFinished.load(), hasCommittedText, finalReason)) {
+            finalText = committedText;
             QwenAudioSessionDebugLog(
-                "event=transcript_recovered_despite_incomplete_finalize attempt=%llu drain_failed=%d text_chars=%zu",
+                "event=transcript_recovered_despite_incomplete_finalize attempt=%llu reason=%s text_chars=%zu",
                 static_cast<unsigned long long>(cfg_.attemptId),
-                drainFailed.load() ? 1 : 0, finalText.size());
+                qwen_finalize_policy::TerminalReasonName(finalReason), finalText.size());
             failed = false;
             retryWithReplay = false;
             std::lock_guard<std::mutex> lock(stateMutex);

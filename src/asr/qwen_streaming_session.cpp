@@ -7,6 +7,7 @@
 #include "globals.h"
 #include "pending_pcm_buffer.h"
 #include "qwen_asr.h"
+#include "qwen_finalize_policy.h"
 
 #include <algorithm>
 #include <atomic>
@@ -282,6 +283,8 @@ private:
         std::atomic<bool> drainFailed{false};
         std::atomic<bool> drainCompleted{false};
         std::atomic<bool> drainSessionFinished{false};
+        std::atomic<qwen_finalize_policy::TerminalReason> terminalReason{
+            qwen_finalize_policy::TerminalReason::None};
         bool failed = false;
         bool retryWithReplay = false;
 
@@ -294,6 +297,9 @@ private:
                     if (!drainDone.load() && !abort_.load()) {
                         std::lock_guard<std::mutex> lock(drainMutex);
                         drainError = receiveError;
+                        terminalReason.store(ev.providerFailed
+                            ? qwen_finalize_policy::TerminalReason::ProviderFailure
+                            : qwen_finalize_policy::TerminalReason::TransportFailure);
                         drainFailed.store(true);
                     }
                     break;
@@ -302,6 +308,7 @@ private:
                     if (!drainDone.load() && !abort_.load()) {
                         std::lock_guard<std::mutex> lock(drainMutex);
                         drainError = L"WebSocket peer closed before session.finished";
+                        terminalReason.store(qwen_finalize_policy::TerminalReason::PeerClosed);
                         drainFailed.store(true);
                     }
                     break;
@@ -440,33 +447,50 @@ private:
             } else {
                 const ULONGLONG deadline = GetTickCount64() + std::max<DWORD>(finalTimeout, 1000);
                 while (!abort_.load()) {
-                    // Check for a completed transcript BEFORE drainFailed. The
-                    // server may peer-close after sending
-                    // conversation.item.input_audio_transcription.completed but
-                    // before session.finished; in that race we already hold the
-                    // final transcript and must not downgrade it to a failure
-                    // that triggers a full replay (which could then erase the
-                    // valid result on a non-transport retry error).
-                    if (drainCompleted.load() || drainSessionFinished.load()) {
-                        if (drainCompleted.load() && !drainSessionFinished.load()) {
-                            QwenRealtimeSessionDebugLog(
-                                "event=transcript_completed_without_session_finished "
-                                "attempt=%llu phase=finalize",
-                                static_cast<unsigned long long>(config_.asrAttemptId));
-                        }
+                    if (drainSessionFinished.load()) {
                         break;
                     }
                     if (drainFailed.load()) {
-                        std::lock_guard<std::mutex> lock(drainMutex);
-                        error = drainError.empty() ? L"receive failed" : drainError;
-                        failed = true;
-                        retryWithReplay = true;
+                        bool hasFinalText = false;
+                        {
+                            std::lock_guard<std::mutex> lock(drainMutex);
+                            hasFinalText = !finalText.empty();
+                            if (!qwen_finalize_policy::CanRecoverRealtime(
+                                    drainCompleted.load(), drainSessionFinished.load(),
+                                    hasFinalText, terminalReason.load())) {
+                                error = drainError.empty() ? L"receive failed" : drainError;
+                                failed = true;
+                                retryWithReplay = true;
+                            }
+                        }
+                        if (!failed) {
+                            QwenRealtimeSessionDebugLog(
+                                "event=transcript_recovered_despite_incomplete_finalize "
+                                "attempt=%llu reason=%s phase=finalize",
+                                static_cast<unsigned long long>(config_.asrAttemptId),
+                                qwen_finalize_policy::TerminalReasonName(terminalReason.load()));
+                        }
                         break;
                     }
                     if (GetTickCount64() >= deadline) {
-                        error = L"timed out waiting for final transcript";
-                        failed = true;
-                        retryWithReplay = true;
+                        terminalReason.store(qwen_finalize_policy::TerminalReason::Timeout);
+                        bool hasFinalText = false;
+                        {
+                            std::lock_guard<std::mutex> lock(drainMutex);
+                            hasFinalText = !finalText.empty();
+                        }
+                        if (qwen_finalize_policy::CanRecoverRealtime(
+                                drainCompleted.load(), drainSessionFinished.load(),
+                                hasFinalText, terminalReason.load())) {
+                            QwenRealtimeSessionDebugLog(
+                                "event=transcript_recovered_despite_incomplete_finalize "
+                                "attempt=%llu reason=timeout phase=finalize",
+                                static_cast<unsigned long long>(config_.asrAttemptId));
+                        } else {
+                            error = L"timed out waiting for session.finished";
+                            failed = true;
+                            retryWithReplay = true;
+                        }
                         break;
                     }
                     Sleep(50);
@@ -496,8 +520,20 @@ private:
                 finalText = retryResult.text;
                 failed = false;
             } else if (!retryResult.transportError) {
-                finalText.clear();
-                failed = false;
+                // An empty non-transport replay result must not erase a
+                // transcript already received by the primary session. Keep a
+                // provider failure as a failure; for an empty-final replay
+                // there was no local text to preserve, so the empty result is
+                // still a clean recognition outcome.
+                if (finalText.empty()) {
+                    failed = false;
+                } else if (shouldRetryFailure) {
+                    QwenRealtimeSessionDebugLog(
+                        "event=replay_empty_preserved_primary_transcript "
+                        "attempt=%llu phase=retry text_chars=%zu",
+                        static_cast<unsigned long long>(config_.asrAttemptId),
+                        finalText.size());
+                }
             } else if (shouldRetryFailure) {
                 error = retryResult.error.empty() ? error : retryResult.error;
                 failed = true;

@@ -39,6 +39,68 @@ inline bool ParseString(std::wstring_view text, size_t& pos) {
     return false;
 }
 
+inline bool DecodeWideString(std::wstring_view text, size_t& pos, std::wstring& out) {
+    if (pos >= text.size() || text[pos++] != L'\"') return false;
+    out.clear();
+    while (pos < text.size()) {
+        const wchar_t c = text[pos++];
+        if (c == L'\"') return true;
+        if (c < 0x20) return false;
+        if (c != L'\\') {
+            out.push_back(c);
+            continue;
+        }
+        if (pos >= text.size()) return false;
+        const wchar_t e = text[pos++];
+        switch (e) {
+        case L'\"': out.push_back(L'\"'); break;
+        case L'\\': out.push_back(L'\\'); break;
+        case L'/': out.push_back(L'/'); break;
+        case L'b': out.push_back(L'\b'); break;
+        case L'f': out.push_back(L'\f'); break;
+        case L'n': out.push_back(L'\n'); break;
+        case L'r': out.push_back(L'\r'); break;
+        case L't': out.push_back(L'\t'); break;
+        case L'u': {
+            if (pos + 4 > text.size()) return false;
+            uint32_t cp = 0;
+            for (int i = 0; i < 4; ++i) {
+                const wchar_t ch = text[pos++];
+                cp <<= 4;
+                if (ch >= L'0' && ch <= L'9') cp |= static_cast<uint32_t>(ch - L'0');
+                else if (ch >= L'a' && ch <= L'f') cp |= static_cast<uint32_t>(ch - L'a' + 10);
+                else if (ch >= L'A' && ch <= L'F') cp |= static_cast<uint32_t>(ch - L'A' + 10);
+                else return false;
+            }
+            if (cp >= 0xd800 && cp <= 0xdbff) {
+                if (pos + 6 > text.size() || text[pos] != L'\\' || text[pos + 1] != L'u') return false;
+                pos += 2;
+                uint32_t low = 0;
+                for (int i = 0; i < 4; ++i) {
+                    const wchar_t ch = text[pos++];
+                    low <<= 4;
+                    if (ch >= L'0' && ch <= L'9') low |= static_cast<uint32_t>(ch - L'0');
+                    else if (ch >= L'a' && ch <= L'f') low |= static_cast<uint32_t>(ch - L'a' + 10);
+                    else if (ch >= L'A' && ch <= L'F') low |= static_cast<uint32_t>(ch - L'A' + 10);
+                    else return false;
+                }
+                if (low < 0xdc00 || low > 0xdfff) return false;
+                out.push_back(static_cast<wchar_t>(cp));
+                out.push_back(static_cast<wchar_t>(low));
+            } else if (cp >= 0xdc00 && cp <= 0xdfff) {
+                return false;
+            } else {
+                out.push_back(static_cast<wchar_t>(cp));
+            }
+            break;
+        }
+        default:
+            return false;
+        }
+    }
+    return false;
+}
+
 inline bool ParseValue(std::wstring_view text, size_t& pos);
 
 inline bool ParseArray(std::wstring_view text, size_t& pos) {
@@ -186,6 +248,128 @@ inline bool DecodeNarrowString(std::string_view text, size_t& pos, std::string& 
     return false;
 }
 
+inline void SkipNarrowWs(std::string_view text, size_t& pos) {
+    while (pos < text.size() &&
+           (text[pos] == ' ' || text[pos] == '\t' || text[pos] == '\r' || text[pos] == '\n')) {
+        ++pos;
+    }
+}
+
+inline bool SkipNarrowValue(std::string_view text, size_t& pos) {
+    SkipNarrowWs(text, pos);
+    if (pos >= text.size()) return false;
+    if (text[pos] == '"') {
+        std::string ignored;
+        return DecodeNarrowString(text, pos, ignored);
+    }
+    if (text[pos] == '{') {
+        ++pos;
+        SkipNarrowWs(text, pos);
+        if (pos < text.size() && text[pos] == '}') { ++pos; return true; }
+        while (pos < text.size()) {
+            std::string key;
+            if (!DecodeNarrowString(text, pos, key)) return false;
+            SkipNarrowWs(text, pos);
+            if (pos >= text.size() || text[pos++] != ':') return false;
+            if (!SkipNarrowValue(text, pos)) return false;
+            SkipNarrowWs(text, pos);
+            if (pos < text.size() && text[pos] == '}') { ++pos; return true; }
+            if (pos >= text.size() || text[pos++] != ',') return false;
+            SkipNarrowWs(text, pos);
+        }
+        return false;
+    }
+    if (text[pos] == '[') {
+        ++pos;
+        SkipNarrowWs(text, pos);
+        if (pos < text.size() && text[pos] == ']') { ++pos; return true; }
+        while (pos < text.size()) {
+            if (!SkipNarrowValue(text, pos)) return false;
+            SkipNarrowWs(text, pos);
+            if (pos < text.size() && text[pos] == ']') { ++pos; return true; }
+            if (pos >= text.size() || text[pos++] != ',') return false;
+            SkipNarrowWs(text, pos);
+        }
+        return false;
+    }
+    const size_t start = pos;
+    while (pos < text.size() && text[pos] != ',' && text[pos] != '}' && text[pos] != ']' &&
+           text[pos] != ' ' && text[pos] != '\t' && text[pos] != '\r' && text[pos] != '\n') {
+        ++pos;
+    }
+    return pos > start;
+}
+
+inline bool FindStringAtPath(std::string_view text,
+                             size_t& pos,
+                             const std::string_view* path,
+                             size_t pathSize,
+                             size_t pathIndex,
+                             std::wstring& out) {
+    SkipNarrowWs(text, pos);
+    if (pos >= text.size() || text[pos++] != '{') return false;
+    SkipNarrowWs(text, pos);
+    while (pos < text.size() && text[pos] != '}') {
+        std::string key;
+        if (!DecodeNarrowString(text, pos, key)) return false;
+        SkipNarrowWs(text, pos);
+        if (pos >= text.size() || text[pos++] != ':') return false;
+        SkipNarrowWs(text, pos);
+        if (key == path[pathIndex]) {
+            if (pathIndex + 1 == pathSize) {
+                std::string decoded;
+                if (!DecodeNarrowString(text, pos, decoded)) return false;
+                out = Utf8ToWide(decoded);
+                return true;
+            }
+            return FindStringAtPath(text, pos, path, pathSize, pathIndex + 1, out);
+        }
+        if (!SkipNarrowValue(text, pos)) return false;
+        SkipNarrowWs(text, pos);
+        if (pos < text.size() && text[pos] == '}') break;
+        if (pos >= text.size() || text[pos++] != ',') return false;
+        SkipNarrowWs(text, pos);
+    }
+    return false;
+}
+
+inline size_t UnicodeScalarCount(std::wstring_view value) {
+    size_t count = 0;
+    for (size_t i = 0; i < value.size(); ++i) {
+        const uint32_t ch = static_cast<uint32_t>(value[i]);
+        if (ch >= 0xd800 && ch <= 0xdbff && i + 1 < value.size()) {
+            const uint32_t low = static_cast<uint32_t>(value[i + 1]);
+            if (low >= 0xdc00 && low <= 0xdfff) ++i;
+        }
+        ++count;
+    }
+    return count;
+}
+
+inline bool IsValidVocabularyTerm(std::wstring_view term) {
+    if (term.empty()) return false;
+    bool hasNonAscii = false;
+    for (wchar_t ch : term) {
+        if (static_cast<uint32_t>(ch) > 0x7f) {
+            hasNonAscii = true;
+            break;
+        }
+    }
+    if (hasNonAscii) return UnicodeScalarCount(term) <= 15;
+
+    size_t segments = 0;
+    bool inSegment = false;
+    for (wchar_t ch : term) {
+        if (iswspace(ch)) {
+            inSegment = false;
+        } else if (!inSegment) {
+            inSegment = true;
+            if (++segments > 7) return false;
+        }
+    }
+    return segments > 0;
+}
+
 } // namespace detail
 
 // Shared Unicode scalar to UTF-8 encoder used by the provider parsers. Keep
@@ -220,8 +404,13 @@ inline bool IsValidVocabulary(const std::wstring& value, std::wstring* error = n
         ++pos;
     } else {
         while (pos < text.size()) {
-            if (!detail::ParseString(text, pos)) {
+            std::wstring term;
+            if (!detail::DecodeWideString(text, pos, term)) {
                 if (error) *error = L"vocabulary keys must be JSON strings";
+                return false;
+            }
+            if (!detail::IsValidVocabularyTerm(term)) {
+                if (error) *error = L"vocabulary term exceeds the documented text limits";
                 return false;
             }
             detail::SkipWs(text, pos);
@@ -297,6 +486,17 @@ inline std::wstring ExtractString(const std::string& json, const std::string& ke
         return Utf8ToWide(decoded);
     }
     return {};
+}
+
+template <size_t N>
+inline std::wstring ExtractStringAtPath(
+    const std::string& json,
+    const std::string_view (&path)[N]) {
+    static_assert(N > 0, "JSON path cannot be empty");
+    size_t pos = 0;
+    std::wstring result;
+    if (!detail::FindStringAtPath(json, pos, path, N, 0, result)) return {};
+    return result;
 }
 
 inline bool ExtractBool(const std::string& json, const std::string& key, bool fallback = false) {

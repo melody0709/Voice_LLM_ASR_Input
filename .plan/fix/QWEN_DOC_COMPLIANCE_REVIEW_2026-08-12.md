@@ -106,3 +106,29 @@
 - `./build.bat --test`：`qwen_free_protocol_test` PASS、`qwen_audio_json_test` PASS。
 - 运行载荷：`build\run\x64-release\VoxType.exe`（v0.9.24）。
 
+## 第三轮自审修正（2026-08-13）
+
+上一节“修复状态”经复核后不再作为最终结论。第三轮自审确认：两个原始丢文本问题的诊断成立，但第二轮补丁的描述和结论过于宽松，尤其 Audio 3 streaming 的 `finalizePhaseError` 会把明确的 `task-failed` 与 finalize 阶段缺少 `task-finished` 混为一类；同时 `TranscriptAccumulator::Text()` 包含未 `sentence_end=true` 的 pending partial，不能直接作为可恢复 final。
+
+### 已修正的实现边界
+
+1. 新增 `qwen_finalize_policy.h`，将终止原因区分为 Timeout、PeerClosed、TransportFailure、ProviderFailure。
+2. Audio 3 streaming 仅在已发送 `finish-task`、未收到 `task-finished`、终止原因仅为 finalize 阶段 timeout/peer-close、且至少存在一个 `sentence_end=true` committed 句子时恢复文本。
+3. 明确 `task-failed`、中途传输失败和 pending partial 不再被恢复逻辑吞掉。
+4. Qwen3 Realtime 等待 `session.finished`；仅在 completed 文本已经到达且随后发生 finalize timeout/peer-close 时降级采用该文本。completed 后的明确 provider error 仍保持失败。
+5. Qwen3 replay 得到空的非传输结果时，不再清空主连接已经收到的文本。
+6. HTTP batch 响应按精确路径读取 `output.output.sentence.text`，再回退到 `output.text`。
+7. HTTP batch `sample_rate` 改为官方示例使用的字符串 `"16000"`。
+8. 即时热词校验补充官方文档中的文本长度/ASCII 分段约束。
+9. 无语言配置时，Qwen3 Realtime 的 `session.update` 省略可选的 `input_audio_transcription` 对象。
+
+### 对第二轮结论的更正
+
+- “三路核心协议逐条匹配”撤回，改为“核心消息形状基本匹配，但部分参数缺少文档证据，且此前响应路径/热词约束并未完整实现”。
+- “Bug 1/Bug 2 已完成修复”撤回，改为“原始问题已修复，并增加了 provider-failure、pending-partial 和 replay-empty 的边界保护”。
+- `multi_threshold_mode_enabled`、`speech_noise_threshold`、`heartbeat` 仍标记为证据不足/未验证，不把它们计入严格合规结论。
+
+### 第三轮验证
+
+- `build.bat --test` 通过；`qwen_free_protocol_test` 和 `qwen_audio_json_test` 均 PASS。
+- 新增离线覆盖：finalize 原因决策矩阵、`sentence_end` committed 与 pending partial 的区别、completed 后 provider error 不得被恢复、HTTP 两条官方响应路径的精确解析、HTTP `sample_rate` 字符串类型、即时热词文本长度/分段限制。

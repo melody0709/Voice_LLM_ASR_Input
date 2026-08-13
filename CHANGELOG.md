@@ -11,6 +11,8 @@
 
 ### Fixed
 
+- **Qwen finalization integrity**: Qwen Audio 3 streaming now recovers text after an incomplete finalize only for peer-close/timeout with at least one `sentence_end=true` result; explicit `task-failed` events and pending partials remain failures. Qwen3 Realtime waits for `session.finished` and only degrades to an already completed transcript on peer-close/timeout, so a later provider error cannot be skipped.
+- **Qwen document compliance**: HTTP batch responses are read through the documented JSON paths, `sample_rate` uses the documented string type, immediate-vocabulary terms enforce the documented length/segment limits, and automatic-language realtime sessions omit the optional `input_audio_transcription` object.
 - **Qwen Audio streaming initialization**: Empty optional vocabulary settings are now omitted from `run-task` instead of producing an incomplete JSON value. The request shape also follows the documented `parameters` then `input` layout, allowing the task to start and emit partial results.
 - **Qwen Audio profile migration**: Existing config files without the new model selector stay on the legacy realtime model; only installations without a config file default to Audio 3 streaming.
 - **Qwen Audio recovery boundaries**: Server-side `task-failed` events no longer trigger a blind PCM replay; replay-budget exhaustion keeps the live session until key release, and pending-audio overflow is reported explicitly instead of being silently dropped.

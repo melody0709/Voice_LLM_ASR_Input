@@ -42,6 +42,9 @@ struct RealtimeEvent {
     // WebSocket peer close is a transport outcome, not the provider's
     // JSON session.finished event.
     bool peerClosed = false;
+    // Set when PollEvent returns false because the provider sent an explicit
+    // transcription.failed/error event rather than a transport failure.
+    bool providerFailed = false;
 };
 
 class RealtimeClient {

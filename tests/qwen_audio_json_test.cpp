@@ -9,6 +9,7 @@
 #include "qwen_audio_streaming.h"
 #include "qwen_asr.h"
 #include "qwen_context.h"
+#include "qwen_finalize_policy.h"
 #include "winhttp_websocket_transport.h"
 #include "cloud_asr_common.h"
 #include "pending_pcm_buffer.h"
@@ -307,6 +308,15 @@ int main() {
            "vocabulary arrays are rejected");
     Expect(!qwen_audio_json::IsValidVocabulary(L"{\"word\":1.0}"),
            "fractional vocabulary weights are rejected");
+    Expect(qwen_audio_json::IsValidVocabulary(L"{\"Human immunodeficiency virus type 1\":4}"),
+           "ASCII vocabulary terms with at most seven segments are accepted");
+    Expect(!qwen_audio_json::IsValidVocabulary(
+               L"{\"one two three four five six seven eight\":4}"),
+           "ASCII vocabulary terms over seven segments are rejected");
+    Expect(qwen_audio_json::IsValidVocabulary(L"{\"厄洛替尼盐酸盐\":4}"),
+           "non-ASCII vocabulary terms within fifteen characters are accepted");
+    Expect(!qwen_audio_json::IsValidVocabulary(L"{\"一二三四五六七八九十一二三四五六\":4}"),
+           "non-ASCII vocabulary terms over fifteen characters are rejected");
     Expect(!qwen_audio_json::HasValidVocabulary(L""),
            "empty vocabulary is omitted instead of emitting a missing JSON value");
     Expect(qwen_audio_json::HasValidVocabulary(L"{\"VoxType\":5}"),
@@ -391,6 +401,8 @@ int main() {
                    json.find("前文") != std::string::npos &&
                    json.find("input_text") < json.find("input_audio"),
                "HTTP request places input-field context before audio");
+        Expect(json.find("\"sample_rate\":\"16000\"") != std::string::npos,
+               "HTTP request serializes sample_rate with the documented string type");
         Expect(json.find("semantic_punctuation") == std::string::npos &&
                    json.find("max_sentence_silence") == std::string::npos,
                "HTTP request omits streaming-only parameters");
@@ -410,6 +422,14 @@ int main() {
             R"({"output":{"output":{"sentence":{"text":"识别文本"}},"text":"识别文本"}})";
         Expect(qwen_audio_http::ParseResponseTextForTest(officialResponse) == L"识别文本",
                "HTTP parser accepts the official nested output.output.sentence.text response");
+        const std::string unrelatedTextFirst =
+            R"({"diagnostic":{"text":"不要返回我"},"output":{"output":{"sentence":{"text":"正确文本"}},"text":"备用文本"}})";
+        Expect(qwen_audio_http::ParseResponseTextForTest(unrelatedTextFirst) == L"正确文本",
+               "HTTP parser reads the documented nested path instead of the first text key");
+        const std::string outputTextOnly =
+            R"({"diagnostic":{"text":"不要返回我"},"output":{"text":"备用文本"}})";
+        Expect(qwen_audio_http::ParseResponseTextForTest(outputTextOnly) == L"备用文本",
+               "HTTP parser falls back to output.text by exact path");
     }
 
     {
@@ -466,6 +486,9 @@ int main() {
 
         qwen_audio_streaming::TranscriptAccumulator transcript;
         transcript.Apply(partial);
+        Expect(transcript.Text() == L"你好" && transcript.CommittedText().empty() &&
+                   !transcript.HasCommittedText(),
+               "streaming pending partial is not classified as committed final text");
         auto second = partial;
         second.text = L"你好";
         second.sentenceEnd = true;
@@ -476,6 +499,25 @@ int main() {
         transcript.Apply(third);
         Expect(transcript.Text() == L"你好 世界",
                "multiple sentence_end events accumulate without stale partial text");
+        Expect(transcript.CommittedText() == L"你好 世界" && transcript.HasCommittedText(),
+               "sentence_end events produce recoverable committed text");
+
+        using qwen_finalize_policy::TerminalReason;
+        Expect(qwen_finalize_policy::CanRecoverAudioStreaming(
+                   true, false, true, TerminalReason::PeerClosed),
+               "Audio streaming may recover committed text after finalize peer close");
+        Expect(qwen_finalize_policy::CanRecoverAudioStreaming(
+                   true, false, true, TerminalReason::Timeout),
+               "Audio streaming may recover committed text after finalize timeout");
+        Expect(!qwen_finalize_policy::CanRecoverAudioStreaming(
+                   true, false, true, TerminalReason::ProviderFailure),
+               "Audio streaming never hides an explicit task-failed event");
+        Expect(!qwen_finalize_policy::CanRecoverAudioStreaming(
+                   true, false, false, TerminalReason::PeerClosed),
+               "Audio streaming never promotes a pending partial to final text");
+        Expect(!qwen_finalize_policy::CanRecoverAudioStreaming(
+                   false, false, true, TerminalReason::PeerClosed),
+               "Audio streaming does not recover a mid-stream peer close");
     }
 
     {
@@ -495,6 +537,11 @@ int main() {
                    sessionUpdate.find("\"sample_rate\":16000") != std::string::npos &&
                    sessionUpdate.find("\"turn_detection\":null") != std::string::npos,
                "Qwen3 session.update follows the documented Manual PCM session shape");
+        realtime.language.clear();
+        const std::string automaticLanguageUpdate =
+            qwen_asr::BuildSessionUpdateMessageForTest(realtime);
+        Expect(automaticLanguageUpdate.find("\"input_audio_transcription\"") == std::string::npos,
+               "Qwen3 session.update omits input_audio_transcription when language is automatic");
 
         const BYTE pcm[] = {1, 2, 3};
         const std::string append = qwen_asr::BuildAudioAppendMessageForTest(pcm, sizeof(pcm));
@@ -524,6 +571,20 @@ int main() {
             R"({"type":"error","code":"InvalidParameter","message":"bad request"})");
         Expect(error.failed && error.error.find(L"InvalidParameter") != std::wstring::npos,
                "Qwen3 error event remains distinct from session.finished");
+
+        using qwen_finalize_policy::TerminalReason;
+        Expect(qwen_finalize_policy::CanRecoverRealtime(
+                   true, false, true, TerminalReason::PeerClosed),
+               "Qwen3 may recover completed text after peer close before session.finished");
+        Expect(qwen_finalize_policy::CanRecoverRealtime(
+                   true, false, true, TerminalReason::Timeout),
+               "Qwen3 may recover completed text after session.finished timeout");
+        Expect(!qwen_finalize_policy::CanRecoverRealtime(
+                   true, false, true, TerminalReason::ProviderFailure),
+               "Qwen3 completed text does not hide a later provider error");
+        Expect(!qwen_finalize_policy::CanRecoverRealtime(
+                   false, false, true, TerminalReason::PeerClosed),
+               "Qwen3 peer close without a completed event is not successful");
     }
 
     if (winsockReady) {

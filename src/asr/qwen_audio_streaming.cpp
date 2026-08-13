@@ -239,6 +239,14 @@ std::wstring TranscriptAccumulator::Text() const {
     return result;
 }
 
+std::wstring TranscriptAccumulator::CommittedText() const {
+    return committed_;
+}
+
+bool TranscriptAccumulator::HasCommittedText() const {
+    return !committed_.empty();
+}
+
 struct Client::Impl {
     explicit Impl(Config c) : config(std::move(c)) {}
     Config config;
@@ -440,6 +448,7 @@ bool Client::Poll(DWORD timeoutMs, Event& event, std::wstring& error) {
         if (received.kind == winhttp_websocket::ReceiveKind::PeerClosed) {
             event.failed = true;
             event.retryable = true;
+            event.peerClosed = true;
             event.message = L"WebSocket closed before task-finished";
             error = event.message;
             QwenAudioDebugLog("event=peer_close_before_task_finished attempt=%llu task_id=%s phase=finalize audio_bytes=%zu retryable=1 close_status=%u reason_chars=%zu",

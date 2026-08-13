@@ -371,11 +371,10 @@ std::string BuildSessionUpdateMessage(const QwenConfig& cfg) {
     oss << "\"modalities\":[\"text\"],";
     oss << "\"input_audio_format\":\"pcm\",";
     oss << "\"sample_rate\":16000,";
-    oss << "\"input_audio_transcription\":{";
     if (!lang.empty()) {
-        oss << "\"language\":\"" << EscapeJson(lang) << "\"";
+        oss << "\"input_audio_transcription\":{\"language\":\""
+            << EscapeJson(lang) << "\"},";
     }
-    oss << "},";
     oss << "\"turn_detection\":" << WideToUtf8(turnDetection);
     oss << "}}";
     return oss.str();
@@ -725,9 +724,11 @@ bool RealtimeClient::PollEvent(DWORD timeoutMs, RealtimeEvent& event, std::wstri
             static_cast<unsigned long long>(impl_->cfg.attemptId),
             WideToUtf8(sessionId).c_str(), impl_->audioBytes.load());
     } else if (frame.type == L"conversation.item.input_audio_transcription.failed") {
+        event.providerFailed = true;
         error = RealtimeErrorMessage(message, L"transcription failed");
         return false;
     } else if (frame.type == L"error") {
+        event.providerFailed = true;
         error = RealtimeErrorMessage(message, L"realtime server error");
         return false;
     }
