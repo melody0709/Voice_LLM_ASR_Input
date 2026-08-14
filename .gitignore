@@ -25,3 +25,6 @@ config.json
 compile_commands.json
 .plan/ref/
 third_party/qwen_free_runtime/
+
+
+.plan/ref/
