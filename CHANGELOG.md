@@ -2,6 +2,40 @@
 
 > 🇨🇳 [中文版](doc/CHANGELOG_zh.md)
 
+## v0.9.25 (2026-08-24, dev)
+
+### Added
+
+- **Shared diagnostic audio capture**: Added provider-neutral capture attempts spanning Local, Baidu, all Qwen transports, Volcengine, MiMo, Doubao IME, Qwen IME Free, internal provider retries, and configured fallback. Saved groups contain canonical capture/provider-input WAVs, SHA-256 deduplication, signal/device/VAD metrics, and exact stage terminals without transcript, context, secrets, or raw provider JSON.
+- **Bounded Settings controls**: General now exposes `Off`, `Failures only`, and `All recordings`, plus immediate folder-open and confirmed managed-delete actions. Installed/Portable data stays local under `diagnostics\audio`; retention is capped at 20 groups, 100 MiB, and 7 days while unknown files are preserved.
+- **Generic ASR replay tool**: Added `tools\asr_audio_replay.bat` and the developer-only `asr_audio_replay` CMake target for canonical WAV validation, PCM hash/metrics, Local replay, configured primary/fallback comparison, and explicitly selected production batch/streaming cloud sessions. Cloud upload and transcript console output remain opt-in.
+
+### Changed
+
+- **Diagnostic I/O lifecycle**: WAV/JSON hashing, atomic writes, retention, and Settings deletion are serialized outside WASAPI/waveIn callbacks and UI hot paths; application shutdown waits for pending diagnostic writers.
+- **Attempt-safe diagnostics**: Streaming sessions now receive the immutable per-recording config/attempt ID, fallback-provider retries use a collision-free fallback stage namespace, and replay resolves assets/config from the canonical runtime payload.
+- **LLM provider refresh**: Kept the official DeepSeek preset on `deepseek-v4-flash` with thinking disabled for low-latency correction, replaced OpenRouter's retired `qwen/qwen3-4b` preset with `qwen/qwen3.5-9b`, and kept SiliconFlow on the current documented `Qwen/Qwen3.6-35B-A3B` model while switching to the top-level `enable_thinking=false` parameter.
+- **Conservative preset migration**: Exact retired DeepSeek/OpenRouter aliases and obsolete SiliconFlow parameter shapes are migrated only when the configured endpoint is still the corresponding official preset endpoint; custom proxy endpoints and unrelated custom model choices are left unchanged.
+- **Bounded LLM networking**: API Base URLs and full `/chat/completions` URLs now share canonical path construction, receive timeout is 15 seconds while resolve/connect/send remain capped at 5 seconds, and response bodies are bounded to 1 MiB.
+
+### Fixed
+
+- **Settings diagnostics layout**: Widened both Diagnostics action buttons and slightly increased the Settings height while reserving a complete footer area, preventing English labels and the bottom Save/Close buttons from being clipped.
+- **Capture-start evidence**: When WASAPI/waveIn cannot produce the first PCM sample, `Failures only` now writes a JSON-only manifest with attempted/terminal capture backend, exact startup phase and error code, plus available device/format metadata; no empty WAV is fabricated.
+- **Diagnostic privacy and shutdown integrity**: Enabling recording diagnostics now activates only the structured runtime lifecycle log, not Qwen/Volcengine verbose files or Volcengine DNS/TCP probes. Diagnostic writers remain joinable, are drained completely on exit, and completed writer handles are reaped between recordings.
+- **Managed-file boundary**: Retention and confirmed deletion now recognize only exact capture/input artifact names. Unknown same-prefix WAV files and WAV-like `.tmp` files are preserved, while stale module-owned temp files are still removed.
+- **Replay path fidelity**: The BAT wrapper no longer uses delayed expansion, so quoted WAV/runtime paths containing `!` reach the replay executable unchanged.
+- **Malformed provider-store preservation**: Saving settings no longer replaces an invalid multi-provider JSON store with `{}`; the original bytes and unrelated provider entries are retained while legacy active-provider fields continue to save normally.
+- **Connection-test parity**: `Test Connection` now sends the current Extra Params through the same request builder as real correction and rejects malformed merged JSON locally before network I/O.
+- **Provider credential/config isolation**: Extra Params are persisted per provider, visible edits are captured before a provider switch, and a provider without stored settings no longer inherits another provider's API key, endpoint, model, or Extra Params. The dropdown now restores the configured provider, while startup migration still preserves legacy single-provider fields.
+- **Provider store parsing**: Provider save/load/list/delete now uses JSON-aware top-level member parsing, so braces or provider-like names inside stored string values cannot corrupt or cross-load another provider entry.
+- **OpenAI-compatible response handling**: Responses are read specifically from `choices[0].message.content`, with JSON escape/Unicode decoding, optional text-content array support, and explicit failure for empty or malformed HTTP 200 bodies.
+
+### Tests
+
+- Added `audio_diagnostics_test` coverage for canonical WAV headers, PCM signal metrics, SHA-256, save policy, JSON-only zero-PCM capture failures, stage-input deduplication, VAD metadata merging, JSON privacy, strict managed-temp/deletion boundaries, and 20-group retention.
+- Added `llm_refine_test` coverage for provider presets and migration boundaries, malformed-store preservation, request/Extra Params validation, endpoint normalization, response parsing, Unicode escapes, and bounded timeout policy. `build.bat --test` now runs it with the existing offline protocol suites.
+
 ## v0.9.24 (2026-08-10, dev)
 
 ### Added

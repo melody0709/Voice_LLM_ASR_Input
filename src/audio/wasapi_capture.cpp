@@ -1,4 +1,5 @@
 #include "wasapi_capture.h"
+#include "audio_diagnostics.h"
 #include "asr_streaming_session.h"
 #include "globals.h"
 #include "engine.h"
@@ -43,10 +44,15 @@ bool WasapiCapture::InitEnumerator() {
 }
 
 bool WasapiCapture::FindDevice(const std::wstring& deviceId) {
+    m_usedDefaultDevice = deviceId.empty();
     if (!deviceId.empty()) {
         HRESULT hr = m_enumerator->GetDevice(deviceId.c_str(), &m_device);
-        if (SUCCEEDED(hr) && m_device) return true;
+        if (SUCCEEDED(hr) && m_device) {
+            m_usedDefaultDevice = false;
+            return true;
+        }
         printf("[WASAPI] Device ID not found, using default\n");
+        m_usedDefaultDevice = true;
     }
     HRESULT hr = m_enumerator->GetDefaultAudioEndpoint(eCapture, eConsole, &m_device);
     return SUCCEEDED(hr) && m_device;
@@ -106,6 +112,8 @@ float WasapiCapture::CalculateAudioLevelFloat(const float* data, UINT32 frames, 
 }
 
 bool WasapiCapture::Init(const std::wstring& deviceId) {
+    m_deviceName.clear();
+    m_deviceId.clear();
     if (!InitCOM()) { printf("[WASAPI] InitCOM failed\n"); return false; }
     if (!InitEnumerator()) { printf("[WASAPI] InitEnumerator failed\n"); return false; }
     if (!FindDevice(deviceId)) { printf("[WASAPI] FindDevice failed\n"); return false; }
@@ -119,6 +127,11 @@ bool WasapiCapture::Init(const std::wstring& deviceId) {
             PropVariantClear(&varName);
         }
         props->Release();
+    }
+    LPWSTR resolvedId = nullptr;
+    if (SUCCEEDED(m_device->GetId(&resolvedId)) && resolvedId) {
+        m_deviceId = resolvedId;
+        CoTaskMemFree(resolvedId);
     }
 
     if (!InitAudioClient()) return false;
@@ -218,6 +231,19 @@ void WasapiCapture::CaptureThread() {
                 break;
             }
 
+            if (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) {
+                audio_diagnostics::RecordCaptureDiscontinuity();
+            }
+            if (numFrames > 0 && (flags & AUDCLNT_BUFFERFLAGS_SILENT)) {
+                if (m_nativeIsFloat) {
+                    audio_diagnostics::RecordWasapiFloatPacket(
+                        nullptr, numFrames, m_nativeChannels, nullptr, true);
+                } else {
+                    audio_diagnostics::RecordWasapiPcm16Packet(
+                        nullptr, numFrames, m_nativeChannels, nullptr, true);
+                }
+            }
+
             if (numFrames > 0 && !(flags & AUDCLNT_BUFFERFLAGS_SILENT)) {
                 const float* srcFloat = nullptr;
                 std::vector<float> monoFloat;
@@ -271,6 +297,16 @@ void WasapiCapture::CaptureThread() {
                     mono.assign(srcFloat, srcFloat + numFrames);
                 }
 
+                if (m_nativeIsFloat) {
+                    audio_diagnostics::RecordWasapiFloatPacket(
+                        reinterpret_cast<const float*>(captureData), numFrames,
+                        m_nativeChannels, mono.data(), false);
+                } else {
+                    audio_diagnostics::RecordWasapiPcm16Packet(
+                        reinterpret_cast<const int16_t*>(captureData), numFrames,
+                        m_nativeChannels, mono.data(), false);
+                }
+
                 g_audioLevel.store(CalculateAudioLevelFloat(mono.data(), numFrames, 1));
 
                 const UINT32 outputFrames = static_cast<UINT32>(numFrames * m_resampleRatio) + 2;
@@ -291,6 +327,8 @@ void WasapiCapture::CaptureThread() {
 
                 if (written > 0) {
                     const BYTE* begin = reinterpret_cast<const BYTE*>(out);
+                    audio_diagnostics::RecordOutputPcm16(
+                        begin, written * sizeof(int16_t));
                     EnterCriticalSection(&g_audioLock);
                     g_audioData.insert(g_audioData.end(), begin, begin + written * sizeof(int16_t));
                     LeaveCriticalSection(&g_audioLock);

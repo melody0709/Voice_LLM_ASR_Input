@@ -1,5 +1,6 @@
 #include "qwen_audio_streaming_session.h"
 
+#include "asr_diagnostics.h"
 #include "asr_runtime_log.h"
 #include "asr_result.h"
 #include "asr_streaming_session_base.h"
@@ -98,6 +99,7 @@ public:
         running_.store(true);
         recordingMs_.store(0.0);
         capturedBytes_.store(0);
+        nextRetryStageIndex_ = 1;
         worker_ = std::thread([this] { Worker(); });
         return true;
     }
@@ -137,6 +139,23 @@ public:
     const wchar_t* ProviderName() const override { return L"Qwen Audio 3 ASR"; }
 
 private:
+    audio_diagnostics::StageMetadata PrimaryStage(
+        std::wstring reason = {}) const {
+        return asr_diagnostics::MakeStageMetadata(config_, std::move(reason));
+    }
+
+    audio_diagnostics::StageMetadata RetryStage(unsigned index,
+                                                 std::wstring reason) const {
+        return asr_diagnostics::MakeRetryStageMetadata(
+            config_, index, std::move(reason));
+    }
+
+    void CompletePrimary(audio_diagnostics::StageTerminal terminal) {
+        audio_diagnostics::CompleteStage(
+            config_.asrAttemptId, config_.asrDiagnosticStageKind,
+            config_.asrDiagnosticStageIndex, terminal);
+    }
+
     void SetActiveClient(qwen_audio_streaming::Client* client) {
         std::lock_guard<std::mutex> lock(clientMutex_);
         activeClient_ = client;
@@ -192,11 +211,23 @@ private:
             return result;
         }
 
+        const unsigned diagnosticIndex = nextRetryStageIndex_++;
+        const audio_diagnostics::StageMetadata diagnostic = RetryStage(
+            diagnosticIndex,
+            config_.asrDiagnosticStageKind == audio_diagnostics::StageKind::Fallback
+                ? L"fallback_replay" : L"empty_or_transport_replay");
+        const ULONGLONG attemptStarted = GetTickCount64();
         qwen_audio_streaming::Client client(cfg_);
         SetActiveClient(&client);
         std::wstring error;
         if (!client.Connect(error)) {
             result.error = error;
+            audio_diagnostics::StageTerminal terminal =
+                asr_diagnostics::TerminalFromText(AudioErrorText(error));
+            terminal.terminal = "connect_error";
+            terminal.elapsedMs = static_cast<double>(GetTickCount64() - attemptStarted);
+            audio_diagnostics::CompleteStage(
+                config_.asrAttemptId, diagnostic.kind, diagnostic.index, terminal);
             client.Close();
             ClearActiveClient(&client);
             return result;
@@ -205,10 +236,13 @@ private:
         std::mutex stateMutex;
         std::mutex textMutex;
         std::wstring taskError;
+        std::string providerCode;
         qwen_audio_streaming::TranscriptAccumulator transcript;
         std::atomic<bool> drainDone{false};
         std::atomic<bool> failed{false};
         std::atomic<bool> finished{false};
+        std::atomic<bool> providerNoSpeech{false};
+        std::atomic<bool> providerFailed{false};
         std::thread drain([&] {
             while (!drainDone.load() && !abort_.load()) {
                 qwen_audio_streaming::Event event;
@@ -237,6 +271,7 @@ private:
                     // The provider may report silence as task-failed rather
                     // than returning an empty final. Treat it as a clean
                     // empty recognition result, not an operational failure.
+                    providerNoSpeech.store(true);
                     finished.store(true);
                     break;
                 }
@@ -248,6 +283,8 @@ private:
                         WideToUtf8(event.message).c_str());
                     std::lock_guard<std::mutex> lock(stateMutex);
                     taskError = event.message.empty() ? L"task failed" : event.message;
+                    providerCode = WideToUtf8(event.errorCode);
+                    providerFailed.store(true);
                     failed.store(true);
                     break;
                 }
@@ -262,6 +299,9 @@ private:
                 sendOk = false;
                 break;
             }
+            audio_diagnostics::AppendStageInput(
+                config_.asrAttemptId, diagnostic,
+                pcm.data() + offset, bytes, bytes);
             // Replay the same real-time cadence as the primary stream. A
             // burst upload can trigger provider-side backpressure and create
             // a misleading task failure even when the socket is healthy.
@@ -298,6 +338,27 @@ private:
         }
         result.ok = finished.load() && !failed.load() && !abort_.load();
         if (abort_.load()) result.error = L"aborted";
+        audio_diagnostics::StageTerminal terminal;
+        if (abort_.load()) {
+            terminal.terminal = "aborted";
+            terminal.reason = "cancelled";
+        } else if (providerNoSpeech.load()) {
+            terminal.terminal = "provider_no_words";
+            terminal.reason = "no_speech";
+        } else if (result.ok && result.text.empty()) {
+            terminal.terminal = "task_finished_empty";
+            terminal.reason = "no_speech";
+        } else if (result.ok) {
+            terminal.terminal = "task_finished";
+            terminal.textChars = result.text.size();
+        } else {
+            terminal = asr_diagnostics::TerminalFromText(AudioErrorText(result.error));
+            if (providerFailed.load()) terminal.terminal = "provider_error";
+        }
+        terminal.providerCode = providerCode;
+        terminal.elapsedMs = static_cast<double>(GetTickCount64() - attemptStarted);
+        audio_diagnostics::CompleteStage(
+            config_.asrAttemptId, diagnostic.kind, diagnostic.index, terminal);
         client.Close();
         ClearActiveClient(&client);
         return result;
@@ -346,6 +407,7 @@ private:
     }
 
     void Worker() {
+        const ULONGLONG workerStarted = GetTickCount64();
         CloudAsrReplayBuffer replay(kMaxReplayBytes);
         std::unique_ptr<qwen_audio_streaming::Client> client;
         std::wstring connectError;
@@ -363,6 +425,8 @@ private:
         if (cfg_.apiKey.empty()) {
             std::wstring missingKeyError = L"missing DashScope API key";
             BufferUntilStop(replay, clientBuffer_, false, missingKeyError);
+            CompletePrimary(asr_diagnostics::TerminalFromText(
+                AudioErrorText(missingKeyError)));
             DispatchAttempt(true, missingKeyError, {});
             Finish();
             return;
@@ -411,8 +475,16 @@ private:
                     ? ComputeCloudAsrStreamingFinalWaitMs(recordingMs_.load(), replay.Size())
                     : ComputeCloudAsrLegacyFinalizeTimeoutMs(recordingMs_.load(), replay.Size());
                 const RecognitionAttempt retry = RetryRecognitionOnce(replay.Data(), timeout);
+                audio_diagnostics::StageTerminal primaryTerminal =
+                    asr_diagnostics::TerminalFromText(AudioErrorText(connectError));
+                primaryTerminal.terminal = "connect_error";
+                CompletePrimary(primaryTerminal);
                 DispatchAttempt(!retry.ok, retry.error, retry.text);
             } else {
+                audio_diagnostics::StageTerminal primaryTerminal =
+                    asr_diagnostics::TerminalFromText(AudioErrorText(connectError));
+                primaryTerminal.terminal = "connect_error";
+                CompletePrimary(primaryTerminal);
                 DispatchAttempt(true, connectError, {});
             }
             Finish();
@@ -503,6 +575,8 @@ private:
                 retryWithReplay = replayEnabled;
                 return false;
             }
+            audio_diagnostics::AppendStageInput(
+                config_.asrAttemptId, PrimaryStage(), data, bytes, bytes);
             return true;
         };
 
@@ -669,6 +743,41 @@ private:
             finalError = error;
         }
 
+        audio_diagnostics::StageTerminal primaryTerminal;
+        if (noSpeech.load()) {
+            primaryTerminal.terminal = "provider_no_words";
+            primaryTerminal.reason = "no_speech";
+        } else if (failed || drainFailed.load()) {
+            primaryTerminal = asr_diagnostics::TerminalFromText(
+                AudioErrorText(finalError));
+            switch (finalReason) {
+            case qwen_finalize_policy::TerminalReason::Timeout:
+                primaryTerminal.terminal = "timeout";
+                break;
+            case qwen_finalize_policy::TerminalReason::PeerClosed:
+                primaryTerminal.terminal = "peer_close";
+                break;
+            case qwen_finalize_policy::TerminalReason::ProviderFailure:
+                primaryTerminal.terminal = "provider_error";
+                break;
+            case qwen_finalize_policy::TerminalReason::TransportFailure:
+                primaryTerminal.terminal = "transport_error";
+                break;
+            case qwen_finalize_policy::TerminalReason::None:
+                break;
+            }
+        } else if (finalText.empty()) {
+            primaryTerminal.terminal = "task_finished_empty";
+            primaryTerminal.reason = "no_speech";
+        } else {
+            primaryTerminal.terminal = "task_finished";
+            primaryTerminal.textChars = finalText.size();
+            primaryTerminal.committedTextChars = committedText.size();
+        }
+        primaryTerminal.elapsedMs =
+            static_cast<double>(GetTickCount64() - workerStarted);
+        CompletePrimary(primaryTerminal);
+
         const bool retryEmpty = !noSpeech.load() && !failed && !abort_.load() && finalText.empty() &&
             replay.Available() && replay.Size() >= kEmptyRetryMinBytes;
         if (!abort_.load() && (retryWithReplay || retryEmpty) &&
@@ -707,6 +816,7 @@ private:
     std::thread worker_;
     std::mutex clientMutex_;
     qwen_audio_streaming::Client* activeClient_ = nullptr;
+    unsigned nextRetryStageIndex_ = 1;
 };
 
 } // namespace

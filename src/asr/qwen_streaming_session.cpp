@@ -1,5 +1,6 @@
 #include "qwen_streaming_session.h"
 
+#include "asr_diagnostics.h"
 #include "asr_result.h"
 #include "asr_runtime_log.h"
 #include "asr_streaming_session_base.h"
@@ -81,6 +82,7 @@ public:
         streaming_.store(true);
         recordingMs_.store(0.0);
         capturedPcmBytes_.store(0);
+        nextRetryStageIndex_ = 1;
         running_.store(true);
         worker_ = std::thread([this]() { WorkerLoop(); });
         return true;
@@ -127,6 +129,23 @@ public:
     }
 
 private:
+    audio_diagnostics::StageMetadata PrimaryStage(
+        std::wstring reason = {}) const {
+        return asr_diagnostics::MakeStageMetadata(config_, std::move(reason));
+    }
+
+    audio_diagnostics::StageMetadata RetryStage(unsigned index,
+                                                 std::wstring reason) const {
+        return asr_diagnostics::MakeRetryStageMetadata(
+            config_, index, std::move(reason));
+    }
+
+    void CompletePrimary(audio_diagnostics::StageTerminal terminal) {
+        audio_diagnostics::CompleteStage(
+            config_.asrAttemptId, config_.asrDiagnosticStageKind,
+            config_.asrDiagnosticStageIndex, terminal);
+    }
+
     void SetActiveClient(qwen_asr::RealtimeClient* client) {
         std::lock_guard<std::mutex> lock(activeClientMutex_);
         activeClient_ = client;
@@ -160,6 +179,12 @@ private:
         retryCfg.turnDetection = L"manual";
         const int retryDelays[] = {500, 1000};
         for (int attempt = 0; attempt < 3 && !abort_.load(); ++attempt) {
+            const unsigned diagnosticIndex = nextRetryStageIndex_++;
+            const audio_diagnostics::StageMetadata diagnostic = RetryStage(
+                diagnosticIndex,
+                config_.asrDiagnosticStageKind == audio_diagnostics::StageKind::Fallback
+                    ? L"fallback_replay" : L"primary_replay");
+            const ULONGLONG attemptStarted = GetTickCount64();
             if (attempt > 0) {
                 Sleep(retryDelays[(std::min)(attempt - 1, 1)]);
             }
@@ -172,6 +197,14 @@ private:
                 ClearActiveClient(&client);
                 result.error = QwenErrorText(error);
                 result.transportError = true;
+                audio_diagnostics::StageTerminal terminal =
+                    asr_diagnostics::TerminalFromText(
+                        result.error, "connect_complete",
+                        static_cast<double>(GetTickCount64() - attemptStarted));
+                terminal.terminal = "connect_error";
+                audio_diagnostics::CompleteStage(
+                    config_.asrAttemptId, diagnostic.kind,
+                    diagnostic.index, terminal);
                 if (!connectRetryable) break;
                 continue;
             }
@@ -184,6 +217,9 @@ private:
                     sendOk = false;
                     break;
                 }
+                audio_diagnostics::AppendStageInput(
+                    config_.asrAttemptId, diagnostic,
+                    pcm.data() + offset, bytes, bytes);
                 if (offset + bytes < pcm.size()) {
                     Sleep(static_cast<DWORD>(std::clamp(retryCfg.chunkMs, 20, 1000)));
                 }
@@ -194,6 +230,14 @@ private:
                 ClearActiveClient(&client);
                 result.error = QwenErrorText(error);
                 result.transportError = true;
+                audio_diagnostics::StageTerminal terminal =
+                    asr_diagnostics::TerminalFromText(
+                        result.error, "send_complete",
+                        static_cast<double>(GetTickCount64() - attemptStarted));
+                terminal.terminal = abort_.load() ? "aborted" : "send_error";
+                audio_diagnostics::CompleteStage(
+                    config_.asrAttemptId, diagnostic.kind,
+                    diagnostic.index, terminal);
                 continue;
             }
 
@@ -204,6 +248,12 @@ private:
                 ClearActiveClient(&client);
                 result.error = L"Qwen ASR error: aborted";
                 result.transportError = true;
+                audio_diagnostics::StageTerminal terminal =
+                    asr_diagnostics::TerminalFromText(result.error);
+                terminal.terminal = "aborted";
+                audio_diagnostics::CompleteStage(
+                    config_.asrAttemptId, diagnostic.kind,
+                    diagnostic.index, terminal);
                 return result;
             }
             if (!client.Finish(finalTimeoutMs, text, error)) {
@@ -211,12 +261,31 @@ private:
                 ClearActiveClient(&client);
                 result.error = QwenErrorText(error);
                 result.transportError = true;
+                audio_diagnostics::StageTerminal terminal =
+                    asr_diagnostics::TerminalFromText(
+                        result.error, "session_finished",
+                        static_cast<double>(GetTickCount64() - attemptStarted));
+                audio_diagnostics::CompleteStage(
+                    config_.asrAttemptId, diagnostic.kind,
+                    diagnostic.index, terminal);
                 continue;
             }
             client.Close();
             ClearActiveClient(&client);
             result.text = text;
             result.transportError = false;
+            audio_diagnostics::StageTerminal terminal =
+                asr_diagnostics::TerminalFromText(
+                    result.text,
+                    result.text.empty() ? "session_finished_empty" : "session_finished",
+                    static_cast<double>(GetTickCount64() - attemptStarted));
+            if (result.text.empty()) {
+                terminal.terminal = "session_finished_empty";
+                terminal.reason = "no_speech";
+            }
+            audio_diagnostics::CompleteStage(
+                config_.asrAttemptId, diagnostic.kind,
+                diagnostic.index, terminal);
             return result;
         }
         if (result.error.empty()) {
@@ -235,6 +304,8 @@ private:
         if (qcfg_.apiKey.empty()) {
             WaitForRecordingStop();
             if (!abort_.load()) {
+                CompletePrimary(asr_diagnostics::TerminalFromText(
+                    L"Qwen ASR error: missing DashScope API key"));
                 DispatchFinal(L"Qwen ASR error: missing DashScope API key");
             }
             markStopped();
@@ -266,6 +337,10 @@ private:
         if (!connected) {
             WaitForRecordingStop();
             if (!abort_.load()) {
+                audio_diagnostics::StageTerminal terminal =
+                    asr_diagnostics::TerminalFromText(QwenErrorText(error));
+                terminal.terminal = "connect_error";
+                CompletePrimary(terminal);
                 DispatchFinal(QwenErrorText(error));
             }
             markStopped();
@@ -373,6 +448,8 @@ private:
                 retryWithReplay = true;
                 return false;
             }
+            audio_diagnostics::AppendStageInput(
+                config_.asrAttemptId, PrimaryStage(), data, bytes, bytes);
             return true;
         };
 
@@ -506,6 +583,36 @@ private:
             return;
         }
 
+        audio_diagnostics::StageTerminal primaryTerminal;
+        if (failed) {
+            primaryTerminal = asr_diagnostics::TerminalFromText(QwenErrorText(error));
+            switch (terminalReason.load()) {
+            case qwen_finalize_policy::TerminalReason::Timeout:
+                primaryTerminal.terminal = "timeout";
+                break;
+            case qwen_finalize_policy::TerminalReason::PeerClosed:
+                primaryTerminal.terminal = "peer_close";
+                break;
+            case qwen_finalize_policy::TerminalReason::ProviderFailure:
+                primaryTerminal.terminal = "provider_error";
+                break;
+            case qwen_finalize_policy::TerminalReason::TransportFailure:
+                primaryTerminal.terminal = "transport_error";
+                break;
+            case qwen_finalize_policy::TerminalReason::None:
+                break;
+            }
+        } else if (finalText.empty()) {
+            primaryTerminal.terminal = "session_finished_empty";
+            primaryTerminal.reason = "no_speech";
+        } else {
+            primaryTerminal.terminal = "session_finished";
+            primaryTerminal.textChars = finalText.size();
+        }
+        primaryTerminal.elapsedMs =
+            static_cast<double>(GetTickCount64() - tTotal0);
+        CompletePrimary(primaryTerminal);
+
         const bool shouldRetryEmptyFinal = !failed && !abort_.load() && finalText.empty() &&
             replayBuffer.Available() && replayBuffer.Size() >= kQwenEmptyRetryMinBytes;
         const bool shouldRetryFailure = failed && !abort_.load() && retryWithReplay &&
@@ -559,6 +666,7 @@ private:
     qwen_asr::RealtimeClient* activeClient_ = nullptr;
     std::atomic<double> recordingMs_{0.0};
     std::atomic<size_t> capturedPcmBytes_{0};
+    unsigned nextRetryStageIndex_ = 1;
 };
 
 } // namespace

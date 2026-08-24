@@ -6,6 +6,9 @@
 
 #include <windows.h>
 
+#include "audio_diagnostics.h"
+
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -20,6 +23,10 @@ struct MimoConfig {
     std::wstring baseUrl = kDefaultBaseUrl;
     std::wstring model = kDefaultModel;
     std::wstring language = kDefaultLanguage;
+    uint64_t diagnosticAttemptId = 0;
+    audio_diagnostics::StageKind diagnosticStageKind =
+        audio_diagnostics::StageKind::Primary;
+    unsigned diagnosticStageIndex = 0;
 };
 
 struct TestResult {

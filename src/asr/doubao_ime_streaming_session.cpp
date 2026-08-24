@@ -1,5 +1,6 @@
 #include "doubao_ime_streaming_session.h"
 
+#include "asr_diagnostics.h"
 #include "asr_result.h"
 #include "asr_streaming_session_base.h"
 #include "cloud_asr_common.h"
@@ -127,6 +128,7 @@ public:
         streaming_.store(true);
         recordingMs_.store(0.0);
         capturedPcmBytes_.store(0);
+        nextRetryStageIndex_ = 1;
         running_.store(true);
         worker_ = std::thread([this]() { WorkerLoop(); });
         return true;
@@ -169,6 +171,29 @@ public:
     }
 
 private:
+    audio_diagnostics::StageMetadata PrimaryStage(
+        std::wstring reason = {}) const {
+        audio_diagnostics::StageMetadata stage =
+            asr_diagnostics::MakeStageMetadata(config_, std::move(reason));
+        stage.encoding = L"opus";
+        return stage;
+    }
+
+    audio_diagnostics::StageMetadata RetryStage(unsigned index,
+                                                 std::wstring reason) const {
+        audio_diagnostics::StageMetadata stage =
+            asr_diagnostics::MakeRetryStageMetadata(
+                config_, index, std::move(reason));
+        stage.encoding = L"opus";
+        return stage;
+    }
+
+    void CompletePrimary(audio_diagnostics::StageTerminal terminal) {
+        audio_diagnostics::CompleteStage(
+            config_.asrAttemptId, config_.asrDiagnosticStageKind,
+            config_.asrDiagnosticStageIndex, terminal);
+    }
+
     void SetActiveClient(doubao_ime_asr::RealtimeClient* client) {
         std::lock_guard<std::mutex> lock(activeClientMutex_);
         activeClient_ = client;
@@ -293,7 +318,15 @@ private:
             std::vector<BYTE> replayChunk(data, data + replayBytes);
             replayBuffer.Append(replayChunk);
         }
-        return client.SendPcmFrame(data, bytes, isLast, error);
+        size_t networkBytes = 0;
+        const bool sent = client.SendPcmFrame(
+            data, bytes, isLast, error, &networkBytes);
+        if (sent && replayBytes > 0) {
+            audio_diagnostics::AppendStageInput(
+                config_.asrAttemptId, PrimaryStage(),
+                data, replayBytes, networkBytes);
+        }
+        return sent;
     }
 
     DoubaoRetryResult RetryRecognitionOnce(const std::vector<BYTE>& pcm, DWORD finalTimeoutMs) {
@@ -309,6 +342,12 @@ private:
         }
 
         for (int attempt = 0; attempt < 2 && !abort_.load(); ++attempt) {
+            const unsigned diagnosticIndex = nextRetryStageIndex_++;
+            const audio_diagnostics::StageMetadata diagnostic = RetryStage(
+                diagnosticIndex,
+                config_.asrDiagnosticStageKind == audio_diagnostics::StageKind::Fallback
+                    ? L"fallback_replay" : L"empty_or_transport_replay");
+            const ULONGLONG attemptStarted = GetTickCount64();
             doubao_ime_asr::RealtimeClient client(retryCfg);
             SetActiveClient(&client);
             std::wstring error;
@@ -316,6 +355,13 @@ private:
                 client.Close();
                 ClearActiveClient(&client);
                 if (attempt == 0 && doubao_ime_asr::IsAuthFailure(error)) {
+                    audio_diagnostics::StageTerminal terminal =
+                        asr_diagnostics::TerminalFromText(DoubaoErrorText(error));
+                    terminal.terminal = "auth_error";
+                    terminal.elapsedMs = static_cast<double>(GetTickCount64() - attemptStarted);
+                    audio_diagnostics::CompleteStage(
+                        config_.asrAttemptId, diagnostic.kind,
+                        diagnostic.index, terminal);
                     retryCfg.deviceId.clear();
                     retryCfg.cdid.clear();
                     retryCfg.token.clear();
@@ -324,6 +370,13 @@ private:
                 }
                 result.error = DoubaoErrorText(error);
                 result.transportError = true;
+                audio_diagnostics::StageTerminal terminal =
+                    asr_diagnostics::TerminalFromText(result.error);
+                terminal.terminal = "connect_error";
+                terminal.elapsedMs = static_cast<double>(GetTickCount64() - attemptStarted);
+                audio_diagnostics::CompleteStage(
+                    config_.asrAttemptId, diagnostic.kind,
+                    diagnostic.index, terminal);
                 return result;
             }
             SyncCredentialsFromClient(client);
@@ -337,10 +390,15 @@ private:
                              pcm.begin() + static_cast<ptrdiff_t>(offset + bytes));
                 if (frame.size() < frameBytes) frame.resize(frameBytes, 0);
                 const bool isLast = offset + bytes >= pcm.size();
-                if (!client.SendPcmFrame(frame.data(), frame.size(), isLast, error)) {
+                size_t networkBytes = 0;
+                if (!client.SendPcmFrame(
+                        frame.data(), frame.size(), isLast, error, &networkBytes)) {
                     sendOk = false;
                     break;
                 }
+                audio_diagnostics::AppendStageInput(
+                    config_.asrAttemptId, diagnostic,
+                    pcm.data() + offset, bytes, networkBytes);
             }
 
             if (!sendOk || abort_.load()) {
@@ -349,6 +407,13 @@ private:
                 ClearActiveClient(&client);
                 result.error = DoubaoErrorText(error.empty() ? L"send failed" : error);
                 result.transportError = true;
+                audio_diagnostics::StageTerminal terminal =
+                    asr_diagnostics::TerminalFromText(result.error);
+                terminal.terminal = abort_.load() ? "aborted" : "send_error";
+                terminal.elapsedMs = static_cast<double>(GetTickCount64() - attemptStarted);
+                audio_diagnostics::CompleteStage(
+                    config_.asrAttemptId, diagnostic.kind,
+                    diagnostic.index, terminal);
                 continue;
             }
 
@@ -358,12 +423,30 @@ private:
                 ClearActiveClient(&client);
                 result.error = DoubaoErrorText(error);
                 result.transportError = true;
+                audio_diagnostics::StageTerminal terminal =
+                    asr_diagnostics::TerminalFromText(result.error);
+                terminal.elapsedMs = static_cast<double>(GetTickCount64() - attemptStarted);
+                audio_diagnostics::CompleteStage(
+                    config_.asrAttemptId, diagnostic.kind,
+                    diagnostic.index, terminal);
                 continue;
             }
             client.Close();
             ClearActiveClient(&client);
             result.text = text;
             result.transportError = false;
+            audio_diagnostics::StageTerminal terminal;
+            if (result.text.empty()) {
+                terminal.terminal = "session_finished_empty";
+                terminal.reason = "no_speech";
+            } else {
+                terminal.terminal = "session_finished";
+                terminal.textChars = result.text.size();
+            }
+            terminal.elapsedMs = static_cast<double>(GetTickCount64() - attemptStarted);
+            audio_diagnostics::CompleteStage(
+                config_.asrAttemptId, diagnostic.kind,
+                diagnostic.index, terminal);
             return result;
         }
 
@@ -383,6 +466,11 @@ private:
         if (!ConnectWithCredentialRetry(client, error)) {
             WaitForRecordingStop();
             if (!abort_.load()) {
+                audio_diagnostics::StageTerminal terminal =
+                    asr_diagnostics::TerminalFromText(DoubaoErrorText(error));
+                terminal.terminal = doubao_ime_asr::IsAuthFailure(error)
+                    ? "auth_error" : "connect_error";
+                CompletePrimary(terminal);
                 DispatchFinal(DoubaoErrorText(error));
             }
             markStopped();
@@ -643,6 +731,24 @@ private:
             return;
         }
 
+        audio_diagnostics::StageTerminal primaryTerminal;
+        if (failed) {
+            primaryTerminal = asr_diagnostics::TerminalFromText(
+                DoubaoErrorText(error));
+            if (error.find(L"timed out") != std::wstring::npos ||
+                error.find(L"timeout") != std::wstring::npos) {
+                primaryTerminal.terminal = "timeout";
+            }
+        } else if (finalText.empty()) {
+            primaryTerminal.terminal = "session_finished_empty";
+            primaryTerminal.reason = "no_speech";
+        } else {
+            primaryTerminal.terminal = "session_finished";
+            primaryTerminal.textChars = finalText.size();
+        }
+        primaryTerminal.elapsedMs = static_cast<double>(GetTickCount64() - tTotal0);
+        CompletePrimary(primaryTerminal);
+
         const bool shouldRetryEmptyFinal = !failed && finalText.empty() &&
             replayBuffer.Available() && replayBuffer.Size() >= kDoubaoEmptyRetryMinBytes;
         const bool shouldRetryFailure = failed && retryWithReplay &&
@@ -684,6 +790,7 @@ private:
     doubao_ime_asr::RealtimeClient* activeClient_ = nullptr;
     std::atomic<double> recordingMs_{0.0};
     std::atomic<size_t> capturedPcmBytes_{0};
+    unsigned nextRetryStageIndex_ = 1;
 };
 
 } // namespace

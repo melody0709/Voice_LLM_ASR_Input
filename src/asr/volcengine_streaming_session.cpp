@@ -1,5 +1,6 @@
 #include "volcengine_streaming_session.h"
 
+#include "asr_diagnostics.h"
 #include "asr_result.h"
 #include "asr_streaming_session_base.h"
 #include "cloud_asr_common.h"
@@ -129,6 +130,7 @@ public:
         capturedPcmBytes_.store(0);
         openingSession_.store(false);
         openingAttempt_.store(0);
+        nextRetryStageIndex_ = 1;
         running_.store(true);
         worker_ = std::thread([this]() { WorkerLoop(); });
         return true;
@@ -191,6 +193,23 @@ public:
     }
 
 private:
+    audio_diagnostics::StageMetadata PrimaryStage(
+        std::wstring reason = {}) const {
+        return asr_diagnostics::MakeStageMetadata(config_, std::move(reason));
+    }
+
+    audio_diagnostics::StageMetadata RetryStage(unsigned index,
+                                                 std::wstring reason) const {
+        return asr_diagnostics::MakeRetryStageMetadata(
+            config_, index, std::move(reason));
+    }
+
+    void CompletePrimary(audio_diagnostics::StageTerminal terminal) {
+        audio_diagnostics::CompleteStage(
+            config_.asrAttemptId, config_.asrDiagnosticStageKind,
+            config_.asrDiagnosticStageIndex, terminal);
+    }
+
     std::wstring BuildContextJson(const std::wstring& inputFieldText, bool includeHistory) const {
         std::wstring json = L"{\"context_type\":\"dialog_ctx\",\"context_data\":[";
         int idx = 0;
@@ -233,6 +252,12 @@ private:
             return result;
         }
 
+        const unsigned diagnosticIndex = nextRetryStageIndex_++;
+        const audio_diagnostics::StageMetadata diagnostic = RetryStage(
+            diagnosticIndex,
+            config_.asrDiagnosticStageKind == audio_diagnostics::StageKind::Fallback
+                ? L"fallback_empty_final_replay" : L"empty_final_replay");
+        const ULONGLONG attemptStarted = GetTickCount64();
         bool asyncMode = (vcfg.mode == L"bigmodel_async");
         bool nostreamMode = (vcfg.mode == L"bigmodel_nostream");
 
@@ -256,6 +281,12 @@ private:
             VolcDebugLog("Volc retry: OpenSession failed after 3 attempts");
             CloseVolcSessionHandles(retrySess);
             result.transportError = true;
+            audio_diagnostics::StageTerminal terminal;
+            terminal.terminal = "connect_error";
+            terminal.reason = "network";
+            terminal.elapsedMs = static_cast<double>(GetTickCount64() - attemptStarted);
+            audio_diagnostics::CompleteStage(
+                config_.asrAttemptId, diagnostic.kind, diagnostic.index, terminal);
             return result;
         }
         retrySess.connected = true;
@@ -269,8 +300,17 @@ private:
                 VolcDebugLog("Volc retry: send failed at offset=%zu", offset);
                 CloseVolcSessionHandles(retrySess);
                 result.transportError = true;
+                audio_diagnostics::StageTerminal terminal;
+                terminal.terminal = "send_error";
+                terminal.reason = "network";
+                terminal.elapsedMs = static_cast<double>(GetTickCount64() - attemptStarted);
+                audio_diagnostics::CompleteStage(
+                    config_.asrAttemptId, diagnostic.kind, diagnostic.index, terminal);
                 return result;
             }
+            audio_diagnostics::AppendStageInput(
+                config_.asrAttemptId, diagnostic,
+                pcm.data() + offset, take);
             offset += take;
         }
 
@@ -280,6 +320,12 @@ private:
             VolcDebugLog("Volc retry: final packet failed");
             CloseVolcSessionHandles(retrySess);
             result.transportError = true;
+            audio_diagnostics::StageTerminal terminal;
+            terminal.terminal = "final_send_error";
+            terminal.reason = "network";
+            terminal.elapsedMs = static_cast<double>(GetTickCount64() - attemptStarted);
+            audio_diagnostics::CompleteStage(
+                config_.asrAttemptId, diagnostic.kind, diagnostic.index, terminal);
             return result;
         }
 
@@ -309,6 +355,20 @@ private:
         } else {
             VolcDebugLog("Volc retry: failed");
         }
+        audio_diagnostics::StageTerminal terminal;
+        if (!result.text.empty()) {
+            terminal.terminal = "provider_final";
+            terminal.textChars = result.text.size();
+        } else if (result.closedWithoutText) {
+            terminal.terminal = "peer_close_empty";
+            terminal.reason = "no_speech";
+        } else {
+            terminal.terminal = "timeout";
+            terminal.reason = "timeout";
+        }
+        terminal.elapsedMs = static_cast<double>(GetTickCount64() - attemptStarted);
+        audio_diagnostics::CompleteStage(
+            config_.asrAttemptId, diagnostic.kind, diagnostic.index, terminal);
         return result;
     }
 
@@ -398,6 +458,10 @@ private:
                          pendingAudio_.Size(),
                          errMsg.size());
             if (!abort_.load()) {
+                audio_diagnostics::StageTerminal terminal =
+                    asr_diagnostics::TerminalFromText(errMsg);
+                terminal.terminal = "connect_error";
+                CompletePrimary(terminal);
                 DispatchFinal(errMsg);
             }
             markStopped();
@@ -435,7 +499,15 @@ private:
             if (recordReplay && !c.empty()) {
                 appendReplay(c);
             }
-            return volc_asr::SendAudio(s_volcSession, c, false, asyncMode, nostreamMode);
+            std::wstring partial =
+                volc_asr::SendAudio(s_volcSession, c, false, asyncMode, nostreamMode);
+            if (recordReplay && !c.empty() && s_volcSession.hWebSocket &&
+                s_volcSession.connected.load() && !s_volcSession.forceAbort.load()) {
+                audio_diagnostics::AppendStageInput(
+                    config_.asrAttemptId, PrimaryStage(),
+                    c.data(), c.size());
+            }
+            return partial;
         };
 
         auto bufferUntilStop = [&]() {
@@ -595,6 +667,10 @@ private:
             }
             s_volcSession.connected = false;
             if (!abort_.load()) {
+                audio_diagnostics::StageTerminal terminal;
+                terminal.terminal = "local_vad_no_speech";
+                terminal.reason = "no_speech";
+                CompletePrimary(terminal);
                 DispatchFinal(L"No speech detected");
             }
             VolcDebugLog("=== TOTAL session: %llums (no speech) ===", GetTickCount64() - tTotal0);
@@ -658,6 +734,23 @@ private:
             if (finalText.empty()) finalText = lastPartial;
         }
 
+        audio_diagnostics::StageTerminal primaryTerminal;
+        if (!finalText.empty()) {
+            primaryTerminal.terminal = "provider_final";
+            primaryTerminal.textChars = finalText.size();
+        } else if (originalServerClosed) {
+            primaryTerminal.terminal = "peer_close_empty";
+            primaryTerminal.reason = "no_speech";
+        } else if (s_volcSession.forceAbort.load()) {
+            primaryTerminal.terminal = "transport_error";
+            primaryTerminal.reason = "network";
+        } else {
+            primaryTerminal.terminal = "provider_final_empty";
+            primaryTerminal.reason = "no_speech";
+        }
+        primaryTerminal.elapsedMs = static_cast<double>(GetTickCount64() - tTotal0);
+        CompletePrimary(primaryTerminal);
+
         // Empty final retry
         bool retryAttempted = false;
         bool retryClosedWithoutText = false;
@@ -718,6 +811,7 @@ private:
     std::thread worker_;
     std::atomic<double> recordingMs_{0.0};
     std::atomic<size_t> capturedPcmBytes_{0};
+    unsigned nextRetryStageIndex_ = 1;
 
 };
 

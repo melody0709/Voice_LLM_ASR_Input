@@ -21,6 +21,9 @@ bool EqualsIgnoreCase(std::wstring a, std::wstring b);
 // data lives under LocalAppData unless a Portable payload explicitly opts in.
 bool IsPortableMode();
 std::wstring RuntimeAssetDir();
+// Developer tools that live outside the installed payload can point runtime
+// asset/config resolution at the canonical VoxType runtime before LoadConfig.
+bool SetRuntimeAssetDirOverrideForProcess(const std::wstring& directory);
 std::wstring MutableDataDir();
 std::wstring DownloadedModelRoot();
 std::wstring LogDir();
@@ -41,9 +44,9 @@ bool ExtractJsonBool(const std::string& json, const std::string& key, bool fallb
 int ExtractJsonInt(const std::string& json, const std::string& key, int fallback);
 
 void SaveCurrentProvider();
-void LoadProviderFromStore(const std::wstring& name);
+bool LoadProviderFromStore(const std::wstring& name);
 int FindPresetIndex(const std::wstring& name);
-void ApplyPreset(int index);
+bool ApplyPreset(int index, bool preserveLegacyFields = false);
 void LoadConfig();
 void SaveConfig();
 
@@ -52,7 +55,22 @@ float DpiScaleForWindow(HWND hwnd);
 int DipToPx(float value, float scale);
 
 void CALLBACK WaveInProc(HWAVEIN waveIn, UINT msg, DWORD_PTR, DWORD_PTR param1, DWORD_PTR);
-bool StartAudioCapture(std::wstring& error);
+struct AudioCaptureStartFailure {
+    std::wstring attemptedBackends;
+    std::wstring terminalBackend;
+    std::wstring phase;
+    DWORD code = ERROR_SUCCESS;
+    std::wstring deviceName;
+    std::wstring deviceId;
+    bool usedDefaultDevice = true;
+    DWORD nativeSampleRate = 0;
+    WORD nativeChannels = 0;
+    WORD nativeBitsPerSample = 0;
+    bool nativeIsFloat = false;
+};
+
+bool StartAudioCapture(std::wstring& error,
+                       AudioCaptureStartFailure* failure = nullptr);
 std::vector<BYTE> StopAudioCapture();
 int ResolveThreads(const std::wstring& threads);
 

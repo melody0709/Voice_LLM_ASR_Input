@@ -53,17 +53,19 @@ flowchart LR
 |------|------|
 | `src/app/globals.h` | 共享常量、控件 ID、结构体定义、extern 全局变量声明 |
 | `src/audio/engine.h` / `src/audio/engine.cpp` | 后端：字符串/路径工具、JSON 配置持久化、音频采集、`AsrEngine` 类、`PreloadAsrEngine()` |
+| `src/audio/audio_diagnostics.h` / `src/audio/audio_diagnostics.cpp` | provider 无关的采集/stage 诊断、PCM 指标、WAV/SHA-256/JSON 持久化、留存与受管目录操作 |
 | `src/audio/streaming_vad_trimmer.h` / `src/audio/streaming_vad_trimmer.cpp` | 云端流式 ASR session 可复用的 provider-independent PCM VAD trim |
 | `src/asr/asr_session.h` / `src/asr/asr_session.cpp` | Local、百度、MiMo、Qwen 和 Doubao IME recorded 路径的批量 ASR session 抽象 |
 | `src/asr/asr_result.h` / `src/asr/asr_result.cpp` | ASR 文本归一化、结果/失败分类，以及稳定的后端/结果日志名 |
 | `src/asr/asr_dispatcher.h` / `src/asr/asr_dispatcher.cpp` | ASR final 结果分发、LLM 门控、raw ASR 记录 |
 | `src/asr/asr_runtime_log.h` / `src/asr/asr_runtime_log.cpp` | 仅 Debug Mode 使用的隐私安全 ASR 生命周期日志，带时间/PID 和有界轮转 |
 | `src/asr/cloud_asr_common.h` / `src/asr/cloud_asr_common.cpp` | 云端 replay buffer、自适应 finalize timeout、空 final retry 辅助 |
+| `src/asr/asr_diagnostics.h` / `src/asr/asr_diagnostics.cpp` | 把公共 `Config` stage 路由和 provider 终态映射到 `audio_diagnostics`，provider 不直接写文件 |
 | `src/ui/hud.h` / `src/ui/hud.cpp` | HUD 窗口、Direct2D/DirectWrite 渲染、托盘图标、UI 资源创建/销毁 |
 | `src/ui/hotkey.h` / `src/ui/hotkey.cpp` | 热键配置、CapsLock 长按逻辑、`WH_KEYBOARD_LL` Hook、`HotkeyEdit` 自绘控件 |
 | `src/ui/settings.h` / `src/ui/settings.cpp` | Settings 窗口、tab UI、控件创建、加载/保存、Provider 管理、输入对话框 |
 | `src/app/main.cpp` | 入口（`wWinMain`）、主窗口过程、录音会话编排、LLM 纠错 |
-| `src/core/llm_refine.h` | LLM 纠错模块（header-only，`llm::` 命名空间） |
+| `src/core/llm_refine.h` | LLM 纠错模块：供应商预设/迁移、请求 JSON、端点规范化、有界 WinHTTP 请求和 OpenAI 兼容响应解析（header-only，`llm::` 命名空间） |
 | `src/asr/baidu_asr.h` | 百度智能云 ASR 模块（header-only） |
 | `src/asr/volcengine_asr.h` | 火山引擎（豆包）ASR 模块（header-only，WebSocket） |
 | `src/asr/qwen_asr.h` / `src/asr/qwen_asr.cpp` | Qwen ASR realtime WebSocket 客户端 |
@@ -77,6 +79,7 @@ flowchart LR
 | `src/asr/doubao_ime_asr.h` / `src/asr/doubao_ime_asr.cpp` | 实验性豆包输入法客户端：设备注册、token bootstrap、Opus 编码、手写 protobuf over WebSocket |
 | `src/asr/doubao_ime_streaming_session.h` / `src/asr/doubao_ime_streaming_session.cpp` | 豆包输入法 `IStreamingAsrSession` 封装：pending PCM buffer、replay retry、partial HUD、凭据写回 |
 | `tools/doubao_ime_probe.bat` / `tools/doubao_ime_probe.cpp` | 独立豆包输入法诊断 probe：复用保存凭据、执行 live protocol 检查，可选执行 16kHz mono WAV 识别检查，并支持按实时节奏发送/接收的 streaming probe |
+| `tools/asr_audio_replay.bat` / `tools/asr_audio_replay.cpp` | 开发专用规范 WAV 校验与多后端 replay，复用生产 batch/streaming session |
 | `src/audio/firered_vad.h` | FireRed VAD 模块（header-only） |
 | `src/core/input_context.h` | 输入框上下文读取模块（header-only，UIA/MSAA/WM_GETTEXT 分层 Fallback） |
 | `src/core/utils.h` | 共享工具函数（WideToUtf8、Utf8ToWide、EscapeJson、Trim） |
@@ -109,7 +112,7 @@ flowchart LR
 
 Settings 是普通 Win32 窗口，目前分 5 个 tab：
 
-- `General`: 录音快捷键，以及可选的当前用户 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\VoxType` 开机启动注册。
+- `General`: 录音快捷键、可选的当前用户 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\VoxType` 开机启动注册，以及共用录音诊断（`Off` / `Failures only` / `All recordings`）、打开目录和受管删除入口。
 - `Recognition`: ASR Backend、可选 Fallback 后端、模型、模型目录、线程、VAD、VAD 模型、Punctuation、快捷键配置。
 - `LLM`: 供应商选择（Provider dropdown + [+] / [−]）、API Base URL、API Key、Model、Test Connection、Debug log、Extra Params。
 - `LLM Prompt`: System Prompt 编辑（多行）、Basic Fix / Deep Fix 预设按钮。
@@ -148,13 +151,38 @@ Settings 是普通 Win32 窗口，目前分 5 个 tab：
 - WASAPI：以系统混合格式（通常 48kHz/32bit float/立体声）捕获，通过线性插值重采样到 16kHz/16bit/单声道
 - waveIn fallback：16kHz/16bit/单声道，4 个约 100ms buffer
 
-停止录音后写入：
+普通录音不会写入磁盘。早期单一
+`%APPDATA%\VoxType\last_recording.wav` 行为早已删除。新的
+`audio_diagnostics` 服务由 Settings 显式控制，并覆盖全部 Local/云端
+provider、内部 retry 和配置的 fallback。
 
-```text
-%APPDATA%\VoxType\last_recording.wav
-```
+- `Off` 为默认值，不持久化诊断音频。
+- `Failures only` 保存有分析价值的 no-speech、采集、传输或 provider
+  失败；短录音、用户取消、过期 attempt，以及无 PCM 的鉴权/配置错误不保存。
+- `All recordings` 仅在用户明确接受隐私提示后保存所有非取消录音。
+- 安装版目录为 `%LOCALAPPDATA%\VoxType\diagnostics\audio`，Portable
+  版目录为 `<portable-root>\diagnostics\audio`。
+- 一次物理录音只有一个 capture，可登记任意数量的
+  primary/internal-retry/fallback stage；stage PCM 按 SHA-256 去重，相同
+  retry 输入引用同一个 WAV。
+- 采集指标包括原生设备格式、每声道/downmix RMS、输出
+  RMS/peak/zero/silence/clipping、静音包、discontinuity、callback gap 和首个非静音延迟。
+- WAV/JSON 写入与 retention 在采集结束后通过串行 worker I/O 执行；
+  回调只累计 O(n) 计数和 PCM。临时文件原子 rename 避免半成品 manifest 成为有效文件组。
+- 最多保留 20 个受管文件组、100 MiB、7 天；retention 和 Settings 删除
+  都不会删除未知文件。
+- manifest 不保存 transcript、上下文正文、key/token、原始稳定设备 ID
+  或原始 provider JSON；诊断服务本身绝不上传音频。
 
 短于约 8000 bytes 的录音会被判定为 `Too short`。
+
+开发专用 `asr_audio_replay` CMake target 输出到
+`build/artifacts/tools`，不进入规范运行载荷。它校验 16 kHz/单声道/PCM16
+WAV，输出 PCM SHA-256 与信号指标，并可调用生产 Local、当前配置/fallback
+或显式选择的云端 batch/streaming session。云端 replay 必须显式选择；
+transcript 控制台输出也必须显式启用，工具不会持久化 transcript。BAT
+wrapper 会显式传入规范 `build/run/x64-release` runtime，避免 bundled
+DLL/模型和 Portable 配置错误地按工具 exe 所在目录解析。
 
 ### HUD
 
@@ -291,8 +319,9 @@ Portable 包通过 `<app-root>\portable.flag` 识别，并继续使用解压目�
   "enable_partial": true,
   "postprocess": "itn",
   "hotkey": "CapsLock",
+  "diagnostic_audio_mode": "off",
   "llm_provider": "DeepSeek",
-  "llm_providers_json": "{\"DeepSeek\":{\"endpoint\":\"https://api.deepseek.com\",\"api_key\":\"<encrypted>\",\"model\":\"deepseek-v4-flash\"}}",
+  "llm_providers_json": "{\"DeepSeek\":{\"endpoint\":\"https://api.deepseek.com\",\"api_key\":\"<encrypted>\",\"model\":\"deepseek-v4-flash\",\"extra_params\":\"\\\"thinking\\\":{\\\"type\\\":\\\"disabled\\\"}\"}}",
   "llm_prompt": "",
   "enable_llm_debug": false,
   "asr_backend": "doubao_ime",
@@ -334,11 +363,12 @@ Portable 包通过 `<app-root>\portable.flag` 识别，并继续使用解压目�
 兼容键，加载和保存时会统一归一化为相同值。
 
 - `llm_provider`：当前选中的供应商名称。
-- `llm_providers_json`：JSON 字符串，存储所有供应商的 endpoint、api_key（DPAPI 加密）、model。
+- `llm_providers_json`：JSON 字符串，分别存储每个供应商的 endpoint、api_key（DPAPI 加密）、model 和 Extra Params。
 - `llm_prompt`：自定义 System Prompt（留空使用内置默认）。
 - `enable_llm_debug`：开启后记录 ASR 前后对比到 `log/llm_refine_YYYYMMDD.log`。
 - `asr_backend`：当前 ASR 后端（`local`、`baidu`、`volcengine`、`qwen`、`mimo`、`doubao_ime` 或 `qwen_free`）。
 - `fallback_asr_backend`：可选串行 fallback（`none`、`local`、`baidu`、`qwen`、`mimo`、`doubao_ime` 或 `qwen_free`），必须与 `asr_backend` 不同；火山引擎不是 fallback target。
+- `diagnostic_audio_mode`：全部 ASR provider/stage 共用的录音诊断策略（`off`、`failures` 或 `all`），默认 `off`。
 - `qwen_*`：Qwen ASR 的三种 profile、北京 Audio 3 HTTP/WSS 地址、语言提示、词汇 JSON、语义标点、句间静音、多阈值、heartbeat、噪声阈值和 chunk 配置。旧 realtime 的 turn detection 仍固定 Manual，不再持久化。
 - `qwen_free_*`：千问 IME Free 启用状态、bundled `VoiceInputWrite` 后处理开关、实验性选区改写、本地协议诊断和可选 shell 目录覆盖。UTDID 通常自动获取，不放入普通示例配置。
 - `mimo_*`：MiMo ASR API key、OpenAI-compatible Base URL、模型和语言（`auto`、`zh`、`en`）；`mimo_api_key` 使用 DPAPI 加密。
@@ -368,6 +398,10 @@ flowchart LR
 ### 保守纠错
 
 v0.2.0 起已接入云端 LLM 纠错（`src/core/llm_refine.h`）。默认关闭，需在 Settings 中将 Punctuation 设为 `Auto punctuate + LLM` 并配置供应商 API Key。
+
+内置供应商统一使用 OpenAI 兼容 Chat Completions 请求。端点规范化支持纯主机、带版本的 Base URL 或完整 `/chat/completions` URL，并保证只生成一个请求路径。`Test Connection` 与真实纠错共用 Extra Params 合并和响应校验。解析/连接/发送超时为 5 秒，接收超时为 15 秒，响应体限制 1 MiB；网络、HTTP、JSON 或内容校验失败时均回退到 ASR 原文。
+
+供应商状态隔离存储在 `llm_providers_json` 中，切换供应商不会复用上一家的 API Key 或请求参数。保存、加载、枚举与删除会解析 JSON 顶层成员，而不是直接扫描大括号，因此字符串内容不会跨供应商串读。仅当端点仍匹配对应官方预设 URL 时，才迁移精确的旧别名或过时参数结构，从而保留自定义网关和自定义模型选择。
 
 建议后续补充：
 

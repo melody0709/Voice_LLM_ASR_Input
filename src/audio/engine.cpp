@@ -27,11 +27,13 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "winmm.lib")
 
-static constexpr int kCurrentConfigVersion = 12;
+static constexpr int kCurrentConfigVersion = 14;
 
 namespace {
 
 constexpr wchar_t kPortableFlagName[] = L"portable.flag";
+std::mutex g_runtimeAssetDirMutex;
+std::wstring g_runtimeAssetDirOverride;
 
 std::wstring CurrentExecutableDirectory() {
     for (DWORD capacity = MAX_PATH; capacity <= 32768; capacity *= 2) {
@@ -141,7 +143,41 @@ std::wstring AppRootDir() {
 }
 
 std::wstring RuntimeAssetDir() {
-    return AppRootDir();
+    std::lock_guard<std::mutex> lock(g_runtimeAssetDirMutex);
+    return g_runtimeAssetDirOverride.empty()
+        ? AppRootDir()
+        : g_runtimeAssetDirOverride;
+}
+
+bool SetRuntimeAssetDirOverrideForProcess(const std::wstring& directory) {
+    if (directory.empty()) {
+        std::lock_guard<std::mutex> lock(g_runtimeAssetDirMutex);
+        g_runtimeAssetDirOverride.clear();
+        return true;
+    }
+
+    const DWORD required = GetFullPathNameW(directory.c_str(), 0, nullptr, nullptr);
+    if (required == 0) return false;
+    std::vector<wchar_t> buffer(static_cast<size_t>(required) + 1, L'\0');
+    const DWORD length = GetFullPathNameW(
+        directory.c_str(), static_cast<DWORD>(buffer.size()),
+        buffer.data(), nullptr);
+    if (length == 0 || length >= buffer.size()) return false;
+
+    std::wstring resolved(buffer.data(), length);
+    while (resolved.size() > 3 &&
+           (resolved.back() == L'\\' || resolved.back() == L'/')) {
+        resolved.pop_back();
+    }
+    const DWORD attributes = GetFileAttributesW(resolved.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES ||
+        !(attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(g_runtimeAssetDirMutex);
+    g_runtimeAssetDirOverride = std::move(resolved);
+    return true;
 }
 
 bool IsPortableMode() {
@@ -397,40 +433,44 @@ void SaveCurrentProvider() {
     std::string entry = "{"
         "\"endpoint\":\"" + EscapeJson(g_config.llmEndpoint) + "\","
         "\"api_key\":\"" + encKey + "\","
-        "\"model\":\"" + EscapeJson(g_config.llmModel) + "\"}";
-    std::string marker = "\"" + key + "\"";
-    size_t pos = json.find(marker);
-    if (pos != std::string::npos) {
-        size_t objStart = json.find('{', pos);
-        if (objStart != std::string::npos) {
-            int depth = 0;
-            size_t objEnd = objStart;
-            for (; objEnd < json.size(); ++objEnd) {
-                if (json[objEnd] == '{') depth++;
-                else if (json[objEnd] == '}') { depth--; if (depth == 0) break; }
-            }
-            json.replace(objStart, objEnd - objStart + 1, entry);
-        }
-    } else {
-        if (json == "{}") {
-            json = "{" + marker + ":" + entry + "}";
-        } else {
-            json.pop_back();
-            json += "," + marker + ":" + entry + "}";
-        }
+        "\"model\":\"" + EscapeJson(g_config.llmModel) + "\","
+        "\"extra_params\":\"" + EscapeJson(g_config.llmExtraParams) + "\"}";
+    if (!llm::SetJsonObjectMemberRaw(json, key, entry)) {
+        // Keep the malformed store byte-for-byte so saving an unrelated
+        // setting cannot silently erase every other provider. The legacy
+        // active-provider fields below still preserve the currently visible
+        // values and the invalid store can be repaired explicitly later.
+        asr_runtime_log::Write(
+            "event=llm_provider_store_update_skipped reason=invalid_store provider_chars=%zu store_bytes=%zu",
+            name.size(), json.size());
+        return;
     }
     g_config.llmProvidersJson = llm::Utf8ToWide(json);
 }
 
-void LoadProviderFromStore(const std::wstring& name) {
+bool LoadProviderFromStore(const std::wstring& name) {
     std::string json = llm::WideToUtf8(g_config.llmProvidersJson);
     std::string key = llm::WideToUtf8(name);
-    size_t pos = json.find("\"" + key + "\"");
-    if (pos == std::string::npos) return;
-    std::string section = json.substr(pos);
-    g_config.llmEndpoint = Utf8ToWide(ExtractJsonString(section, "endpoint", WideToUtf8(g_config.llmEndpoint)));
-    g_config.llmApiKey = llm::DecryptString(Utf8ToWide(ExtractJsonString(section, "api_key", "")));
-    g_config.llmModel = Utf8ToWide(ExtractJsonString(section, "model", WideToUtf8(g_config.llmModel)));
+    std::string section;
+    if (!llm::GetJsonObjectMemberRaw(json, key, section)) return false;
+    std::vector<llm::JsonObjectMemberSpan> fields;
+    if (!llm::ParseJsonObjectMembers(section, 0, fields)) return false;
+    std::string value;
+    if (llm::GetJsonObjectMemberString(section, "endpoint", value)) {
+        g_config.llmEndpoint = Utf8ToWide(value);
+    }
+    if (llm::GetJsonObjectMemberString(section, "api_key", value)) {
+        g_config.llmApiKey = llm::DecryptString(Utf8ToWide(value));
+    } else {
+        g_config.llmApiKey.clear();
+    }
+    if (llm::GetJsonObjectMemberString(section, "model", value)) {
+        g_config.llmModel = Utf8ToWide(value);
+    }
+    if (llm::GetJsonObjectMemberString(section, "extra_params", value)) {
+        g_config.llmExtraParams = Utf8ToWide(value);
+    }
+    return true;
 }
 
 int FindPresetIndex(const std::wstring& name) {
@@ -440,24 +480,43 @@ int FindPresetIndex(const std::wstring& name) {
     return -1;
 }
 
-void ApplyPreset(int index) {
-    if (index < 0 || index >= llm::kProviderPresetCount) return;
+bool ApplyPreset(int index, bool preserveLegacyFields) {
+    if (index < 0 || index >= llm::kProviderPresetCount) return false;
+    const std::wstring legacyEndpoint = g_config.llmEndpoint;
+    const std::wstring legacyApiKey = g_config.llmApiKey;
+    const std::wstring legacyModel = g_config.llmModel;
+    const std::wstring legacyExtraParams = g_config.llmExtraParams;
     const auto& p = llm::kProviderPresets[index];
     g_config.llmProvider = p.name;
     g_config.llmEndpoint = p.url;
+    g_config.llmApiKey.clear();
     g_config.llmModel = p.defaultModel;
     g_config.llmExtraParams = p.extraParams;
-    LoadProviderFromStore(p.name);
+    const bool loaded = LoadProviderFromStore(p.name);
+    if (!loaded && preserveLegacyFields) {
+        if (!legacyEndpoint.empty()) g_config.llmEndpoint = legacyEndpoint;
+        g_config.llmApiKey = legacyApiKey;
+        if (!legacyModel.empty()) g_config.llmModel = legacyModel;
+        if (!legacyExtraParams.empty()) g_config.llmExtraParams = legacyExtraParams;
+    }
+    return llm::MigrateLegacyProviderConfig(
+        g_config.llmProvider, g_config.llmEndpoint,
+        g_config.llmModel, g_config.llmExtraParams);
 }
 
 void LoadConfig() {
     MigrateLegacyConfigIfNeeded();
     std::ifstream file(ConfigPath(), std::ios::binary);
-    if (!file) return;
+    if (!file) {
+        g_config.configVersion = kCurrentConfigVersion;
+        ApplyPreset(0);
+        return;
+    }
     std::ostringstream buffer;
     buffer << file.rdbuf();
     const std::string json = buffer.str();
     bool migratePlaintextQwenUtdid = false;
+    bool migrateLlmProvider = false;
     g_config.modelId = Utf8ToWide(ExtractJsonString(json, "model_id", WideToUtf8(g_config.modelId)));
     g_config.modelDir = Utf8ToWide(ExtractJsonString(json, "model_dir", WideToUtf8(g_config.modelDir)));
     g_config.threads = Utf8ToWide(ExtractJsonString(json, "threads", WideToUtf8(g_config.threads)));
@@ -628,6 +687,10 @@ void LoadConfig() {
          g_config.fallbackAsrBackend == L"qwen_free"));
     g_config.audioBackend = Utf8ToWide(ExtractJsonString(json, "audio_backend", WideToUtf8(g_config.audioBackend)));
     g_config.audioDeviceId = Utf8ToWide(ExtractJsonString(json, "audio_device_id", ""));
+    g_config.diagnosticAudioMode = audio_diagnostics::NormalizeMode(
+        Utf8ToWide(ExtractJsonString(json, "diagnostic_audio_mode", "off")));
+    asr_runtime_log::SetDiagnosticAudioEnabled(
+        g_config.diagnosticAudioMode != L"off");
     g_config.configVersion = ExtractJsonInt(json, "config_version", 0);
 
     if (g_config.configVersion < 1) {
@@ -661,13 +724,14 @@ void LoadConfig() {
     } else {
         int pi = FindPresetIndex(g_config.llmProvider);
         if (pi >= 0) {
-            ApplyPreset(pi);
+            migrateLlmProvider = ApplyPreset(pi, true);
         } else {
             LoadProviderFromStore(g_config.llmProvider);
         }
     }
 
     if (g_config.configVersion < kCurrentConfigVersion ||
+        migrateLlmProvider ||
         migratePlaintextQwenUtdid) {
         g_config.configVersion = kCurrentConfigVersion;
         SaveConfig();
@@ -681,6 +745,10 @@ void SaveConfig() {
         g_config.qwenFreeDebugLog &&
         (g_config.asrBackend == L"qwen_free" ||
          g_config.fallbackAsrBackend == L"qwen_free"));
+    g_config.diagnosticAudioMode =
+        audio_diagnostics::NormalizeMode(g_config.diagnosticAudioMode);
+    asr_runtime_log::SetDiagnosticAudioEnabled(
+        g_config.diagnosticAudioMode != L"off");
     std::ofstream file(ConfigPath(), std::ios::binary | std::ios::trunc);
     file << "{\n"
          << "  \"config_version\": " << g_config.configVersion << ",\n"
@@ -768,7 +836,10 @@ void SaveConfig() {
          << "  \"qwen_free_utdid_override\": \""
          << EscapeJson(llm::EncryptString(g_config.qwenFreeUtdidOverride)) << "\",\n"
          << "  \"audio_backend\": \"" << EscapeJson(g_config.audioBackend) << "\",\n"
-         << "  \"audio_device_id\": \"" << EscapeJson(g_config.audioDeviceId) << "\"\n"
+         << "  \"audio_device_id\": \"" << EscapeJson(g_config.audioDeviceId) << "\",\n"
+         << "  \"diagnostic_audio_mode\": \""
+         << EscapeJson(audio_diagnostics::NormalizeMode(g_config.diagnosticAudioMode))
+         << "\"\n"
          << "}\n";
 }
 
@@ -806,6 +877,7 @@ void CALLBACK WaveInProc(HWAVEIN waveIn, UINT msg, DWORD_PTR, DWORD_PTR param1, 
 
     if (header->dwBytesRecorded > 0) {
         const BYTE* begin = reinterpret_cast<const BYTE*>(header->lpData);
+        audio_diagnostics::RecordWaveInPcm16(begin, header->dwBytesRecorded);
         g_audioLevel.store(CalculateAudioLevel(begin, header->dwBytesRecorded));
 
         EnterCriticalSection(&g_audioLock);
@@ -853,7 +925,9 @@ void CALLBACK WaveInProc(HWAVEIN waveIn, UINT msg, DWORD_PTR, DWORD_PTR param1, 
     }
 }
 
-bool StartAudioCapture(std::wstring& error) {
+bool StartAudioCapture(std::wstring& error,
+                       AudioCaptureStartFailure* failure) {
+    if (failure) *failure = {};
     if (g_waveIn || g_wasapiCapture.IsInitialized()) return true;
 
     const uint64_t generation =
@@ -862,16 +936,49 @@ bool StartAudioCapture(std::wstring& error) {
     g_audioCaptureFailureWasapi.store(false, std::memory_order_relaxed);
     g_audioCaptureFailurePending.store(false, std::memory_order_release);
 
+    if (audio_diagnostics::NormalizeMode(g_config.diagnosticAudioMode) != L"off" ||
+        g_config.enableDebugMode) {
+        audio_diagnostics::ResetCapture();
+    } else {
+        audio_diagnostics::CancelCapture();
+    }
+
     g_audioLevel.store(0.0f);
     g_hudSmoothedLevel = 0.0f;
     EnterCriticalSection(&g_audioLock);
     g_audioData.clear();
     LeaveCriticalSection(&g_audioLock);
 
-    if (g_config.audioBackend == L"wasapi") {
+    const bool attemptedWasapi = g_config.audioBackend == L"wasapi";
+    std::wstring attemptedDeviceName;
+    std::wstring attemptedDeviceId = g_config.audioDeviceId;
+    bool attemptedDefaultDevice = g_config.audioDeviceId.empty();
+    DWORD attemptedNativeSampleRate = 0;
+    WORD attemptedNativeChannels = 0;
+    WORD attemptedNativeBits = 0;
+    bool attemptedNativeFloat = false;
+
+    if (attemptedWasapi) {
         g_wasapiCapture.SetCaptureGeneration(generation);
         if (g_wasapiCapture.Init(g_config.audioDeviceId)) {
+            attemptedDeviceName = g_wasapiCapture.GetDeviceName();
+            attemptedDeviceId = g_wasapiCapture.GetDeviceId();
+            attemptedDefaultDevice = g_wasapiCapture.UsedDefaultDevice();
+            attemptedNativeSampleRate = g_wasapiCapture.GetNativeSampleRate();
+            attemptedNativeChannels = static_cast<WORD>(g_wasapiCapture.GetNativeChannels());
+            attemptedNativeBits = static_cast<WORD>(g_wasapiCapture.GetNativeBits());
+            attemptedNativeFloat = g_wasapiCapture.GetNativeIsFloat();
             if (g_wasapiCapture.Start(error)) {
+                audio_diagnostics::CaptureDeviceInfo device;
+                device.backend = L"wasapi";
+                device.deviceName = g_wasapiCapture.GetDeviceName();
+                device.deviceId = g_wasapiCapture.GetDeviceId();
+                device.usedDefaultDevice = g_wasapiCapture.UsedDefaultDevice();
+                device.nativeSampleRate = g_wasapiCapture.GetNativeSampleRate();
+                device.nativeChannels = static_cast<WORD>(g_wasapiCapture.GetNativeChannels());
+                device.nativeBitsPerSample = static_cast<WORD>(g_wasapiCapture.GetNativeBits());
+                device.nativeIsFloat = g_wasapiCapture.GetNativeIsFloat();
+                audio_diagnostics::SetCaptureDeviceInfo(device);
                 g_captureActive = true;
                 return true;
             }
@@ -894,30 +1001,126 @@ bool StartAudioCapture(std::wstring& error) {
 
     MMRESULT result = waveInOpen(&g_waveIn, WAVE_MAPPER, &format, reinterpret_cast<DWORD_PTR>(WaveInProc), 0, CALLBACK_FUNCTION);
     if (result != MMSYSERR_NOERROR) {
+        wchar_t detail[MAXERRORLENGTH] = {};
+        waveInGetErrorTextW(result, detail, MAXERRORLENGTH);
         error = L"Microphone open failed";
+        if (detail[0] != L'\0') error += L": " + std::wstring(detail);
         g_waveIn = nullptr;
+        if (failure) {
+            failure->attemptedBackends = attemptedWasapi ? L"wasapi,wavein" : L"wavein";
+            failure->terminalBackend = L"wavein";
+            failure->phase = L"open";
+            failure->code = static_cast<DWORD>(result);
+            failure->deviceName = attemptedDeviceName;
+            failure->deviceId = attemptedDeviceId;
+            failure->usedDefaultDevice = attemptedDefaultDevice;
+            failure->nativeSampleRate = attemptedNativeSampleRate;
+            failure->nativeChannels = attemptedNativeChannels;
+            failure->nativeBitsPerSample = attemptedNativeBits;
+            failure->nativeIsFloat = attemptedNativeFloat;
+        }
+        audio_diagnostics::CancelCapture();
         return false;
     }
+
+    audio_diagnostics::CaptureDeviceInfo waveInDevice;
+    waveInDevice.backend = L"wavein";
+    waveInDevice.usedDefaultDevice = true;
+    waveInDevice.nativeSampleRate = format.nSamplesPerSec;
+    waveInDevice.nativeChannels = format.nChannels;
+    waveInDevice.nativeBitsPerSample = format.wBitsPerSample;
+    waveInDevice.nativeIsFloat = false;
+    UINT deviceId = WAVE_MAPPER;
+    if (waveInGetID(g_waveIn, &deviceId) == MMSYSERR_NOERROR) {
+        WAVEINCAPSW caps = {};
+        if (waveInGetDevCapsW(deviceId, &caps, sizeof(caps)) == MMSYSERR_NOERROR) {
+            waveInDevice.deviceName = caps.szPname;
+        }
+        waveInDevice.deviceId = L"wavein:" + std::to_wstring(deviceId);
+    }
+    audio_diagnostics::SetCaptureDeviceInfo(waveInDevice);
 
     g_waveBuffers.assign(4, std::vector<BYTE>(format.nAvgBytesPerSec / 10));
     ZeroMemory(g_waveHeaders, sizeof(g_waveHeaders));
     g_captureActive = true;
 
+    size_t preparedHeaders = 0;
+    std::wstring bufferFailurePhase;
     for (size_t i = 0; i < g_waveBuffers.size(); ++i) {
         g_waveHeaders[i].lpData = reinterpret_cast<LPSTR>(g_waveBuffers[i].data());
         g_waveHeaders[i].dwBufferLength = static_cast<DWORD>(g_waveBuffers[i].size());
-        waveInPrepareHeader(g_waveIn, &g_waveHeaders[i], sizeof(WAVEHDR));
-        waveInAddBuffer(g_waveIn, &g_waveHeaders[i], sizeof(WAVEHDR));
+        result = waveInPrepareHeader(g_waveIn, &g_waveHeaders[i], sizeof(WAVEHDR));
+        if (result != MMSYSERR_NOERROR) {
+            error = L"Microphone buffer preparation failed";
+            bufferFailurePhase = L"prepare_buffer";
+            break;
+        }
+        ++preparedHeaders;
+        result = waveInAddBuffer(g_waveIn, &g_waveHeaders[i], sizeof(WAVEHDR));
+        if (result != MMSYSERR_NOERROR) {
+            error = L"Microphone buffer queue failed";
+            bufferFailurePhase = L"queue_buffer";
+            break;
+        }
+    }
+
+    if (result != MMSYSERR_NOERROR) {
+        wchar_t detail[MAXERRORLENGTH] = {};
+        waveInGetErrorTextW(result, detail, MAXERRORLENGTH);
+        if (detail[0] != L'\0') error += L": " + std::wstring(detail);
+        if (failure) {
+            failure->attemptedBackends = attemptedWasapi ? L"wasapi,wavein" : L"wavein";
+            failure->terminalBackend = L"wavein";
+            failure->phase = bufferFailurePhase.empty()
+                ? L"prepare_or_queue_buffer"
+                : bufferFailurePhase;
+            failure->code = static_cast<DWORD>(result);
+            failure->deviceName = waveInDevice.deviceName;
+            failure->deviceId = waveInDevice.deviceId;
+            failure->usedDefaultDevice = waveInDevice.usedDefaultDevice;
+            failure->nativeSampleRate = waveInDevice.nativeSampleRate;
+            failure->nativeChannels = waveInDevice.nativeChannels;
+            failure->nativeBitsPerSample = waveInDevice.nativeBitsPerSample;
+            failure->nativeIsFloat = waveInDevice.nativeIsFloat;
+        }
+        g_captureActive = false;
+        waveInReset(g_waveIn);
+        for (size_t i = 0; i < preparedHeaders; ++i) {
+            waveInUnprepareHeader(g_waveIn, &g_waveHeaders[i], sizeof(WAVEHDR));
+        }
+        waveInClose(g_waveIn);
+        g_waveIn = nullptr;
+        audio_diagnostics::CancelCapture();
+        return false;
     }
 
     result = waveInStart(g_waveIn);
     if (result != MMSYSERR_NOERROR) {
+        wchar_t detail[MAXERRORLENGTH] = {};
+        waveInGetErrorTextW(result, detail, MAXERRORLENGTH);
         error = L"Microphone start failed";
+        if (detail[0] != L'\0') error += L": " + std::wstring(detail);
+        if (failure) {
+            failure->attemptedBackends = attemptedWasapi ? L"wasapi,wavein" : L"wavein";
+            failure->terminalBackend = L"wavein";
+            failure->phase = L"start";
+            failure->code = static_cast<DWORD>(result);
+            failure->deviceName = waveInDevice.deviceName;
+            failure->deviceId = waveInDevice.deviceId;
+            failure->usedDefaultDevice = waveInDevice.usedDefaultDevice;
+            failure->nativeSampleRate = waveInDevice.nativeSampleRate;
+            failure->nativeChannels = waveInDevice.nativeChannels;
+            failure->nativeBitsPerSample = waveInDevice.nativeBitsPerSample;
+            failure->nativeIsFloat = waveInDevice.nativeIsFloat;
+        }
         g_captureActive = false;
         waveInReset(g_waveIn);
-        for (auto& header : g_waveHeaders) waveInUnprepareHeader(g_waveIn, &header, sizeof(WAVEHDR));
+        for (size_t i = 0; i < preparedHeaders; ++i) {
+            waveInUnprepareHeader(g_waveIn, &g_waveHeaders[i], sizeof(WAVEHDR));
+        }
         waveInClose(g_waveIn);
         g_waveIn = nullptr;
+        audio_diagnostics::CancelCapture();
         return false;
     }
 

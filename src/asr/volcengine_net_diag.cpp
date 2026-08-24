@@ -192,7 +192,10 @@ void LogConnectDiagnostics(int triggerTraceId, std::string reason) {
 } // namespace
 
 void VolcMaybeLogConnectDiagnosticsAsync(int triggerTraceId, const char* reason, DWORD cooldownMs) {
-    if (!asr_runtime_log::Enabled()) return;
+    // Recording diagnostics needs the structured runtime lifecycle log, but
+    // must not implicitly enable provider-specific DNS/TCP probes or verbose
+    // Volcengine output. Those remain an explicit global Debug Mode action.
+    if (!asr_runtime_log::ProviderDebugEnabled()) return;
 
     const ULONGLONG now = GetTickCount64();
     static std::atomic<ULONGLONG> s_lastStartTick{0};

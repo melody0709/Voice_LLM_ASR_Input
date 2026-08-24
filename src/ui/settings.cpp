@@ -533,6 +533,68 @@ void SetStatus(HWND hwnd, const std::wstring& text) {
     SetWindowTextW(GetDlgItem(hwnd, IDC_STATUS), text.c_str());
 }
 
+int DiagnosticAudioModeIndex(const std::wstring& mode) {
+    const std::wstring normalized = audio_diagnostics::NormalizeMode(mode);
+    if (normalized == L"failures") return 1;
+    if (normalized == L"all") return 2;
+    return 0;
+}
+
+std::wstring DiagnosticAudioModeFromControl(HWND hwnd) {
+    const int index = ComboBox_GetCurSel(
+        GetDlgItem(hwnd, IDC_DIAGNOSTIC_AUDIO_MODE));
+    if (index == 1) return L"failures";
+    if (index == 2) return L"all";
+    return L"off";
+}
+
+void UpdateDiagnosticAudioHint(HWND hwnd) {
+    HWND hint = GetDlgItem(hwnd, IDC_DIAGNOSTIC_AUDIO_HINT);
+    if (!hint) return;
+    const std::wstring mode = DiagnosticAudioModeFromControl(hwnd);
+    const wchar_t* text = mode == L"all"
+        ? L"Privacy: every utterance is saved as a playable WAV on this PC. Old files are removed automatically."
+        : (mode == L"failures"
+            ? L"Only diagnostic failures are saved on this PC. Old files are removed automatically."
+            : L"Audio recording diagnostics are off. No diagnostic WAV files are saved.");
+    SetWindowTextW(hint, text);
+}
+
+void OpenDiagnosticAudioFolder(HWND hwnd) {
+    std::wstring error;
+    if (!audio_diagnostics::EnsureDiagnosticAudioDir(&error)) {
+        MessageBoxW(hwnd, error.c_str(), L"Recording diagnostics",
+                    MB_OK | MB_ICONERROR);
+        return;
+    }
+    const std::wstring directory = audio_diagnostics::DiagnosticAudioDir();
+    const HINSTANCE result = ShellExecuteW(
+        hwnd, L"open", directory.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    if (reinterpret_cast<INT_PTR>(result) <= 32) {
+        MessageBoxW(hwnd, L"Unable to open the recordings folder.",
+                    L"Recording diagnostics", MB_OK | MB_ICONERROR);
+    }
+}
+
+void DeleteDiagnosticAudioFiles(HWND hwnd) {
+    const int choice = MessageBoxW(
+        hwnd,
+        L"Delete all recordings and JSON manifests managed by VoxType?\n\n"
+        L"Unknown files in the folder will be preserved.",
+        L"Delete saved recordings", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+    if (choice != IDYES) return;
+
+    size_t deletedGroups = 0;
+    std::wstring error;
+    if (!audio_diagnostics::DeleteManagedRecordings(&deletedGroups, &error)) {
+        MessageBoxW(hwnd, error.c_str(), L"Delete saved recordings",
+                    MB_OK | MB_ICONERROR);
+        return;
+    }
+    SetStatus(hwnd, L"Deleted " + std::to_wstring(deletedGroups) +
+                    L" managed recording group(s). Unknown files were preserved.");
+}
+
 std::wstring DescribeWin32Error(DWORD error) {
     wchar_t* message = nullptr;
     const DWORD length = FormatMessageW(
@@ -1192,6 +1254,15 @@ void LoadSettingsControls(HWND hwnd) {
         InvalidateRect(hotkeyEdit, nullptr, TRUE);
     }
 
+    HWND diagnosticMode = GetDlgItem(hwnd, IDC_DIAGNOSTIC_AUDIO_MODE);
+    ComboBox_ResetContent(diagnosticMode);
+    ComboBox_AddString(diagnosticMode, L"Off");
+    ComboBox_AddString(diagnosticMode, L"Failures only");
+    ComboBox_AddString(diagnosticMode, L"All recordings");
+    ComboBox_SetCurSel(
+        diagnosticMode, DiagnosticAudioModeIndex(g_config.diagnosticAudioMode));
+    UpdateDiagnosticAudioHint(hwnd);
+
     SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_ENDPOINT), g_config.llmEndpoint.c_str());
     SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_KEY), g_config.llmApiKey.c_str());
     SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_MODEL), g_config.llmModel.c_str());
@@ -1554,6 +1625,7 @@ void SaveSettingsControls(HWND hwnd) {
 
     HotkeyConfig hotkey = GetHotkeyFromEdit(hwnd, IDC_HOTKEY);
     g_config.hotkey = HotkeyToString(hotkey);
+    g_config.diagnosticAudioMode = DiagnosticAudioModeFromControl(hwnd);
 
     wchar_t llmEndpoint[512] = {};
     GetWindowTextW(GetDlgItem(hwnd, IDC_LLM_ENDPOINT), llmEndpoint, 512);
@@ -1809,8 +1881,10 @@ void TestLlmConnection(HWND hwnd) {
     GetWindowTextW(GetDlgItem(hwnd, IDC_LLM_KEY), apiKey, 512);
     wchar_t model[256] = {};
     GetWindowTextW(GetDlgItem(hwnd, IDC_LLM_MODEL), model, 256);
+    wchar_t extraParams[1024] = {};
+    GetWindowTextW(GetDlgItem(hwnd, IDC_LLM_EXTRA), extraParams, 1024);
 
-    if (wcslen(endpoint) == 0 || wcslen(apiKey) == 0 || wcslen(model) == 0) {
+    if (llm::Trim(endpoint).empty() || llm::Trim(apiKey).empty() || llm::Trim(model).empty()) {
         SetStatus(hwnd, L"Please fill in all LLM fields.");
         return;
     }
@@ -1820,6 +1894,7 @@ void TestLlmConnection(HWND hwnd) {
     cfg.endpoint = endpoint;
     cfg.apiKey = apiKey;
     cfg.model = model;
+    cfg.extraParams = extraParams;
     std::thread([hwnd, cfg]() {
         llm::TestResult result = llm::TestConnection(cfg);
         PostMessageW(hwnd, WM_APP + 10, result.ok ? 0 : 1,
@@ -1827,37 +1902,48 @@ void TestLlmConnection(HWND hwnd) {
     }).detach();
 }
 
+void StoreVisibleLlmProvider(HWND hwnd) {
+    if (g_config.llmProvider.empty()) return;
+    wchar_t endpoint[512] = {};
+    wchar_t apiKey[512] = {};
+    wchar_t model[256] = {};
+    wchar_t extraParams[1024] = {};
+    GetWindowTextW(GetDlgItem(hwnd, IDC_LLM_ENDPOINT), endpoint, 512);
+    GetWindowTextW(GetDlgItem(hwnd, IDC_LLM_KEY), apiKey, 512);
+    GetWindowTextW(GetDlgItem(hwnd, IDC_LLM_MODEL), model, 256);
+    GetWindowTextW(GetDlgItem(hwnd, IDC_LLM_EXTRA), extraParams, 1024);
+    g_config.llmEndpoint = endpoint;
+    g_config.llmApiKey = apiKey;
+    g_config.llmModel = model;
+    g_config.llmExtraParams = extraParams;
+    SaveCurrentProvider();
+}
+
 void RefreshProviderDropdown(HWND hwnd) {
     HWND combo = GetDlgItem(hwnd, IDC_LLM_PROVIDER);
-    std::wstring current = ComboText(combo);
+    const std::wstring current = g_config.llmProvider;
     SendMessageW(combo, CB_RESETCONTENT, 0, 0);
     for (int i = 0; i < llm::kProviderPresetCount; ++i) {
         ComboBox_AddString(combo, llm::kProviderPresets[i].name);
     }
+    bool currentListed = FindPresetIndex(current) >= 0;
     std::string provJson = llm::WideToUtf8(g_config.llmProvidersJson);
-    size_t pos = 1;
-    while (pos < provJson.size()) {
-        size_t q1 = provJson.find('"', pos);
-        if (q1 == std::string::npos) break;
-        size_t q2 = provJson.find('"', q1 + 1);
-        if (q2 == std::string::npos) break;
-        std::string name = provJson.substr(q1 + 1, q2 - q1 - 1);
-        bool isPreset = false;
-        for (int i = 0; i < llm::kProviderPresetCount; ++i) {
-            if (name == llm::WideToUtf8(llm::kProviderPresets[i].name)) { isPreset = true; break; }
+    std::vector<std::string> providerNames;
+    if (llm::GetJsonObjectMemberNames(provJson, providerNames)) {
+        for (const std::string& name : providerNames) {
+            const std::wstring wideName = llm::Utf8ToWide(name);
+            bool isPreset = false;
+            for (int i = 0; i < llm::kProviderPresetCount; ++i) {
+                if (name == llm::WideToUtf8(llm::kProviderPresets[i].name)) { isPreset = true; break; }
+            }
+            if (!isPreset) {
+                ComboBox_AddString(combo, wideName.c_str());
+            }
+            if (wideName == current) currentListed = true;
         }
-        if (!isPreset) {
-            ComboBox_AddString(combo, llm::Utf8ToWide(name).c_str());
-        }
-        size_t objStart = provJson.find('{', q2);
-        if (objStart == std::string::npos) break;
-        int depth = 0;
-        size_t objEnd = objStart;
-        for (; objEnd < provJson.size(); ++objEnd) {
-            if (provJson[objEnd] == '{') depth++;
-            else if (provJson[objEnd] == '}') { depth--; if (depth == 0) break; }
-        }
-        pos = objEnd + 1;
+    }
+    if (!current.empty() && !currentListed) {
+        ComboBox_AddString(combo, current.c_str());
     }
     int sel = 0;
     int count = (int)SendMessageW(combo, CB_GETCOUNT, 0, 0);
@@ -1877,25 +1963,9 @@ void RefreshProviderDropdown(HWND hwnd) {
 void DeleteProviderFromStore(const std::wstring& name) {
     std::string json = llm::WideToUtf8(g_config.llmProvidersJson);
     std::string key = llm::WideToUtf8(name);
-    std::string marker = "\"" + key + "\"";
-    size_t pos = json.find(marker);
-    if (pos == std::string::npos) return;
-    size_t colon = json.find(':', pos + marker.size());
-    if (colon == std::string::npos) return;
-    size_t objStart = json.find('{', colon);
-    if (objStart == std::string::npos) return;
-    int depth = 0;
-    size_t objEnd = objStart;
-    for (; objEnd < json.size(); ++objEnd) {
-        if (json[objEnd] == '{') depth++;
-        else if (json[objEnd] == '}') { depth--; if (depth == 0) break; }
+    if (llm::RemoveJsonObjectMember(json, key)) {
+        g_config.llmProvidersJson = llm::Utf8ToWide(json);
     }
-    size_t eraseStart = pos;
-    if (eraseStart > 0 && json[eraseStart - 1] == ',') eraseStart--;
-    size_t eraseEnd = objEnd + 1;
-    json.erase(eraseStart, eraseEnd - eraseStart);
-    if (json == "{}" || json.empty()) json = "{}";
-    g_config.llmProvidersJson = llm::Utf8ToWide(json);
 }
 
 LRESULT CALLBACK InputWndProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -2699,6 +2769,46 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                               L"Uses your Windows account startup list. Moving a Portable copy is corrected when you save.");
         AddGeneralControl(control);
 
+        const int diagnosticsY = S(UiStyle::GeneralDiagnosticsGroupY);
+        HWND diagnosticsGroup = CreateWindowW(
+            L"BUTTON", L"Diagnostics", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            S(UiStyle::GeneralGroupX), diagnosticsY,
+            S(UiStyle::GeneralGroupW), S(UiStyle::GeneralDiagnosticsGroupH),
+            hwnd, nullptr, g_instance, nullptr);
+        ApplyUiFont(diagnosticsGroup);
+        AddGeneralControl(diagnosticsGroup);
+
+        control = CreateLabel(
+            hwnd, S(UiStyle::ContentLeft),
+            diagnosticsY + S(UiStyle::GeneralDiagnosticsModeOffsetY + UiStyle::LabelYOffset),
+            S(UiStyle::GeneralDiagnosticsModeLabelW), S(UiStyle::LabelH),
+            L"Recording diagnostics");
+        AddGeneralControl(control);
+        AddGeneralControl(CreateCombo(
+            hwnd, IDC_DIAGNOSTIC_AUDIO_MODE, S(UiStyle::InputLeft),
+            diagnosticsY + S(UiStyle::GeneralDiagnosticsModeOffsetY),
+            S(UiStyle::GeneralDiagnosticsModeW), S(UiStyle::ComboH)));
+
+        const int diagnosticActionsY =
+            diagnosticsY + S(UiStyle::GeneralDiagnosticsActionsOffsetY);
+        AddGeneralControl(CreateButton(
+            hwnd, IDC_DIAGNOSTIC_AUDIO_OPEN_FOLDER, S(UiStyle::ContentLeft),
+            diagnosticActionsY, S(UiStyle::GeneralDiagnosticsOpenButtonW),
+            S(UiStyle::ActionBtnH), L"Open recordings folder"));
+        AddGeneralControl(CreateButton(
+            hwnd, IDC_DIAGNOSTIC_AUDIO_DELETE,
+            S(UiStyle::ContentLeft + UiStyle::GeneralDiagnosticsOpenButtonW +
+              UiStyle::GeneralDiagnosticsButtonGap),
+            diagnosticActionsY, S(UiStyle::GeneralDiagnosticsDeleteButtonW),
+            S(UiStyle::ActionBtnH), L"Delete saved recordings..."));
+
+        control = CreateHint(
+            hwnd, S(UiStyle::ContentLeft),
+            diagnosticsY + S(UiStyle::GeneralDiagnosticsHintOffsetY),
+            S(UiStyle::GeneralDiagnosticsHintW), S(UiStyle::LabelH), L"");
+        SetWindowLongPtrW(control, GWLP_ID, IDC_DIAGNOSTIC_AUDIO_HINT);
+        AddGeneralControl(control);
+
         control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(0)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Provider");
         AddLlmControl(control);
         AddLlmControl(CreateCombo(hwnd, IDC_LLM_PROVIDER, S(UiStyle::InputLeft), S(UiStyle::RowInputY(0)), S(480), S(400)));
@@ -2742,7 +2852,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         AddLlmControl(CreateButton(hwnd, IDC_LLM_EXTRA_RESET, S(UiStyle::SideBtnX), S(UiStyle::RowInputY(5)) - S(1), S(UiStyle::SideBtnW), S(UiStyle::BtnH), L"Reset"));
         {
             HWND hint = CreateWindowW(L"STATIC",
-                L"JSON snippet merged into request body. e.g. \"thinking\":{\"type\":\"disabled\"}",
+                L"JSON object fields merged into the request body; outer braces are optional.",
                 WS_CHILD | WS_VISIBLE, S(UiStyle::InputLeft), S(UiStyle::RowInputY(5)) + S(UiStyle::EditH) + S(2), S(UiStyle::InputW), S(20), hwnd, nullptr, g_instance, nullptr);
             ApplyUiFont(hint);
             AddLlmControl(hint);
@@ -3160,6 +3270,24 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
     }
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
+        case IDC_DIAGNOSTIC_AUDIO_MODE:
+            if (HIWORD(wParam) == CBN_SELCHANGE) {
+                UpdateDiagnosticAudioHint(hwnd);
+                return 0;
+            }
+            break;
+        case IDC_DIAGNOSTIC_AUDIO_OPEN_FOLDER:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                OpenDiagnosticAudioFolder(hwnd);
+                return 0;
+            }
+            break;
+        case IDC_DIAGNOSTIC_AUDIO_DELETE:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                DeleteDiagnosticAudioFiles(hwnd);
+                return 0;
+            }
+            break;
         case IDC_MODEL:
             if (HIWORD(wParam) == CBN_SELCHANGE) {
                 const std::wstring modelId = ModelIdFromIndex(ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_MODEL)));
@@ -3215,11 +3343,18 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             if (HIWORD(wParam) == CBN_SELCHANGE) {
                 std::wstring prov = ComboText(GetDlgItem(hwnd, IDC_LLM_PROVIDER));
                 if (!prov.empty()) {
+                    if (prov != g_config.llmProvider) {
+                        StoreVisibleLlmProvider(hwnd);
+                    }
                     g_config.llmProvider = prov;
                     int pi = FindPresetIndex(prov);
                     if (pi >= 0) {
                         ApplyPreset(pi);
                     } else {
+                        g_config.llmEndpoint.clear();
+                        g_config.llmApiKey.clear();
+                        g_config.llmModel.clear();
+                        g_config.llmExtraParams.clear();
                         LoadProviderFromStore(prov);
                     }
                     SetWindowTextW(GetDlgItem(hwnd, IDC_LLM_ENDPOINT), g_config.llmEndpoint.c_str());
@@ -3241,11 +3376,13 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 if (!exists) {
                     std::string json = llm::WideToUtf8(g_config.llmProvidersJson);
                     std::string key = llm::WideToUtf8(name);
-                    if (json.find("\"" + key + "\"") != std::string::npos) exists = true;
+                    std::string stored;
+                    exists = llm::GetJsonObjectMemberRaw(json, key, stored);
                 }
                 if (exists) {
                     SetStatus(hwnd, L"Provider name already exists.");
                 } else {
+                    StoreVisibleLlmProvider(hwnd);
                     g_config.llmEndpoint.clear();
                     g_config.llmApiKey.clear();
                     g_config.llmModel.clear();
@@ -3906,8 +4043,8 @@ void ShowSettingsWindow(HWND owner) {
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            S(850),
-            S(720),
+            S(UiStyle::SettingsWindowW),
+            S(UiStyle::SettingsWindowH),
             owner,
             nullptr,
             g_instance,

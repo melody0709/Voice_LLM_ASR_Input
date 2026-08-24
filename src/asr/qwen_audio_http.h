@@ -34,6 +34,7 @@ struct Result {
     bool retryable = false;
     std::wstring text;
     std::wstring error;
+    std::string providerCode;
     DWORD statusCode = 0;
     double elapsedMs = 0.0;
 };

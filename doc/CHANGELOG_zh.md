@@ -2,6 +2,40 @@
 
 > 🇬🇧 [English](../CHANGELOG.md)
 
+## v0.9.25 (2026-08-24, dev)
+
+### 新增
+
+- **共用诊断录音服务**：新增 provider 无关的 capture attempt，覆盖 Local、百度、Qwen 全部 transport、火山引擎、MiMo、豆包输入法、千问 IME Free、provider 内部 retry 和配置 fallback。文件组包含规范 capture/provider-input WAV、SHA-256 去重、信号/设备/VAD 指标和精确 stage 终态，不保存 transcript、上下文、密钥或原始 provider JSON。
+- **有界 Settings 入口**：General 增加 `Off`、`Failures only`、`All recordings`，以及立即打开目录和二次确认受管删除。安装版/Portable 数据均只保存在本机 `diagnostics\audio`；最多保留 20 组、100 MiB、7 天，未知文件不会被删除。
+- **通用 ASR replay 工具**：新增 `tools\asr_audio_replay.bat` 与开发专用 `asr_audio_replay` CMake target，支持规范 WAV 校验、PCM 哈希/指标、Local 重放、当前 primary/fallback 对比，以及显式选择生产 batch/streaming 云端 session。云端上传和 transcript 控制台输出均为 opt-in。
+
+### 变更
+
+- **诊断 I/O 生命周期**：WAV/JSON 哈希、原子写入、retention 和 Settings 删除在 WASAPI/waveIn 回调与 UI 热路径之外串行执行；程序退出时等待未完成的诊断 writer。
+- **attempt 安全诊断**：streaming session 统一接收本次录音冻结的配置与 attempt ID；fallback provider 的内部 retry 使用无冲突的 fallback stage 命名空间；replay 从规范 runtime 解析资源与配置。
+- **LLM 供应商更新**：DeepSeek 官方预设继续使用适合低延迟纠错的 `deepseek-v4-flash` 并关闭思考；OpenRouter 已下线的 `qwen/qwen3-4b` 更新为 `qwen/qwen3.5-9b`；SiliconFlow 保留当前官方列出的 `Qwen/Qwen3.6-35B-A3B`，并改用顶层参数 `enable_thinking=false`。
+- **保守预设迁移**：仅当配置仍指向对应官方预设端点时，才迁移 DeepSeek/OpenRouter 的精确旧别名和 SiliconFlow 的过时参数结构；自定义代理端点与无关的自定义模型不会被改写。
+- **有界 LLM 网络请求**：API Base URL 与完整 `/chat/completions` URL 统一规范化路径；接收超时调整为 15 秒，解析/连接/发送仍限制为 5 秒；响应体上限为 1 MiB。
+
+### 修复
+
+- **Settings 诊断布局**：加宽 Diagnostics 下的两个操作按钮，并小幅增加 Settings 高度、为 footer 保留完整空间，避免英文按钮文字以及底部 Save/Close 被裁切。
+- **采集启动证据**：WASAPI/waveIn 在首个 PCM 前全部失败时，`Failures only` 会保存 JSON-only manifest，记录尝试/终止采集后端、精确启动阶段、错误码和可用设备/格式信息，不会伪造空 WAV。
+- **诊断隐私与退出完整性**：开启录音诊断只启用结构化 runtime 生命周期日志，不再连带开启 Qwen/火山引擎 verbose 文件或火山 DNS/TCP 探测。诊断 writer 保持可 join，退出时完整 drain，并在录音之间回收已结束的 writer handle。
+- **受管文件边界**：retention 与确认删除只识别严格的 capture/input artifact 名称；同前缀未知 WAV 和类似 WAV 的 `.tmp` 均保留，同时仍会删除过期的模块自有临时文件。
+- **Replay 路径保真**：BAT wrapper 不再启用 delayed expansion，带引号且包含 `!` 的 WAV/runtime 路径可以原样传给 replay 程序。
+- **损坏供应商存储保护**：保存 Settings 时不再把无效的多供应商 JSON 重置成 `{}`；原始内容和其他供应商条目保持不变，当前供应商的 legacy 字段仍正常保存。
+- **连接测试与真实请求一致**：`Test Connection` 现在通过同一请求构造器携带当前 Extra Params，并在联网前本地拒绝合并后无效的 JSON。
+- **供应商凭据与配置隔离**：Extra Params 按供应商持久化，切换前会先保存当前界面的编辑内容；尚无保存配置的供应商不再沿用上一家的 API Key、端点、模型或 Extra Params。下拉框会恢复实际配置的供应商，启动迁移仍保留旧版单供应商字段。
+- **供应商存储解析**：供应商保存、加载、枚举和删除改为按 JSON 顶层成员解析，字段字符串中即使含有大括号或类似供应商名称，也不会破坏配置或串读另一条记录。
+- **OpenAI 兼容响应处理**：仅从 `choices[0].message.content` 读取结果，支持 JSON 转义/Unicode 解码和可选文本内容数组；HTTP 200 但内容为空或格式错误会明确判定失败。
+
+### 测试
+
+- 新增 `audio_diagnostics_test`，覆盖规范 WAV header、PCM 信号指标、SHA-256、保存策略、零 PCM 采集失败的 JSON-only 留样、stage 输入去重、VAD 元数据合并、JSON 隐私、严格的受管临时文件/删除边界和 20 组 retention。
+- 新增 `llm_refine_test`，覆盖供应商预设与迁移边界、损坏 store 原样保留、请求/Extra Params 校验、端点规范化、响应解析、Unicode 转义和有界超时策略；`build.bat --test` 会与现有离线协议测试一起执行。
+
 ## v0.9.24 (2026-08-10, dev)
 
 ### 新增

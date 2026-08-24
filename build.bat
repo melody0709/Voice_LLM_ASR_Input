@@ -8,7 +8,7 @@ rem   build.bat                    Incremental CMake build + exact runtime insta
 rem   build.bat --package          Build and create verified MSI + Portable assets
 rem   build.bat --package-msi      Build and create a verified MSI
 rem   build.bat --package-portable Build and create a verified Portable .7z
-rem   build.bat --test             Build and run offline Qwen protocol tests
+rem   build.bat --test             Build and run offline protocol/request tests
 rem   build.bat --clean            Remove generated compile/runtime/test/log trees
 rem
 rem Generated layout: cmake\x64-release, run\x64-release, packages,
@@ -146,8 +146,8 @@ if errorlevel 1 exit /b !ERRORLEVEL!
 call :write_layout_readme
 
 if "!VOXTYPE_TEST_MODE!"=="1" (
-    echo Building offline Qwen protocol regression tests...
-    "%CMAKE_EXE%" --build --preset x64-release --target qwen_free_protocol_test qwen_audio_json_test
+    echo Building offline protocol/request regression tests...
+    "%CMAKE_EXE%" --build --preset x64-release --target qwen_free_protocol_test qwen_audio_json_test llm_refine_test audio_diagnostics_test
     if errorlevel 1 exit /b !ERRORLEVEL!
     set "VOXTYPE_TEST_EXE=%BUILD_ROOT%\artifacts\tests\qwen_free_protocol_test.exe"
     if not exist "!VOXTYPE_TEST_EXE!" (
@@ -164,6 +164,22 @@ if "!VOXTYPE_TEST_MODE!"=="1" (
     )
     echo Running Qwen Audio JSON regression tests...
     "!VOXTYPE_AUDIO_JSON_TEST_EXE!"
+    if errorlevel 1 exit /b !ERRORLEVEL!
+    set "VOXTYPE_LLM_REFINE_TEST_EXE=%BUILD_ROOT%\artifacts\tests\llm_refine_test.exe"
+    if not exist "!VOXTYPE_LLM_REFINE_TEST_EXE!" (
+        echo ERROR: LLM refine test executable was not produced: !VOXTYPE_LLM_REFINE_TEST_EXE!
+        exit /b 1
+    )
+    echo Running LLM refine regression tests...
+    "!VOXTYPE_LLM_REFINE_TEST_EXE!"
+    if errorlevel 1 exit /b !ERRORLEVEL!
+    set "VOXTYPE_AUDIO_DIAGNOSTICS_TEST_EXE=%BUILD_ROOT%\artifacts\tests\audio_diagnostics_test.exe"
+    if not exist "!VOXTYPE_AUDIO_DIAGNOSTICS_TEST_EXE!" (
+        echo ERROR: Audio diagnostics test executable was not produced: !VOXTYPE_AUDIO_DIAGNOSTICS_TEST_EXE!
+        exit /b 1
+    )
+    echo Running audio diagnostics regression tests...
+    "!VOXTYPE_AUDIO_DIAGNOSTICS_TEST_EXE!"
     if errorlevel 1 exit /b !ERRORLEVEL!
 )
 

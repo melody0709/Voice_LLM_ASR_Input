@@ -47,7 +47,11 @@ public:
 
     UINT32 GetNativeSampleRate() const { return m_nativeSampleRate; }
     UINT32 GetNativeChannels() const { return m_nativeChannels; }
+    UINT32 GetNativeBits() const { return m_nativeBits; }
+    bool GetNativeIsFloat() const { return m_nativeIsFloat; }
     std::wstring GetDeviceName() const { return m_deviceName; }
+    std::wstring GetDeviceId() const { return m_deviceId; }
+    bool UsedDefaultDevice() const { return m_usedDefaultDevice; }
 
 private:
     bool InitCOM();
@@ -71,6 +75,8 @@ private:
     UINT32 m_nativeBits{0};
     bool m_nativeIsFloat{false};
     std::wstring m_deviceName;
+    std::wstring m_deviceId;
+    bool m_usedDefaultDevice{true};
 
     double m_resampleRatio{1.0};
     double m_resamplePhase{0.0};

@@ -4,6 +4,7 @@
 
 #include "mimo_asr.h"
 
+#include "audio_diagnostics.h"
 #include "cloud_asr_common.h"
 #include "cloud_http_common.h"
 #include "utils.h"
@@ -337,7 +338,40 @@ RecognizeAttempt RecognizeInternal(const std::vector<BYTE>& pcm16k16Mono, const 
 
     std::wstring lastError;
     for (int attempt = 0; attempt < 2; ++attempt) {
+        audio_diagnostics::StageMetadata diagnostic;
+        diagnostic.kind = attempt == 0
+            ? cfg.diagnosticStageKind
+            : audio_diagnostics::RetryStageKind(cfg.diagnosticStageKind);
+        diagnostic.index = attempt == 0
+            ? cfg.diagnosticStageIndex
+            : audio_diagnostics::RetryStageIndex(
+                cfg.diagnosticStageKind, cfg.diagnosticStageIndex,
+                static_cast<unsigned>(attempt));
+        diagnostic.backend = L"mimo";
+        diagnostic.model = cfg.model;
+        diagnostic.transport = L"batch_http_wav_json";
+        diagnostic.reason = attempt == 0 ? L"" : L"transient_http_retry";
+        diagnostic.encoding = L"wav_base64_json";
+        diagnostic.sentBytes = pcm16k16Mono.size();
+        audio_diagnostics::RegisterStageInput(
+            cfg.diagnosticAttemptId, diagnostic, pcm16k16Mono);
         RecognizeAttempt r = RecognizePrepared(requestJson, endpoint, cfg, timeoutMs);
+        audio_diagnostics::StageTerminal terminal;
+        if (r.ok && r.text.empty()) {
+            terminal.terminal = "http_success_empty";
+            terminal.reason = "no_speech";
+        } else if (r.ok) {
+            terminal.terminal = "http_success";
+            terminal.textChars = r.text.size();
+        } else if (r.retryable) {
+            terminal.terminal = "transient_http_error";
+            terminal.reason = "network";
+        } else {
+            terminal.terminal = "provider_error";
+            terminal.reason = "provider_error";
+        }
+        audio_diagnostics::CompleteStage(
+            cfg.diagnosticAttemptId, diagnostic.kind, diagnostic.index, terminal);
         if (r.ok) return r;
         lastError = r.errorText;
         if (!r.retryable || attempt == 1) break;

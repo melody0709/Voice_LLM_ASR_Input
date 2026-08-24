@@ -16,6 +16,7 @@ constexpr int kArchiveCount = 2;
 
 std::mutex g_logMutex;
 std::atomic<bool> g_qwenFreeLogEnabled{false};
+std::atomic<bool> g_diagnosticAudioLogEnabled{false};
 
 std::wstring TempLogPath(const wchar_t* fileName) {
     wchar_t tempPath[MAX_PATH] = {};
@@ -78,11 +79,20 @@ void WriteNamedVLocked(const wchar_t* fileName, const char* format, va_list args
 
 bool Enabled() {
     if (g_enableDebugMode.load(std::memory_order_relaxed)) return true;
-    return g_qwenFreeLogEnabled.load(std::memory_order_relaxed);
+    return g_qwenFreeLogEnabled.load(std::memory_order_relaxed) ||
+           g_diagnosticAudioLogEnabled.load(std::memory_order_relaxed);
+}
+
+bool ProviderDebugEnabled() {
+    return g_enableDebugMode.load(std::memory_order_relaxed);
 }
 
 void SetQwenFreeEnabled(bool enabled) {
     g_qwenFreeLogEnabled.store(enabled, std::memory_order_relaxed);
+}
+
+void SetDiagnosticAudioEnabled(bool enabled) {
+    g_diagnosticAudioLogEnabled.store(enabled, std::memory_order_relaxed);
 }
 
 void Write(const char* format, ...) {
@@ -104,7 +114,13 @@ void WriteIf(bool enabled, const char* format, ...) {
 }
 
 void WriteNamedV(const wchar_t* fileName, const char* format, va_list args) {
-    if (!Enabled() || !fileName || !format) return;
+    // Named provider logs may include request/trace identifiers and raw
+    // provider diagnostics. Recording diagnostics enables only the bounded,
+    // structured runtime log; verbose provider logs remain an explicit global
+    // Debug Mode opt-in.
+    if (!ProviderDebugEnabled() || !fileName || !format) {
+        return;
+    }
     std::lock_guard<std::mutex> lock(g_logMutex);
     WriteNamedVLocked(fileName, format, args);
 }

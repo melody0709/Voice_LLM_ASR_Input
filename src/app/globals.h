@@ -21,6 +21,7 @@
 #include "firered_vad.h"
 #include "llm_refine.h"
 #include "baidu_asr.h"
+#include "audio_diagnostics.h"
 #include "wasapi_capture.h"
 #include "input_context.h"
 #include "qwen_free_postprocess.h"
@@ -86,6 +87,10 @@ constexpr int kStreamingPartialHudMaxLines = 4;
 constexpr size_t kStreamingPartialHudTailChars = 132;
 
 namespace UiStyle {
+constexpr int SettingsWindowW = 850;
+constexpr int SettingsWindowH = 740;
+// Conservative caption/frame allowance used by the static layout validator.
+constexpr int SettingsWindowNonClientReserveH = 48;
 constexpr int Margin = 12;
 constexpr int ContentLeft = 42;
 constexpr int InputLeft = 188;
@@ -109,6 +114,17 @@ constexpr int GeneralStartupCheckOffsetY = 24;
 constexpr int GeneralStartupHintOffsetY = 62;
 constexpr int GeneralStartupCheckW = 430;
 constexpr int GeneralStartupHintW = 700;
+constexpr int GeneralDiagnosticsGroupGap = 16;
+constexpr int GeneralDiagnosticsGroupH = 166;
+constexpr int GeneralDiagnosticsModeOffsetY = 24;
+constexpr int GeneralDiagnosticsActionsOffsetY = 70;
+constexpr int GeneralDiagnosticsHintOffsetY = 116;
+constexpr int GeneralDiagnosticsModeLabelW = 128;
+constexpr int GeneralDiagnosticsModeW = 220;
+constexpr int GeneralDiagnosticsOpenButtonW = 230;
+constexpr int GeneralDiagnosticsDeleteButtonW = 250;
+constexpr int GeneralDiagnosticsButtonGap = 12;
+constexpr int GeneralDiagnosticsHintW = 730;
 constexpr int InputW = 480;
 constexpr int InputWFull = 580;
 constexpr int ComboW = 250;
@@ -122,8 +138,8 @@ constexpr int SmallBtnW = 88;
 constexpr int SmallBtnX = 532;
 constexpr int ActionBtnW = 140;
 constexpr int FooterBtnW = 84;
-constexpr int FooterHeight = 78;
-constexpr int FooterMinTop = 640;
+constexpr int FooterHeight = 68;
+constexpr int FooterMinTop = 632;
 constexpr int CloudAsrHintY = 48;
 constexpr int CloudAsrHintW = 740;
 constexpr int QwenHintH = 24;
@@ -182,6 +198,7 @@ constexpr int RowInputY(int row) { return FirstRowY + row * RowHeight; }
 constexpr int RowLabelY(int row) { return FirstRowY + LabelYOffset + row * RowHeight; }
 constexpr int GeneralShortcutGroupY = RowInputY(0);
 constexpr int GeneralStartupGroupY = GeneralShortcutGroupY + GeneralShortcutGroupH + GeneralStartupGroupGap;
+constexpr int GeneralDiagnosticsGroupY = GeneralStartupGroupY + GeneralStartupGroupH + GeneralDiagnosticsGroupGap;
 // UiStyle constants are designed for 150% DPI (144 dpi).
 // Scale = DpiScaleForWindow * 96/144; S() converts design px to physical px.
 extern float Scale;
@@ -309,6 +326,10 @@ constexpr int IDC_QWEN_FREE_BROWSE = 2208;
 constexpr int IDC_QWEN_FREE_STATUS = 2209;
 constexpr int IDC_QWEN_FREE_UTDID = 2210;
 constexpr int IDC_QWEN_FREE_TEST = 2211;
+constexpr int IDC_DIAGNOSTIC_AUDIO_MODE = 2212;
+constexpr int IDC_DIAGNOSTIC_AUDIO_OPEN_FOLDER = 2213;
+constexpr int IDC_DIAGNOSTIC_AUDIO_DELETE = 2214;
+constexpr int IDC_DIAGNOSTIC_AUDIO_HINT = 2215;
 
 struct Config {
     int configVersion = 0;
@@ -415,6 +436,13 @@ struct Config {
     bool forceUnicodeInput = false;
     std::wstring audioBackend = L"wasapi";
     std::wstring audioDeviceId;
+    std::wstring diagnosticAudioMode = L"off";
+    // Runtime-only ASR diagnostic routing. These fields identify whether a
+    // provider session is the primary request or a configured fallback and
+    // must never be persisted in config.json.
+    audio_diagnostics::StageKind asrDiagnosticStageKind =
+        audio_diagnostics::StageKind::Primary;
+    unsigned asrDiagnosticStageIndex = 0;
 };
 
 inline void NormalizeQwenFreePostProcessConfig(Config& config) {

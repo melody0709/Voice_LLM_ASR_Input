@@ -10,6 +10,7 @@
 #include "input_context.h"
 #include "qwen_context.h"
 #include "asr_session.h"
+#include "asr_diagnostics.h"
 #include "asr_streaming_session.h"
 #include "asr_result.h"
 #include "asr_runtime_log.h"
@@ -53,6 +54,10 @@
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "crypt32.lib")
+
+static void WriteDiagnosticAudioRuntimeLog(const std::string& line) {
+    asr_runtime_log::Write("%s", line.c_str());
+}
 
 HINSTANCE g_instance = nullptr;
 HWND g_mainWindow = nullptr;
@@ -437,6 +442,7 @@ static AsrSessionResult RunStreamingAsrOnce(const Config& config,
     auto session = CreateStreamingSessionForOneShot(config);
     if (!session) {
         result.text = L"ASR failed: streaming backend is not available";
+        asr_diagnostics::CompleteIfMissingFromText(config, result.text);
         return result;
     }
 
@@ -449,6 +455,8 @@ static AsrSessionResult RunStreamingAsrOnce(const Config& config,
             : std::move(startError);
         session->Abort();
         result.cloudApiMs = static_cast<double>(GetTickCount64() - startedTick);
+        asr_diagnostics::CompleteIfMissingFromText(
+            config, result.text, "session_start_failed", result.cloudApiMs);
         return result;
     }
 
@@ -456,6 +464,8 @@ static AsrSessionResult RunStreamingAsrOnce(const Config& config,
         result.text = L"ASR failed: streaming fallback audio enqueue failed";
         session->Abort();
         result.cloudApiMs = static_cast<double>(GetTickCount64() - startedTick);
+        asr_diagnostics::CompleteIfMissingFromText(
+            config, result.text, "audio_enqueue_failed", result.cloudApiMs);
         return result;
     }
 
@@ -483,6 +493,8 @@ static AsrSessionResult RunStreamingAsrOnce(const Config& config,
     }
     session->Abort();
     result.cloudApiMs = static_cast<double>(GetTickCount64() - startedTick);
+    asr_diagnostics::CompleteIfMissingFromText(
+        config, result.text, "provider_final", result.cloudApiMs);
     return result;
 }
 
@@ -497,11 +509,16 @@ static AsrSessionResult RunBatchAsrOnce(const Config& config,
     std::wstring startError;
     if (!session || !session->Start(startError)) {
         result.text = startError.empty() ? L"ASR failed: session start failed" : startError;
+        asr_diagnostics::CompleteIfMissingFromText(
+            config, result.text, "session_start_failed");
         return result;
     }
 
     session->EnqueuePcmChunk(pcm.data(), pcm.size());
-    return session->Finish();
+    result = session->Finish();
+    asr_diagnostics::CompleteIfMissingFromText(
+        config, result.text, "provider_final", result.cloudApiMs);
+    return result;
 }
 
 static AsrSessionResult RunConfiguredAsrOnce(
@@ -697,19 +714,75 @@ static uint64_t BeginAsrAttempt(const Config& config,
             g_inputContextResult.timedOut ? 1 : 0,
             g_inputContextResult.isPassword ? 1 : 0);
     }
+    const audio_diagnostics::AttemptMetadata diagnosticMetadata =
+        asr_diagnostics::MakeAttemptMetadata(attemptConfig);
+    uint64_t supersededAttemptId = 0;
     {
         std::lock_guard<std::mutex> lock(g_asrAttemptMutex);
+        supersededAttemptId = g_activeAttempt.id;
         g_activeAttempt = {};
         g_activeAttempt.id = attemptId;
         g_activeAttempt.primaryConfig = std::move(attemptConfig);
         g_activeAttempt.selection = std::move(selection);
         g_activeAttempt.startedTick = GetTickCount64();
     }
+    if (supersededAttemptId != 0 && supersededAttemptId != attemptId) {
+        audio_diagnostics::DiscardAttempt(supersededAttemptId, "superseded");
+    }
+    audio_diagnostics::BeginAttempt(diagnosticMetadata);
     asr_runtime_log::Write(
         "event=attempt_start attempt=%llu primary=%s fallback=%s",
         static_cast<unsigned long long>(attemptId),
         AsrBackendLogName(config.asrBackend),
         IsFallbackAsrEnabled(config) ? AsrBackendLogName(config.fallbackAsrBackend) : "none");
+    return attemptId;
+}
+
+static uint64_t RecordCaptureStartFailure(
+    const Config& config,
+    const AudioCaptureStartFailure& failure) {
+    const uint64_t attemptId = ++g_asrAttemptSeq;
+    Config attemptConfig = config;
+    attemptConfig.asrAttemptId = attemptId;
+    audio_diagnostics::BeginAttempt(
+        asr_diagnostics::MakeAttemptMetadata(attemptConfig));
+
+    audio_diagnostics::CaptureSnapshot capture;
+    capture.device.backend = failure.terminalBackend.empty()
+        ? config.audioBackend : failure.terminalBackend;
+    capture.device.deviceName = failure.deviceName;
+    capture.device.deviceId = failure.deviceId;
+    capture.device.usedDefaultDevice = failure.usedDefaultDevice;
+    capture.device.nativeSampleRate = failure.nativeSampleRate;
+    capture.device.nativeChannels = failure.nativeChannels;
+    capture.device.nativeBitsPerSample = failure.nativeBitsPerSample;
+    capture.device.nativeIsFloat = failure.nativeIsFloat;
+    audio_diagnostics::AttachCapture(
+        attemptId,
+        std::make_shared<const std::vector<BYTE>>(),
+        capture);
+
+    audio_diagnostics::StageMetadata stage;
+    stage.kind = audio_diagnostics::StageKind::Primary;
+    stage.backend = L"audio_capture";
+    stage.transport = failure.attemptedBackends.empty()
+        ? capture.device.backend : failure.attemptedBackends;
+    stage.reason = L"capture_start_" +
+        (failure.phase.empty() ? std::wstring(L"unknown") : failure.phase);
+
+    audio_diagnostics::StageTerminal terminal;
+    terminal.terminal = "capture_start_failure";
+    terminal.reason = WideToUtf8(stage.reason);
+    terminal.providerCode = std::to_string(
+        static_cast<unsigned long>(failure.code));
+    terminal.errorCategory = "capture";
+    audio_diagnostics::CompleteStageIfMissing(attemptId, stage, terminal);
+
+    audio_diagnostics::FinalResult finalResult;
+    finalResult.kind = audio_diagnostics::FinalKind::CaptureFailure;
+    finalResult.reason = terminal.reason;
+    finalResult.terminal = terminal.terminal;
+    audio_diagnostics::FinalizeAttempt(attemptId, finalResult);
     return attemptId;
 }
 
@@ -761,6 +834,7 @@ static std::unique_ptr<AsrAttemptFinalMessage> CompleteActiveAttemptRecording(
     double recordingMs,
     size_t pcmBytes) {
     std::unique_ptr<AsrAttemptFinalMessage> deferred;
+    std::shared_ptr<const std::vector<BYTE>> capturedPcm;
     bool completed = false;
     {
         std::lock_guard<std::mutex> lock(g_asrAttemptMutex);
@@ -768,7 +842,8 @@ static std::unique_ptr<AsrAttemptFinalMessage> CompleteActiveAttemptRecording(
             g_activeAttempt.recordingStopped = true;
             g_activeAttempt.stoppedTick = GetTickCount64();
             if (pcm) {
-                g_activeAttempt.pcm = std::make_shared<const std::vector<BYTE>>(*pcm);
+                capturedPcm = std::make_shared<const std::vector<BYTE>>(*pcm);
+                g_activeAttempt.pcm = capturedPcm;
             }
             if (g_activeAttempt.hasDeferredFinal) {
                 deferred = std::make_unique<AsrAttemptFinalMessage>();
@@ -789,12 +864,40 @@ static std::unique_ptr<AsrAttemptFinalMessage> CompleteActiveAttemptRecording(
         }
     }
     if (completed) {
+        const audio_diagnostics::CaptureSnapshot capture =
+            audio_diagnostics::FreezeCapture(recordingMs, pcmBytes);
+        audio_diagnostics::AttachCapture(attemptId, capturedPcm, capture);
+        const std::string deviceId = WideToUtf8(capture.device.deviceId);
+        const std::string deviceHash = deviceId.empty()
+            ? std::string()
+            : audio_diagnostics::Sha256Hex(
+                reinterpret_cast<const BYTE*>(deviceId.data()), deviceId.size());
         asr_runtime_log::Write(
-            "event=recording_stop attempt=%llu recording_ms=%.0f pcm_bytes=%zu deferred_primary=%d",
+            "event=capture_summary attempt=%llu source=%s device_hash=%s default_device=%d native_rate=%lu native_channels=%u native_bits=%u native_float=%d recording_ms=%.0f native_frames=%llu output_samples=%llu pcm_bytes=%zu deferred_primary=%d rms_dbfs=%.2f peak_dbfs=%.2f zero_ratio=%.6f near_silent_ratio=%.6f clipping_ratio=%.6f silent_packets=%llu silent_frames=%llu discontinuities=%llu max_callback_gap_ms=%.1f first_non_silent_delay_ms=%.1f downmix_rms_dbfs=%.2f",
             static_cast<unsigned long long>(attemptId),
+            WideToUtf8(capture.device.backend).c_str(),
+            deviceHash.empty() ? "unavailable" : deviceHash.c_str(),
+            capture.device.usedDefaultDevice ? 1 : 0,
+            static_cast<unsigned long>(capture.device.nativeSampleRate),
+            static_cast<unsigned>(capture.device.nativeChannels),
+            static_cast<unsigned>(capture.device.nativeBitsPerSample),
+            capture.device.nativeIsFloat ? 1 : 0,
             recordingMs,
+            static_cast<unsigned long long>(capture.nativeFrames),
+            static_cast<unsigned long long>(capture.outputSamples),
             pcmBytes,
-            deferred ? 1 : 0);
+            deferred ? 1 : 0,
+            capture.output.rmsDbfs,
+            capture.output.peakDbfs,
+            capture.output.zeroRatio,
+            capture.output.nearSilentRatio,
+            capture.output.clippingRatio,
+            static_cast<unsigned long long>(capture.silentPackets),
+            static_cast<unsigned long long>(capture.silentFrames),
+            static_cast<unsigned long long>(capture.discontinuities),
+            capture.maxCallbackGapMs,
+            capture.firstNonSilentDelayMs,
+            capture.downmixRmsDbfs);
     }
     return deferred;
 }
@@ -996,6 +1099,18 @@ static void HandleAsrAttemptFinal(AsrAttemptFinalMessage& msg) {
     }
 
     const std::wstring primaryText = NormalizeAsrText(msg.text);
+    const double primaryElapsedMs =
+        static_cast<double>(ElapsedSinceTick(elapsedStartTick));
+    if (msg.source == AsrAttemptFinalSource::Watchdog) {
+        // Abort wakes the provider worker and may make it report "aborted".
+        // The externally observed terminal is still the watchdog timeout, so
+        // replace that cancellation artifact with the exact final cause.
+        asr_diagnostics::CompleteFromText(
+            primaryConfig, primaryText, "watchdog_final", primaryElapsedMs);
+    } else {
+        asr_diagnostics::CompleteIfMissingFromText(
+            primaryConfig, primaryText, "provider_final", primaryElapsedMs);
+    }
     const AsrResultClassification primaryClassification = ClassifyAsrResult(primaryText);
     LogAsrResultEvent("primary_final", msg.attemptId, primaryConfig.asrBackend,
                       primaryClassification, AsrAttemptFinalSourceName(msg.source),
@@ -1300,13 +1415,15 @@ static void ResetStreamingVadTrimmerState() {
     g_vadDetectedVoice.store(false);
 }
 
-static bool StartStreamingVadTrimmerForCloud(const wchar_t* debugPrefix, bool markReady = true) {
+static bool StartStreamingVadTrimmerForCloud(const Config& config,
+                                             const wchar_t* debugPrefix,
+                                             bool markReady = true) {
     ResetStreamingVadTrimmerState();
-    if (!g_config.enableVad) return false;
+    if (!config.enableVad) return false;
 
     auto trimmer = std::make_unique<StreamingVadTrimmer>();
     std::wstring error;
-    const bool ok = trimmer->Start(g_config, g_asrEngine, &error);
+    const bool ok = trimmer->Start(config, g_asrEngine, &error);
     if (!ok) {
         VolcDebugLog("%ls: VAD trim disabled (error_wlen=%zu)", debugPrefix, error.size());
         return false;
@@ -1314,7 +1431,7 @@ static bool StartStreamingVadTrimmerForCloud(const wchar_t* debugPrefix, bool ma
 
     g_streamingVadTrimmer = std::move(trimmer);
     g_streamingVadReady = markReady;
-    VolcDebugLog("%ls: VAD trim active (%ls)", debugPrefix, g_config.vadModel.c_str());
+    VolcDebugLog("%ls: VAD trim active (%ls)", debugPrefix, config.vadModel.c_str());
     return true;
 }
 
@@ -1393,6 +1510,19 @@ static void FinishAudioCaptureFailure(uint64_t generation,
     g_audioCaptureFailurePending.store(false, std::memory_order_release);
     g_lastPcmBytes = pcm.size();
     CompleteActiveAttemptRecording(attemptId, &pcm, recordingMs, pcm.size());
+    const Config attemptConfig = ActiveAsrAttemptConfig();
+    audio_diagnostics::StageMetadata stage =
+        asr_diagnostics::MakeStageMetadata(attemptConfig, L"capture_failure");
+    audio_diagnostics::StageTerminal terminal;
+    terminal.terminal = "capture_failure";
+    terminal.reason = wasapi ? "wasapi_runtime_failure" : "wavein_runtime_failure";
+    terminal.providerCode = std::to_string(static_cast<unsigned long>(code));
+    audio_diagnostics::CompleteStageIfMissing(attemptId, stage, terminal);
+    audio_diagnostics::FinalResult finalResult;
+    finalResult.kind = audio_diagnostics::FinalKind::CaptureFailure;
+    finalResult.reason = terminal.reason;
+    finalResult.terminal = terminal.terminal;
+    audio_diagnostics::FinalizeAttempt(attemptId, finalResult);
     CancelActiveAsrAttempt(attemptId, true);
     MarkActiveAttemptFinalHandled(attemptId);
     KillTimer(g_mainWindow, kStreamingWatchdogTimer);
@@ -1450,9 +1580,19 @@ void StartRecordingSession() {
     ShowHud(L"Listening... " + name);
 
     std::wstring error;
-    if (!StartAudioCapture(error)) {
-        asr_runtime_log::Write("event=capture_start_failed primary=%s",
-                               AsrBackendLogName(g_config.asrBackend));
+    AudioCaptureStartFailure captureFailure;
+    if (!StartAudioCapture(error, &captureFailure)) {
+        const uint64_t attemptId = RecordCaptureStartFailure(
+            g_config, captureFailure);
+        asr_runtime_log::Write(
+            "event=capture_start_failed attempt=%llu primary=%s capture_backends=%s terminal_backend=%s phase=%s code=%lu error_chars=%zu",
+            static_cast<unsigned long long>(attemptId),
+            AsrBackendLogName(g_config.asrBackend),
+            WideToUtf8(captureFailure.attemptedBackends).c_str(),
+            WideToUtf8(captureFailure.terminalBackend).c_str(),
+            WideToUtf8(captureFailure.phase).c_str(),
+            static_cast<unsigned long>(captureFailure.code),
+            error.size());
         ShowHud(error);
         if (g_hudWindow) SetTimer(g_hudWindow, kHudHideTimer, 1800, nullptr);
         return;
@@ -1505,12 +1645,12 @@ void StartRecordingSession() {
         if (!session->Start(startError)) {
             HandleStreamingSessionStartFailure(
                 attemptId,
-                g_config,
+                attemptConfig,
                 startError.empty() ? L"Qwen ASR error: session start failed" : std::move(startError));
             return;
         }
 
-        StartStreamingVadTrimmerForCloud(L"Qwen thread", false);
+        StartStreamingVadTrimmerForCloud(attemptConfig, L"Qwen thread", false);
         ReplayPreCapturedAudio(session.get());
 
         EnterCriticalSection(&g_streamingSessionCs);
@@ -1529,8 +1669,8 @@ void StartRecordingSession() {
         return;
     }
 
-    if (g_config.asrBackend == L"doubao_ime") {
-        auto session = CreateDoubaoImeStreamingSession(g_config, g_mainWindow, RefineWithLlmAsync, &g_lastRawAsrText);
+    if (attemptConfig.asrBackend == L"doubao_ime") {
+        auto session = CreateDoubaoImeStreamingSession(attemptConfig, g_mainWindow, RefineWithLlmAsync, &g_lastRawAsrText);
         session->SetPartialCallback(StreamingPartialHudCallback, &g_doubaoImePartialHudContext);
         session->SetFinalCallback(StreamingFinalCallback, reinterpret_cast<void*>(static_cast<UINT_PTR>(attemptId)));
 
@@ -1538,7 +1678,7 @@ void StartRecordingSession() {
         if (!session->Start(startError)) {
             HandleStreamingSessionStartFailure(
                 attemptId,
-                g_config,
+                attemptConfig,
                 startError.empty() ? L"Doubao IME ASR error: session start failed" : std::move(startError));
             return;
         }
@@ -1560,14 +1700,14 @@ void StartRecordingSession() {
         return;
     }
 
-    if (g_config.asrBackend == L"qwen_free") {
+    if (attemptConfig.asrBackend == L"qwen_free") {
         // 千问 IME 免费后端（A1 纯协议还原）：
         //   - VoxType 负责 WASAPI 采集 PCM 送 EnqueuePcmChunk；
         //   - 协议层 qwen_free_proto_* 负责 UTDID/签名/ASR WebSocket/LLM 后处理；
         //   - Start 仅建立异步 session；UTDID/签名/连接都在 worker 完成，
         //     失败后保留完整录音并进入统一 fallback。
         auto session = CreateQwenFreeStreamingSession(
-            g_config, g_mainWindow, RefineWithLlmAsync, &g_lastRawAsrText, selection);
+            attemptConfig, g_mainWindow, RefineWithLlmAsync, &g_lastRawAsrText, selection);
         session->SetPartialCallback(StreamingPartialHudCallback, &g_qwenFreePartialHudContext);
         session->SetFinalCallback(StreamingFinalCallback, reinterpret_cast<void*>(static_cast<UINT_PTR>(attemptId)));
 
@@ -1575,7 +1715,7 @@ void StartRecordingSession() {
         if (!session->Start(startError)) {
             HandleStreamingSessionStartFailure(
                 attemptId,
-                g_config,
+                attemptConfig,
                 startError.empty()
                     ? L"Qwen IME ASR error: session start failed"
                     : std::move(startError));
@@ -1600,10 +1740,10 @@ void StartRecordingSession() {
         return;
     }
 
-    if (g_config.asrBackend == L"volcengine") {
+    if (attemptConfig.asrBackend == L"volcengine") {
         VolcengineResetForNewSession();
 
-        auto session = CreateVolcengineStreamingSession(g_config, g_mainWindow, RefineWithLlmAsync, &g_lastRawAsrText);
+        auto session = CreateVolcengineStreamingSession(attemptConfig, g_mainWindow, RefineWithLlmAsync, &g_lastRawAsrText);
         session->SetPartialCallback(StreamingPartialHudCallback, &g_volcenginePartialHudContext);
         session->SetFinalCallback(StreamingFinalCallback, reinterpret_cast<void*>(static_cast<UINT_PTR>(attemptId)));
 
@@ -1611,12 +1751,12 @@ void StartRecordingSession() {
         if (!session->Start(startError)) {
             HandleStreamingSessionStartFailure(
                 attemptId,
-                g_config,
+                attemptConfig,
                 startError.empty() ? L"VolcEngine error: session start failed" : std::move(startError));
             return;
         }
 
-        StartStreamingVadTrimmerForCloud(L"Volc thread", false);
+        StartStreamingVadTrimmerForCloud(attemptConfig, L"Volc thread", false);
         ReplayPreCapturedAudio(session.get());
 
         EnterCriticalSection(&g_streamingSessionCs);
@@ -1637,14 +1777,14 @@ void StartRecordingSession() {
 
     g_streamingVadReady = false;
     g_streamingVadSamples.clear();
-    if (g_config.asrBackend != L"baidu" && !IsStreamingCloudBackend(g_config) &&
-        g_config.asrBackend != L"mimo" &&
-        g_config.enableVad) {
-        const int threads = ResolveThreads(g_config.threads);
+    if (attemptConfig.asrBackend != L"baidu" && !IsStreamingCloudBackend(attemptConfig) &&
+        attemptConfig.asrBackend != L"mimo" &&
+        attemptConfig.enableVad) {
+        const int threads = ResolveThreads(attemptConfig.threads);
         g_asrEngine.Lock();
-        bool ok = g_asrEngine.EnsureVadForConfig(g_config, threads);
+        bool ok = g_asrEngine.EnsureVadForConfig(attemptConfig, threads);
         if (ok) {
-            if (g_config.vadModel == L"firered") {
+            if (attemptConfig.vadModel == L"firered") {
                 g_asrEngine.fireRedVad->Reset();
             } else {
                 g_asrEngine.vad->Reset();
@@ -1704,6 +1844,10 @@ void StopRecordingSession() {
         g_lastPcmBytes = pcm.size();
         if (pcm.size() < 8000) {
             KillTimer(g_mainWindow, kStreamingWatchdogTimer);
+            asr_diagnostics::CompleteIfMissingFromText(
+                recordingConfig, L"Too short", "too_short");
+            audio_diagnostics::FinalizeAttempt(
+                attemptId, asr_diagnostics::FinalFromText(L"Too short"));
             MarkActiveAttemptFinalHandled(attemptId);
             AbortAndResetActiveStreamingSession();
             asr_runtime_log::Write("event=attempt_skipped attempt=%llu kind=too_short pcm_bytes=%zu",
@@ -1713,8 +1857,29 @@ void StopRecordingSession() {
             return;
         }
         FinishStreamingVadTrimmer();
+        if (g_streamingVadTrimmer && g_streamingVadTrimmer->IsActive()) {
+            const StreamingVadTrimStats stats = g_streamingVadTrimmer->Stats();
+            audio_diagnostics::StageMetadata stage =
+                asr_diagnostics::MakeStageMetadata(recordingConfig);
+            stage.vadActive = stats.active;
+            stage.vadDetectedSpeech = stats.detectedSpeech;
+            stage.vadModel = stats.modelName;
+            stage.vadInputBytes = stats.rawBytes;
+            stage.vadOutputBytes = stats.outputBytes;
+            audio_diagnostics::UpdateStageMetadata(attemptId, stage);
+        }
         if (StreamingVadTrimSawNoSpeech()) {
             KillTimer(g_mainWindow, kStreamingWatchdogTimer);
+            audio_diagnostics::StageMetadata stage =
+                asr_diagnostics::MakeStageMetadata(recordingConfig, L"local_vad_no_speech");
+            stage.vadActive = true;
+            stage.vadDetectedSpeech = false;
+            audio_diagnostics::StageTerminal terminal;
+            terminal.terminal = "local_vad_no_speech";
+            terminal.reason = "no_speech";
+            audio_diagnostics::CompleteStageIfMissing(attemptId, stage, terminal);
+            audio_diagnostics::FinalizeAttempt(
+                attemptId, asr_diagnostics::FinalFromText(L"No speech detected"));
             MarkActiveAttemptFinalHandled(attemptId);
             AbortAndResetActiveStreamingSession();
             asr_runtime_log::Write("event=attempt_skipped attempt=%llu kind=no_speech pcm_bytes=%zu",
@@ -1747,8 +1912,12 @@ void StopRecordingSession() {
         return;
     }
 
-    CompleteActiveAttemptRecording(attemptId, nullptr, g_recordingMs, pcm.size());
+    CompleteActiveAttemptRecording(attemptId, &pcm, g_recordingMs, pcm.size());
     if (pcm.size() < 8000) {
+        asr_diagnostics::CompleteIfMissingFromText(
+            recordingConfig, L"Too short", "too_short");
+        audio_diagnostics::FinalizeAttempt(
+            attemptId, asr_diagnostics::FinalFromText(L"Too short"));
         MarkActiveAttemptFinalHandled(attemptId);
         asr_runtime_log::Write("event=attempt_skipped attempt=%llu kind=too_short pcm_bytes=%zu",
                                static_cast<unsigned long long>(attemptId), pcm.size());
@@ -1786,6 +1955,16 @@ void StopRecordingSession() {
         g_streamingVadReady = false;
 
         if (g_streamingVadSamples.empty()) {
+            audio_diagnostics::StageMetadata stage =
+                asr_diagnostics::MakeStageMetadata(recordingConfig, L"local_vad_no_speech");
+            stage.vadActive = true;
+            stage.vadDetectedSpeech = false;
+            audio_diagnostics::StageTerminal terminal;
+            terminal.terminal = "local_vad_no_speech";
+            terminal.reason = "no_speech";
+            audio_diagnostics::CompleteStageIfMissing(attemptId, stage, terminal);
+            audio_diagnostics::FinalizeAttempt(
+                attemptId, asr_diagnostics::FinalFromText(L"No speech detected"));
             MarkActiveAttemptFinalHandled(attemptId);
             asr_runtime_log::Write("event=attempt_skipped attempt=%llu kind=no_speech pcm_bytes=%zu",
                                    static_cast<unsigned long long>(attemptId), pcm.size());
@@ -2180,6 +2359,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             const uint64_t attemptId = ActiveAsrAttemptId();
             CancelActiveAsrAttempt(attemptId, true);
             MarkActiveAttemptFinalHandled(attemptId);
+            audio_diagnostics::DiscardAttempt(attemptId, "application_exit");
         }
         AbortAndResetActiveStreamingSession();
         VolcengineForceAbortAndCloseAll();
@@ -2244,6 +2424,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     LoadConfig();
     g_enableDebugMode = g_config.enableDebugMode;
+    audio_diagnostics::SetLogCallback(WriteDiagnosticAudioRuntimeLog);
 
     if (g_config.enableDebugMode) {
         DebugModeOpenConsole();
@@ -2314,6 +2495,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
 
     VolcengineClosePersistentConnection();
+    audio_diagnostics::WaitForPendingWrites(INFINITE);
 
     if (mutex) {
         ReleaseMutex(mutex);

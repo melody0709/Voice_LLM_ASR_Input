@@ -4,6 +4,7 @@
 
 #include "doubao_ime_asr.h"
 
+#include "audio_diagnostics.h"
 #include "cloud_http_common.h"
 #include "utils.h"
 
@@ -1341,7 +1342,12 @@ bool RealtimeClient::Connect(std::wstring& error) {
     return true;
 }
 
-bool RealtimeClient::SendPcmFrame(const BYTE* pcm, size_t bytes, bool isLast, std::wstring& error) {
+bool RealtimeClient::SendPcmFrame(const BYTE* pcm,
+                                  size_t bytes,
+                                  bool isLast,
+                                  std::wstring& error,
+                                  size_t* networkBytes) {
+    if (networkBytes) *networkBytes = 0;
     if (!impl_ || !impl_->connected.load()) {
         error = L"WebSocket not connected";
         return false;
@@ -1390,9 +1396,11 @@ bool RealtimeClient::SendPcmFrame(const BYTE* pcm, size_t bytes, bool isLast, st
     request.audioData = std::move(opusFrame);
     request.frameState = static_cast<int>(state);
 
-    if (!SendBinaryMessage(impl_->conn.WebSocket(), EncodeRequest(request), error)) {
+    const std::vector<BYTE> encodedRequest = EncodeRequest(request);
+    if (!SendBinaryMessage(impl_->conn.WebSocket(), encodedRequest, error)) {
         return false;
     }
+    if (networkBytes) *networkBytes = encodedRequest.size();
     ++impl_->frameIndex;
     return true;
 }
@@ -1596,6 +1604,21 @@ RecordedRecognitionResult RecognizeRecordedPcm(const DoubaoImeConfig& cfg,
     constexpr int kMaxRecordedAttempts = 2;
     bool refreshedCredentials = false;
     for (int attempt = 0; attempt < kMaxRecordedAttempts; ++attempt) {
+        audio_diagnostics::StageMetadata diagnostic;
+        diagnostic.kind = attempt == 0
+            ? cfg.diagnosticStageKind
+            : audio_diagnostics::RetryStageKind(cfg.diagnosticStageKind);
+        diagnostic.index = attempt == 0
+            ? cfg.diagnosticStageIndex
+            : audio_diagnostics::RetryStageIndex(
+                cfg.diagnosticStageKind, cfg.diagnosticStageIndex,
+                static_cast<unsigned>(attempt));
+        diagnostic.backend = L"doubao_ime";
+        diagnostic.model = L"doubao_ime_asr";
+        diagnostic.transport = L"websocket_opus_recorded";
+        diagnostic.encoding = L"opus";
+        diagnostic.reason = attempt == 0 ? L"" : L"auth_or_transient_retry";
+        const ULONGLONG attemptStarted = GetTickCount64();
         RealtimeClient client(attemptCfg);
         std::wstring error;
         if (!client.Connect(error)) {
@@ -1609,6 +1632,13 @@ RecordedRecognitionResult RecognizeRecordedPcm(const DoubaoImeConfig& cfg,
                 result.credentialsChanged = true;
             }
             client.Close();
+
+            audio_diagnostics::StageTerminal terminal;
+            terminal.terminal = authFailure ? "auth_error" : "connect_error";
+            terminal.reason = authFailure ? "auth_or_config" : "network";
+            terminal.elapsedMs = static_cast<double>(GetTickCount64() - attemptStarted);
+            audio_diagnostics::CompleteStage(
+                cfg.diagnosticAttemptId, diagnostic.kind, diagnostic.index, terminal);
 
             if (!refreshedCredentials && authFailure && attempt + 1 < kMaxRecordedAttempts) {
                 attemptCfg.deviceId.clear();
@@ -1646,16 +1676,27 @@ RecordedRecognitionResult RecognizeRecordedPcm(const DoubaoImeConfig& cfg,
                          pcm16k16Mono.begin() + static_cast<ptrdiff_t>(offset + bytes));
             if (frame.size() < frameBytes) frame.resize(frameBytes, 0);
             const bool isLast = offset + bytes >= pcm16k16Mono.size();
-            if (!client.SendPcmFrame(frame.data(), frame.size(), isLast, error)) {
+            size_t networkBytes = 0;
+            if (!client.SendPcmFrame(
+                    frame.data(), frame.size(), isLast, error, &networkBytes)) {
                 sendOk = false;
                 break;
             }
+            audio_diagnostics::AppendStageInput(
+                cfg.diagnosticAttemptId, diagnostic,
+                pcm16k16Mono.data() + offset, bytes, networkBytes);
         }
 
         if (!sendOk) {
             client.Abort();
             client.Close();
             result.error = ErrorText(error.empty() ? L"send failed" : error);
+            audio_diagnostics::StageTerminal terminal;
+            terminal.terminal = "send_error";
+            terminal.reason = "network";
+            terminal.elapsedMs = static_cast<double>(GetTickCount64() - attemptStarted);
+            audio_diagnostics::CompleteStage(
+                cfg.diagnosticAttemptId, diagnostic.kind, diagnostic.index, terminal);
             if (attempt + 1 < kMaxRecordedAttempts && IsTransientFailure(error)) {
                 Sleep(attempt == 0 ? 500 : 1000);
                 continue;
@@ -1667,6 +1708,14 @@ RecordedRecognitionResult RecognizeRecordedPcm(const DoubaoImeConfig& cfg,
         if (!client.Finish(finalTimeoutMs, text, error)) {
             client.Close();
             result.error = ErrorText(error);
+            audio_diagnostics::StageTerminal terminal;
+            terminal.terminal = error.find(L"timeout") != std::wstring::npos ||
+                    error.find(L"timed out") != std::wstring::npos
+                ? "timeout" : "transport_error";
+            terminal.reason = terminal.terminal == "timeout" ? "timeout" : "network";
+            terminal.elapsedMs = static_cast<double>(GetTickCount64() - attemptStarted);
+            audio_diagnostics::CompleteStage(
+                cfg.diagnosticAttemptId, diagnostic.kind, diagnostic.index, terminal);
             if (attempt + 1 < kMaxRecordedAttempts && IsTransientFailure(error)) {
                 Sleep(attempt == 0 ? 500 : 1000);
                 continue;
@@ -1678,6 +1727,17 @@ RecordedRecognitionResult RecognizeRecordedPcm(const DoubaoImeConfig& cfg,
         result.ok = true;
         result.text = text;
         result.error.clear();
+        audio_diagnostics::StageTerminal terminal;
+        if (text.empty()) {
+            terminal.terminal = "session_finished_empty";
+            terminal.reason = "no_speech";
+        } else {
+            terminal.terminal = "session_finished";
+            terminal.textChars = text.size();
+        }
+        terminal.elapsedMs = static_cast<double>(GetTickCount64() - attemptStarted);
+        audio_diagnostics::CompleteStage(
+            cfg.diagnosticAttemptId, diagnostic.kind, diagnostic.index, terminal);
         return finishResult();
     }
 

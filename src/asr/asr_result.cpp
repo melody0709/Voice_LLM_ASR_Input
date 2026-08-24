@@ -159,6 +159,8 @@ Config BuildFallbackConfig(const Config& primary) {
     Config fallback = primary;
     fallback.asrBackend = primary.fallbackAsrBackend;
     fallback.fallbackAsrBackend = L"none";
+    fallback.asrDiagnosticStageKind = audio_diagnostics::StageKind::Fallback;
+    fallback.asrDiagnosticStageIndex = 0;
     return fallback;
 }
 

@@ -53,17 +53,19 @@ Since v0.6.0, the source code is organized into multiple modules. Current source
 |------|---------------|
 | `src/app/globals.h` | Shared constants, control IDs, struct definitions, extern global variable declarations |
 | `src/audio/engine.h` / `src/audio/engine.cpp` | Backend: string/path utilities, JSON config persistence, audio capture, `AsrEngine` class, `PreloadAsrEngine()` |
+| `src/audio/audio_diagnostics.h` / `src/audio/audio_diagnostics.cpp` | Provider-neutral capture/stage diagnostics, PCM metrics, WAV/SHA-256/JSON persistence, retention, and managed-folder operations |
 | `src/audio/streaming_vad_trimmer.h` / `src/audio/streaming_vad_trimmer.cpp` | Provider-independent streaming PCM VAD trim for cloud ASR sessions |
 | `src/asr/asr_session.h` / `src/asr/asr_session.cpp` | Batch ASR session abstraction for Local, Baidu, MiMo, Qwen, and recorded Doubao IME paths |
 | `src/asr/asr_result.h` / `src/asr/asr_result.cpp` | ASR text normalization, result/failure classification, and stable backend/result log names |
 | `src/asr/asr_dispatcher.h` / `src/asr/asr_dispatcher.cpp` | Final ASR result dispatch, LLM gate, raw ASR tracking |
 | `src/asr/asr_runtime_log.h` / `src/asr/asr_runtime_log.cpp` | Debug-only, privacy-safe ASR lifecycle logging with timestamp/PID and bounded rotation |
 | `src/asr/cloud_asr_common.h` / `src/asr/cloud_asr_common.cpp` | Cloud replay buffer, adaptive finalize timeout, empty-final retry helpers |
+| `src/asr/asr_diagnostics.h` / `src/asr/asr_diagnostics.cpp` | Maps shared `Config` stage routing and provider outcomes into `audio_diagnostics` without provider-specific file I/O |
 | `src/ui/hud.h` / `src/ui/hud.cpp` | HUD window, Direct2D/DirectWrite rendering, tray icon, UI resource creation/deletion |
 | `src/ui/hotkey.h` / `src/ui/hotkey.cpp` | Hotkey config, CapsLock long-press logic, `WH_KEYBOARD_LL` hook, `HotkeyEdit` custom control |
 | `src/ui/settings.h` / `src/ui/settings.cpp` | Settings window, tab UI, control creation, load/save, provider management, input dialog |
 | `src/app/main.cpp` | Entry point (`wWinMain`), main window procedure, recording session orchestration, LLM refine |
-| `src/core/llm_refine.h` | LLM correction module (header-only, `llm::` namespace) |
+| `src/core/llm_refine.h` | LLM correction module: provider presets/migration, request JSON, endpoint normalization, bounded WinHTTP calls, and OpenAI-compatible response parsing (header-only, `llm::` namespace) |
 | `src/asr/baidu_asr.h` | Baidu Cloud ASR module (header-only) |
 | `src/asr/volcengine_asr.h` | Volcengine (豆包) ASR module (header-only, WebSocket) |
 | `src/asr/qwen_asr.h` / `src/asr/qwen_asr.cpp` | Qwen ASR realtime WebSocket client |
@@ -77,6 +79,7 @@ Since v0.6.0, the source code is organized into multiple modules. Current source
 | `src/asr/doubao_ime_asr.h` / `src/asr/doubao_ime_asr.cpp` | Experimental Doubao IME client: device registration, token bootstrap, Opus encoding, and handwritten protobuf over WebSocket |
 | `src/asr/doubao_ime_streaming_session.h` / `src/asr/doubao_ime_streaming_session.cpp` | Doubao IME `IStreamingAsrSession` wrapper with pending PCM buffer, replay retry, partial HUD, and credential writeback |
 | `tools/doubao_ime_probe.bat` / `tools/doubao_ime_probe.cpp` | Standalone Doubao IME diagnostic probe: reuses saved credentials when available, runs a live protocol check, optionally runs a 16kHz mono WAV recognition check, and supports a real-time-ish streaming send/drain probe |
+| `tools/asr_audio_replay.bat` / `tools/asr_audio_replay.cpp` | Developer-only canonical-WAV validator and multi-backend replay runner using the production batch/streaming sessions |
 | `src/audio/firered_vad.h` | FireRed VAD module (header-only) |
 | `src/core/input_context.h` | Input field context reading module (header-only, UIA/MSAA/WM_GETTEXT layered fallback) |
 | `src/core/startup_registration.h` / `src/core/startup_registration.cpp` | Current-user Windows Run registration, including stale Portable-path detection and repair |
@@ -144,7 +147,7 @@ Tray menu:
 
 Settings is a standard Win32 window with 5 tabs:
 
-- `General`: recording hotkey and the optional current-user `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\VoxType` startup registration.
+- `General`: recording hotkey, optional current-user `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\VoxType` startup registration, and shared recording diagnostics (`Off` / `Failures only` / `All recordings`) with folder and managed-delete actions.
 - `Recognition`: ASR Backend, optional Fallback backend, model, model directory, threads, VAD, VAD model, and Punctuation.
 - `LLM`: Provider selection (Provider dropdown + [+] / [−]), API Base URL, API Key, Model, Test Connection, Debug log, Extra Params.
 - `LLM Prompt`: System Prompt editor (multi-line), Basic Fix / Deep Fix preset buttons.
@@ -183,13 +186,41 @@ Currently uses WASAPI Shared Mode (since v0.7.3), with automatic fallback to `wa
 - WASAPI: Captures at system mix format (typically 48kHz/32bit float/stereo), resamples to 16kHz/16bit/mono via linear interpolation
 - waveIn fallback: 16kHz/16bit/mono, 4 buffers of approximately 100ms each
 
-After recording stops, the audio is saved to:
+Ordinary recordings are not written to disk. The old single
+`%APPDATA%\VoxType\last_recording.wav` behavior was removed long ago. The
+new `audio_diagnostics` service is explicitly controlled from Settings and is
+shared by every Local/cloud provider, internal retry, and configured fallback.
 
-```text
-%APPDATA%\VoxType\last_recording.wav
-```
+- `Off` is the default and performs no diagnostic audio persistence.
+- `Failures only` keeps substantive no-speech/capture/transport/provider
+  failures; short, cancelled, stale, and auth/config-without-PCM cases are excluded.
+- `All recordings` keeps every non-cancelled utterance after an explicit privacy choice.
+- Installed builds write under `%LOCALAPPDATA%\VoxType\diagnostics\audio`;
+  Portable builds use `<portable-root>\diagnostics\audio`.
+- One physical recording owns one capture artifact and any number of
+  primary/internal-retry/fallback stages. Stage PCM is SHA-256 deduplicated,
+  so identical retry input references the same WAV.
+- Capture metrics include native device format, per-channel/downmix RMS,
+  output RMS/peak/zero/silence/clipping ratios, silent packets,
+  discontinuities, callback gap, and first non-silent delay.
+- WAV/JSON writes and retention run after capture on serialized worker I/O;
+  callbacks only accumulate O(n) counters and PCM. Atomic temp-file rename
+  prevents a partial manifest from becoming a valid group.
+- Retention is bounded to 20 managed groups, 100 MiB, and 7 days. Unknown
+  files are never deleted by retention or the Settings delete action.
+- Manifests omit transcript, context text, keys/tokens, stable raw device IDs,
+  and raw provider JSON. Audio is never uploaded by the diagnostics service.
 
 Recordings shorter than approximately 8000 bytes are judged as `Too short`.
+
+The developer-only `asr_audio_replay` CMake target lives in
+`build/artifacts/tools`, outside the canonical runtime payload. It validates
+16 kHz/mono/PCM16 WAVs, prints PCM SHA-256 and signal metrics, and can invoke
+the production Local, configured/fallback, or explicitly selected cloud
+batch/streaming sessions. Cloud replay is opt-in; transcript console output is
+also opt-in and is not persisted by the tool. The BAT wrapper supplies the
+canonical `build/run/x64-release` runtime directory so bundled DLL/model lookup
+and Portable config resolution do not accidentally follow the tool executable.
 
 ### HUD
 
@@ -327,8 +358,9 @@ Current structure is a flat JSON:
   "enable_partial": true,
   "postprocess": "itn",
   "hotkey": "CapsLock",
+  "diagnostic_audio_mode": "off",
   "llm_provider": "DeepSeek",
-  "llm_providers_json": "{\"DeepSeek\":{\"endpoint\":\"https://api.deepseek.com\",\"api_key\":\"<encrypted>\",\"model\":\"deepseek-v4-flash\"}}",
+  "llm_providers_json": "{\"DeepSeek\":{\"endpoint\":\"https://api.deepseek.com\",\"api_key\":\"<encrypted>\",\"model\":\"deepseek-v4-flash\",\"extra_params\":\"\\\"thinking\\\":{\\\"type\\\":\\\"disabled\\\"}\"}}",
   "llm_prompt": "",
   "enable_llm_debug": false,
   "asr_backend": "doubao_ime",
@@ -371,11 +403,12 @@ For Qwen IME Free, `qwen_free_polish` is the canonical bundled
 compatibility and are normalized to the same value at load/save time.
 
 - `llm_provider`: Currently selected provider name.
-- `llm_providers_json`: JSON string storing all providers' endpoint, api_key (DPAPI encrypted), and model.
+- `llm_providers_json`: JSON string storing each provider's endpoint, api_key (DPAPI encrypted), model, and Extra Params independently.
 - `llm_prompt`: Custom System Prompt (leave empty to use built-in default).
 - `enable_llm_debug`: When enabled, records before/after ASR comparison to `log/llm_refine_YYYYMMDD.log`.
 - `asr_backend`: Active ASR backend (`local`, `baidu`, `volcengine`, `qwen`, `mimo`, `doubao_ime`, or `qwen_free`).
 - `fallback_asr_backend`: Optional serial fallback (`none`, `local`, `baidu`, `qwen`, `mimo`, `doubao_ime`, or `qwen_free`); it must differ from `asr_backend`. Volcengine is not a fallback target.
+- `diagnostic_audio_mode`: Shared recording diagnostics policy (`off`, `failures`, or `all`); defaults to `off` and applies to every ASR provider/stage.
 - `qwen_*`: Qwen profile selection, Beijing Audio 3 HTTP/WSS endpoints, language hints, vocabulary JSON, semantic punctuation, sentence silence, multi-threshold, heartbeat, speech-noise threshold, and chunk settings. Legacy realtime turn detection remains fixed to Manual and is not persisted.
 - `qwen_free_*`: Qwen IME Free bundled `VoiceInputWrite` post-processing switches, experimental selection rewrite, local protocol diagnostics, and optional shell-directory override. Backend enablement is derived from `asr_backend` / `fallback_asr_backend`; the optional UTDID diagnostic override is DPAPI-encrypted.
 - `mimo_*`: Xiaomi MiMo ASR API key, OpenAI-compatible Base URL, model, and language (`auto`, `zh`, `en`). The API key is DPAPI-encrypted in `mimo_api_key`.
@@ -405,6 +438,10 @@ Possible approaches:
 ### Conservative Correction
 
 Cloud LLM correction has been integrated since v0.2.0 (`src/core/llm_refine.h`). Disabled by default; requires enabling in Settings by setting Punctuation to `Auto punctuate + LLM` and configuring the provider API Key.
+
+The built-in providers use the OpenAI-compatible Chat Completions shape. Base URLs are normalized so a host, a versioned base path, or a complete `/chat/completions` URL resolves to one request path. `Test Connection` uses the same Extra Params merge and response validation as real correction. Resolve/connect/send are bounded at 5 seconds, receive is bounded at 15 seconds, response bodies are capped at 1 MiB, and any network/HTTP/JSON/content failure falls back to the original ASR text.
+
+Provider state is isolated inside `llm_providers_json`; switching providers cannot reuse another provider's API key or request parameters. Its save/load/list/delete operations parse top-level JSON members instead of scanning braces, so string contents cannot cross provider boundaries. Exact retired aliases or parameter shapes are migrated only while the endpoint still matches that provider's official preset URL, preserving custom gateways and custom model choices.
 
 Suggested future additions:
 

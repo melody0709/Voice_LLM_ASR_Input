@@ -283,10 +283,13 @@ Result Recognize(const std::vector<BYTE>& pcm,
             // NormalizeAsrText()/ClassifyAsrResult() path reports exactly
             // "No speech detected" and never starts fallback.
             result.ok = true;
+            result.providerCode = "ASR_RESPONSE_HAVE_NO_WORDS";
             return result;
         }
         result.retryable = IsRetryableCloudHttpStatus(response.statusCode);
         result.error = L"Qwen Audio ASR error: HTTP " + std::to_wstring(response.statusCode);
+        const std::wstring code = qwen_audio_json::ExtractString(response.body, "code");
+        if (!code.empty()) result.providerCode = WideToUtf8(code);
         std::wstring msg = qwen_audio_json::ExtractString(response.body, "message");
         if (msg.empty()) msg = qwen_audio_json::ExtractString(response.body, "error_message");
         if (!msg.empty()) result.error += L": " + msg;

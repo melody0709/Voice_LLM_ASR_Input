@@ -1,5 +1,6 @@
 #include "asr_dispatcher.h"
 
+#include "asr_diagnostics.h"
 #include "asr_result.h"
 
 #include <utility>
@@ -11,6 +12,10 @@ void DispatchAsrFinalText(HWND targetWindow,
                           std::wstring* lastRawAsrText,
                           const AsrFinalMetadata& metadata) {
     text = NormalizeAsrText(std::move(text));
+    if (metadata.attemptId != 0) {
+        audio_diagnostics::FinalizeAttempt(
+            metadata.attemptId, asr_diagnostics::FinalFromText(text));
+    }
     const bool needLlm = !metadata.bundledPostProcessApplied &&
                          refineFn && ShouldRunLlmRefine(config, text);
 

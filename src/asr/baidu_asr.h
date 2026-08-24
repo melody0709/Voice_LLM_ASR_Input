@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "cloud_http_common.h"
+#include "audio_diagnostics.h"
 #include "utils.h"
 
 #pragma comment(lib, "winhttp.lib")
@@ -26,6 +27,10 @@ struct BaiduConfig {
     std::wstring apiKey;
     std::wstring secretKey;
     int devPid = 1537;
+    uint64_t diagnosticAttemptId = 0;
+    audio_diagnostics::StageKind diagnosticStageKind =
+        audio_diagnostics::StageKind::Primary;
+    unsigned diagnosticStageIndex = 0;
 };
 
 inline int ExtractJsonInt(const std::string& json, const std::string& key, int fallback = 0) {
@@ -212,6 +217,7 @@ struct BaiduRecognizeAttempt {
     bool tokenError = false;
     std::wstring text;
     std::wstring errorText;
+    int providerCode = 0;
 };
 
 inline BaiduRecognizeAttempt RecognizeOnce(const std::vector<BYTE>& pcm,
@@ -252,6 +258,7 @@ inline BaiduRecognizeAttempt RecognizeOnce(const std::vector<BYTE>& pcm,
     }
 
     int errNo = ExtractJsonInt(response.body, "err_no", -1);
+    result.providerCode = errNo;
     if (errNo < 0) {
         result.retryable = response.body.empty();
         result.errorText = L"Baidu ASR error: Empty response";
@@ -283,6 +290,7 @@ inline std::wstring Recognize(const std::vector<BYTE>& pcm, const BaiduConfig& c
     std::wstring lastError;
     bool refreshedToken = false;
     bool retriedTransient = false;
+    unsigned requestIndex = 0;
     for (int attempt = 0; attempt < 3; ++attempt) {
         std::wstring token = GetAccessToken(cfg);
         if (token.empty()) {
@@ -295,7 +303,44 @@ inline std::wstring Recognize(const std::vector<BYTE>& pcm, const BaiduConfig& c
             break;
         }
 
+        audio_diagnostics::StageMetadata diagnostic;
+        diagnostic.kind = requestIndex == 0
+            ? cfg.diagnosticStageKind
+            : audio_diagnostics::RetryStageKind(cfg.diagnosticStageKind);
+        diagnostic.index = requestIndex == 0
+            ? cfg.diagnosticStageIndex
+            : audio_diagnostics::RetryStageIndex(
+                cfg.diagnosticStageKind, cfg.diagnosticStageIndex, requestIndex);
+        diagnostic.backend = L"baidu";
+        diagnostic.model = L"dev_pid_" + std::to_wstring(cfg.devPid);
+        diagnostic.transport = L"batch_http_pcm";
+        diagnostic.reason = requestIndex == 0 ? L"" : L"token_or_transient_retry";
+        diagnostic.sentBytes = pcm.size();
+        audio_diagnostics::RegisterStageInput(
+            cfg.diagnosticAttemptId, diagnostic, pcm);
+
         BaiduRecognizeAttempt r = RecognizeOnce(pcm, cfg, token);
+        audio_diagnostics::StageTerminal terminal;
+        if (r.ok && r.text.empty()) {
+            terminal.terminal = "http_success_empty";
+            terminal.reason = "no_speech";
+        } else if (r.ok) {
+            terminal.terminal = "http_success";
+            terminal.textChars = r.text.size();
+        } else if (r.tokenError) {
+            terminal.terminal = "auth_error";
+            terminal.reason = "auth_or_config";
+        } else if (r.retryable) {
+            terminal.terminal = "transient_http_error";
+            terminal.reason = "network";
+        } else {
+            terminal.terminal = "provider_error";
+            terminal.reason = "provider_error";
+        }
+        terminal.providerCode = std::to_string(r.providerCode);
+        audio_diagnostics::CompleteStage(
+            cfg.diagnosticAttemptId, diagnostic.kind, diagnostic.index, terminal);
+        ++requestIndex;
         if (r.ok) return r.text;
         lastError = r.errorText;
 

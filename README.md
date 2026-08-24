@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  Current version: <code>v0.9.24</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
+  Current version: <code>v0.9.25</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -53,8 +53,9 @@ Interactive menu for model selection, auto-downloads and extracts to `models/` d
 
 Requires Visual Studio 2022 (C++ desktop development workload).
 
-To run the offline Qwen protocol regression test (JSON parsing, HMAC signing,
-and ASR binary framing; no network or microphone required):
+To run the offline protocol/request regression tests (Qwen protocol handling,
+LLM request/response policy, and diagnostic WAV/metrics/privacy/retention;
+no network or microphone required):
 
 ```powershell
 .\build.bat --test
@@ -100,6 +101,20 @@ the packager re-extracts and hashes each result before publishing it.
   Windows Run entry. It is off by default and can be safely enabled for either
   the MSI or Portable build; saving after moving a Portable folder corrects its
   stored executable path.
+- `Recording diagnostics` is a shared capture service for every Local and cloud
+  ASR backend, including provider retry and configured fallback stages:
+  - `Off` (default) never saves diagnostic audio.
+  - `Failures only` saves substantive no-speech, capture, transport, timeout,
+    and contradictory-stage failures.
+  - If every capture backend fails before the first PCM sample, VoxType saves a
+    JSON-only manifest with the attempted backends, terminal phase/error code,
+    and available device/format metadata; it does not create a fake empty WAV.
+  - `All recordings` explicitly saves every utterance and shows a privacy warning.
+  - `Open recordings folder` creates and opens the managed directory immediately;
+    `Delete saved recordings...` asks for confirmation and preserves unknown files.
+  - Installed builds use `%LOCALAPPDATA%\VoxType\diagnostics\audio`; Portable
+    builds use `<portable-root>\diagnostics\audio`. Files stay on this PC and
+    are limited to 20 groups, 100 MiB, and 7 days.
 
 **Recognition tab**
 - `ASR Backend` — Select between `Local (sherpa-onnx)`, `Volcano Engine`, `Baidu Cloud`, `Qwen ASR`, `MiMo ASR`, `Doubao IME (Free)`, and `Qwen IME (Free)`
@@ -123,12 +138,14 @@ the packager re-extracts and hashes each result before publishing it.
   - Default CapsLock: Short press toggles Caps Lock, long press 300ms triggers voice input
 
 **LLM tab**
-- `Provider` — Provider dropdown, built-in DeepSeek / OpenRouter / SiliconFlow presets, auto-fills fields below on selection
+- `Provider` — Provider dropdown with DeepSeek (`deepseek-v4-flash`), OpenRouter (`qwen/qwen3.5-9b`), and SiliconFlow (`Qwen/Qwen3.6-35B-A3B`) presets; selecting one auto-fills the fields below
 - `API Base URL` — Provider API address (auto-filled by presets)
 - `API Key` — API key, stored encrypted with DPAPI in local config
 - `Model` — Model name (e.g., `deepseek-v4-flash`)
-- `Test Connection` — Test if API connection is working, results shown in Status area below
-- `Extra Params` — Additional JSON parameters, merged into request body (format: `"key":"value","key2":"value2"`). Preset providers auto-inject thinking mode disabled parameters, users can add custom fields here
+- `Test Connection` — Sends the same provider parameters as real correction and reports the result in the Status area below
+- `Extra Params` — Additional JSON object fields merged into the request body; outer braces are optional. Values are saved independently for each provider, and malformed merged JSON is rejected before network I/O
+- A malformed legacy provider store is preserved byte-for-byte during Save instead
+  of being reset and silently deleting unrelated provider entries.
 - `[+]` / `[−]` — Add/delete custom providers (presets cannot be deleted)
 
 **LLM Prompt tab**
@@ -165,6 +182,22 @@ the packager re-extracts and hashes each result before publishing it.
   - `Debug log` enables local Qwen protocol diagnostics; it does not change the recognition result.
 - Cloud ASR backends handle recognition remotely; when VAD is enabled, Qwen and Volcano Engine use local streaming VAD trim, batch cloud backends use batch VAD trim before upload, and Qwen IME Free/Doubao IME upload full raw PCM/Opus without local VAD because their services perform segmentation. Local punctuation models are still bypassed for cloud backends
 
+**Diagnostic audio replay**
+- `capture.wav` and deduplicated `inputNN.wav` artifacts are canonical 16 kHz,
+  mono, PCM16 files. Their JSON manifest contains device/capture metrics,
+  hashes, VAD metadata, stage kinds, retry/fallback reasons, and provider
+  terminals, but not transcript, input context, API keys, tokens, or raw provider JSON.
+- Replay locally without uploading audio:
+  `.\tools\asr_audio_replay.bat --wav "<file.wav>" --backend local`
+- Compare selected configured backends by repeating `--backend`, or use
+  `--all-configured`. Selecting a cloud backend explicitly uploads that WAV.
+  Streaming backends use real-time 20 ms cadence unless `--fast` is supplied.
+  Transcript output is console-only and opt-in through `--show-text`.
+- The BAT wrapper resolves DLLs, bundled VAD assets, and Portable configuration
+  from the canonical runtime payload; direct tool runs may use
+  `--runtime-dir <path>` explicitly. Quoted WAV/runtime paths containing `!` are
+  preserved by the wrapper.
+
 </details>
 
 <details>
@@ -190,10 +223,12 @@ Optional cloud LLM text correction added since v0.2.0. Disabled by default, requ
 2. Settings → Recognition → Punctuation set to `Auto punctuate + LLM`
 
 Features:
-- Preset providers auto-inject thinking mode disabled parameters
-- Extra Params supports custom JSON fragments merged into request body
+- Preset providers use current text-model identifiers and auto-inject provider-specific thinking-disabled parameters
+- Extra Params is persisted per provider and is included in connection tests
+- API Base URLs and full Chat Completions URLs are normalized safely
+- OpenAI-compatible responses are path-validated and decoded with JSON/Unicode escape handling
 - API Key encrypted with DPAPI storage
-- Backward compatible with old config format
+- Retired preset values are migrated conservatively only on the matching official endpoint
 
 </details>
 
@@ -210,6 +245,7 @@ src/
 dll/                — Runtime DLLs (sherpa-onnx, onnxruntime, etc.)
 third_party/        — Headers and import libraries
 models/             — Model files (not committed to git)
+tools/              — Developer-only protocol probes and generic ASR WAV replay
 build.bat           — Visual Studio 2022 build script
 download_models.ps1 — Model download script
 ARCHITECTURE.md     — Detailed architecture description
@@ -234,6 +270,7 @@ CHANGELOG.md        — Version change log
 See [CHANGELOG.md](CHANGELOG.md)
 
 **Recent Updates:**
+- **v0.9.25** — Added shared failure/audio diagnostics for every ASR stage, bounded local WAV/JSON retention, Settings folder/delete controls, generic cross-backend WAV replay, and regression coverage; also refreshed and hardened the LLM provider/request pipeline
 - **v0.9.9** — Restored the shared active-recording HUD animation for Local and other batch ASR backends, so their input-level bar lights up and moves again without changing the v0.9.3 capture-first cloud startup order
 - **v0.9.8** — Canonical CMake/Ninja release pipeline with verified Portable and MSI packages, MSI upgrade/folder-selection support, portable data isolation, and Start with Windows setting
 - **v0.9.7** — Privacy-safe, bounded ASR diagnostics with structured primary/fallback lifecycle events; streaming primary failures reported before release are now deferred until the full PCM is available, so configured fallback is no longer bypassed

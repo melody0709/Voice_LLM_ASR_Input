@@ -12,5 +12,8 @@ inline doubao_ime_asr::DoubaoImeConfig BuildDoubaoImeConfigFromConfig(const Conf
     dcfg.channels = 1;
     dcfg.frameMs = 20;
     dcfg.enablePunctuation = true;
+    dcfg.diagnosticAttemptId = config.asrAttemptId;
+    dcfg.diagnosticStageKind = config.asrDiagnosticStageKind;
+    dcfg.diagnosticStageIndex = config.asrDiagnosticStageIndex;
     return dcfg;
 }

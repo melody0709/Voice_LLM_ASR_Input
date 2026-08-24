@@ -6,6 +6,9 @@
 
 #include <windows.h>
 
+#include "audio_diagnostics.h"
+
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -28,6 +31,10 @@ struct DoubaoImeConfig {
     bool enablePunctuation = true;
     DWORD connectTimeoutMs = 10000;
     DWORD recvTimeoutMs = 15000;
+    uint64_t diagnosticAttemptId = 0;
+    audio_diagnostics::StageKind diagnosticStageKind =
+        audio_diagnostics::StageKind::Primary;
+    unsigned diagnosticStageIndex = 0;
 };
 
 struct TestResult {
@@ -68,7 +75,11 @@ public:
     RealtimeClient& operator=(const RealtimeClient&) = delete;
 
     bool Connect(std::wstring& error);
-    bool SendPcmFrame(const BYTE* pcm, size_t bytes, bool isLast, std::wstring& error);
+    bool SendPcmFrame(const BYTE* pcm,
+                      size_t bytes,
+                      bool isLast,
+                      std::wstring& error,
+                      size_t* networkBytes = nullptr);
     bool SendFinishSession(std::wstring& error);
     bool PollEvent(DWORD timeoutMs, RealtimeEvent& event, std::wstring& error);
     bool Finish(DWORD finalTimeoutMs, std::wstring& finalText, std::wstring& error);

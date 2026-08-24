@@ -35,12 +35,14 @@ set(OPUS_DIR "${CMAKE_SOURCE_DIR}/third_party/opus")
 add_executable(VoxType WIN32
     src/app/main.cpp
     src/app/resources.rc
+    src/audio/audio_diagnostics.cpp
     src/audio/engine.cpp
     src/audio/batch_vad_trimmer.cpp
     src/audio/streaming_vad_trimmer.cpp
     src/audio/vad_trim_core.cpp
     src/audio/wasapi_capture.cpp
     src/asr/asr_session.cpp
+    src/asr/asr_diagnostics.cpp
     src/asr/asr_result.cpp
     src/asr/asr_dispatcher.cpp
     src/asr/asr_runtime_log.cpp
@@ -167,3 +169,117 @@ set_target_properties(qwen_audio_json_test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/../../artifacts/tests"
 )
 add_test(NAME qwen_audio_json_test COMMAND qwen_audio_json_test)
+
+add_executable(llm_refine_test
+    tests/llm_refine_test.cpp
+)
+target_include_directories(llm_refine_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/core"
+)
+if(MSVC)
+    target_compile_options(llm_refine_test PRIVATE /O2 /EHsc /utf-8)
+endif()
+target_link_libraries(llm_refine_test PRIVATE winhttp crypt32)
+set_target_properties(llm_refine_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/../../artifacts/tests"
+)
+add_test(NAME llm_refine_test COMMAND llm_refine_test)
+
+add_executable(audio_diagnostics_test
+    tests/audio_diagnostics_test.cpp
+    src/audio/audio_diagnostics.cpp
+)
+target_compile_definitions(audio_diagnostics_test PRIVATE UNICODE _UNICODE)
+target_include_directories(audio_diagnostics_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/audio"
+    "${CMAKE_SOURCE_DIR}/src/app"
+)
+if(MSVC)
+    target_compile_options(audio_diagnostics_test PRIVATE /O2 /EHsc /utf-8)
+endif()
+target_link_libraries(audio_diagnostics_test PRIVATE bcrypt shell32)
+set_target_properties(audio_diagnostics_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/../../artifacts/tests"
+)
+add_test(NAME audio_diagnostics_test COMMAND audio_diagnostics_test)
+
+# Developer-only diagnostic replay utility. It reuses the production ASR
+# sessions but remains outside the canonical runtime payload and normal build.
+add_executable(asr_audio_replay EXCLUDE_FROM_ALL
+    tools/asr_audio_replay.cpp
+    src/audio/audio_diagnostics.cpp
+    src/audio/engine.cpp
+    src/audio/batch_vad_trimmer.cpp
+    src/audio/streaming_vad_trimmer.cpp
+    src/audio/vad_trim_core.cpp
+    src/audio/wasapi_capture.cpp
+    src/asr/asr_session.cpp
+    src/asr/asr_diagnostics.cpp
+    src/asr/asr_result.cpp
+    src/asr/asr_dispatcher.cpp
+    src/asr/asr_runtime_log.cpp
+    src/asr/cloud_asr_common.cpp
+    src/asr/cloud_http_common.cpp
+    src/asr/doubao_ime_asr.cpp
+    src/asr/doubao_ime_streaming_session.cpp
+    src/asr/mimo_asr.cpp
+    src/asr/qwen_asr.cpp
+    src/asr/qwen_audio_http.cpp
+    src/asr/qwen_audio_streaming.cpp
+    src/asr/qwen_audio_streaming_session.cpp
+    src/asr/qwen_streaming_session.cpp
+    src/asr/winhttp_websocket_transport.cpp
+    src/asr/qwen_free_streaming_session.cpp
+    src/asr/qwen_free_proto_utdid.cpp
+    src/asr/qwen_free_proto_asr.cpp
+    src/asr/qwen_free_proto_llm.cpp
+    src/asr/qwen_free_proto_unet.cpp
+    src/asr/volcengine_net_diag.cpp
+    src/asr/volcengine_streaming_session.cpp
+)
+target_compile_definitions(asr_audio_replay PRIVATE UNICODE _UNICODE)
+target_include_directories(asr_audio_replay PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/app"
+    "${CMAKE_SOURCE_DIR}/src/asr"
+    "${CMAKE_SOURCE_DIR}/src/audio"
+    "${CMAKE_SOURCE_DIR}/src/ui"
+    "${CMAKE_SOURCE_DIR}/src/core"
+    "${SHERPA_DIR}/include"
+    "${CMAKE_SOURCE_DIR}/third_party/onnxruntime/include"
+    "${KNF_DIR}/include"
+    "${OPUS_DIR}/include"
+)
+target_link_directories(asr_audio_replay PRIVATE
+    "${SHERPA_DIR}/lib"
+    "${CMAKE_SOURCE_DIR}/third_party/onnxruntime"
+    "${KNF_DIR}/lib"
+    "${OPUS_DIR}/lib"
+)
+target_link_libraries(asr_audio_replay PRIVATE
+    sherpa-onnx-cxx-api
+    onnxruntime
+    kaldi-native-fbank-core
+    user32
+    shell32
+    ole32
+    winmm
+    winhttp
+    ws2_32
+    crypt32
+    bcrypt
+    mmdevapi
+    delayimp
+    advapi32
+    opus
+)
+if(MSVC)
+    target_compile_options(asr_audio_replay PRIVATE /O2 /EHsc /utf-8)
+    target_link_options(asr_audio_replay PRIVATE
+        /DELAYLOAD:sherpa-onnx-cxx-api.dll
+        /DELAYLOAD:onnxruntime.dll
+        /DELAYLOAD:kaldi-native-fbank-core.dll
+    )
+endif()
+set_target_properties(asr_audio_replay PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/../../artifacts/tools"
+)

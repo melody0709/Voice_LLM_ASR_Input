@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  当前版本：<code>v0.9.24</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
+  当前版本：<code>v0.9.25</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -59,7 +59,7 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 
 需要 Visual Studio 2022（C++ 桌面开发工作负载）。
 
-运行离线 Qwen 协议回归测试（JSON 解析、HMAC 签名和 ASR 二段帧，不需要网络或麦克风）：
+运行离线协议/请求回归测试（Qwen 协议、LLM 请求/响应策略，以及诊断 WAV、指标、隐私和留存；不需要网络或麦克风）：
 
 ```powershell
 .\build.bat --test
@@ -77,6 +77,15 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 
 <details open>
 <summary><strong>⚙️ Settings 说明</strong></summary>
+
+**General tab**
+- `Recording diagnostics` 是 Local 与全部云端 ASR 共用的采集诊断服务，也覆盖 provider 内部 retry 和配置的 fallback：
+  - `Off`（默认）不保存诊断录音。
+  - `Failures only` 仅保存有分析价值的 no-speech、采集、传输、超时或阶段结果矛盾样本。
+  - 如果所有采集后端都在首个 PCM 前失败，只保存含尝试后端、终止阶段/错误码及可用设备格式信息的 JSON manifest，不伪造空 WAV。
+  - `All recordings` 会显式保存每次语音，并显示隐私提示。
+  - `Open recordings folder` 会立即创建并打开目录；`Delete saved recordings...` 二次确认后只删除 VoxType 管理的文件组，未知文件保持不变。
+  - 安装版目录为 `%LOCALAPPDATA%\VoxType\diagnostics\audio`，Portable 版为 `<portable-root>\diagnostics\audio`；文件不自动上传，最多保留 20 组、100 MiB、7 天。
 
 **Recognition tab**
 - `ASR Backend` — 选择 `Local (sherpa-onnx)` / `Volcano Engine` / `Baidu Cloud` / `Qwen ASR` / `MiMo ASR` / `Doubao IME (Free)` / `Qwen IME (Free)`
@@ -100,12 +109,13 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
   - 默认 CapsLock：短按切换大小写，长按 300ms 触发语音输入
 
 **LLM tab**
-- `Provider` — 供应商下拉框，内置 DeepSeek / OpenRouter / SiliconFlow 预设，选择后自动填充下方字段
+- `Provider` — 供应商下拉框，内置 DeepSeek（`deepseek-v4-flash`）、OpenRouter（`qwen/qwen3.5-9b`）和 SiliconFlow（`Qwen/Qwen3.6-35B-A3B`）预设，选择后自动填充下方字段
 - `API Base URL` — 供应商 API 地址（预设自动填入）
 - `API Key` — API 密钥，使用 DPAPI 加密存储到本地配置
 - `Model` — 模型名称（如 `deepseek-v4-flash`）
-- `Test Connection` — 测试 API 连接是否正常，结果在下方 Status 区域显示
-- `Extra Params` — 附加 JSON 参数，合并到请求体中（格式：`"key":"value","key2":"value2"`）。预设供应商会自动注入关闭思考模式参数，用户可在此追加自定义字段
+- `Test Connection` — 使用与真实纠错相同的供应商参数发起测试，结果在下方 Status 区域显示
+- `Extra Params` — 合并到请求体的附加 JSON 对象字段，最外层花括号可省略。内容按供应商分别保存；合并后 JSON 无效时会在联网前直接报错
+- 旧配置中的供应商存储即使已损坏，Save 也会原样保留，不会重置后静默删除其他供应商条目。
 - `[+]` / `[−]` — 添加/删除自定义供应商（预设不可删除）
 
 **LLM Prompt tab**
@@ -141,6 +151,12 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
   - `Debug log` 只开启本地千问协议诊断日志，不改变识别结果。
 - 云端 ASR 由远端完成识别；启用 VAD 时，Qwen 和火山引擎使用本地 streaming VAD trim，批量云端后端使用 batch VAD trim 后再上传，千问 IME Free/Doubao IME 直接上传完整原始 PCM/Opus，不走本地 VAD，而是依赖服务端分段。本地标点模型在云端后端下仍不生效
 
+**诊断音频 replay**
+- `capture.wav` 与去重后的 `inputNN.wav` 均为规范 16 kHz、单声道、PCM16 文件。JSON manifest 保存设备/采集指标、哈希、VAD 元数据、stage kind、retry/fallback 原因和 provider 终态，但不保存 transcript、输入框上下文、API Key、token 或原始 provider JSON。
+- 仅用 Local 离线重放，不上传音频：`.\tools\asr_audio_replay.bat --wav "<file.wav>" --backend local`
+- 可重复传入 `--backend`，或使用 `--all-configured` 横向比较当前配置。显式选择云端 backend 时会上传该 WAV；streaming 默认按真实 20 ms cadence 发送，`--fast` 可关闭等待。只有传入 `--show-text` 才会把 transcript 输出到控制台，工具不会持久化它。
+- BAT wrapper 会从规范运行载荷解析 DLL、bundled VAD 资源与 Portable 配置；直接运行工具时可显式传入 `--runtime-dir <path>`。带引号的 WAV/runtime 路径即使包含 `!` 也会原样传递。
+
 </details>
 
 <details>
@@ -166,10 +182,12 @@ v0.2.0 起新增可选的云端 LLM 文本纠错。默认关闭，需手动启�
 2. Settings → Recognition → Punctuation 设为 `Auto punctuate + LLM`
 
 特性：
-- 预设供应商自动注入关闭思考模式参数
-- Extra Params 支持自定义 JSON 片段合并到请求体
+- 预设供应商使用当前文本模型标识，并自动注入各自的关闭思考参数
+- Extra Params 按供应商持久化，并参与连接测试
+- API Base URL 与完整 Chat Completions URL 会安全规范化
+- OpenAI 兼容响应按标准路径校验，并正确解码 JSON/Unicode 转义
 - API Key 使用 DPAPI 加密存储
-- 向下兼容旧配置格式
+- 仅在匹配官方端点时保守迁移已停用的预设值
 
 </details>
 
@@ -186,6 +204,7 @@ src/
 dll/                — 运行时 DLL（sherpa-onnx、onnxruntime 等）
 third_party/        — 头文件和导入库
 models/             — 模型文件（不提交 git）
+tools/              — 开发用协议探针与通用 ASR WAV replay
 build.bat           — Visual Studio 2022 编译脚本
 download_models.ps1 — 模型下载脚本
 ARCHITECTURE.md     — 架构详细说明
@@ -210,6 +229,7 @@ CHANGELOG.md        — 版本变更记录
 详见 [CHANGELOG.md](CHANGELOG.md)
 
 **最近更新：**
+- **v0.9.25** — 为全部 ASR stage 增加共用失败录音诊断、有界本地 WAV/JSON 留存、Settings 打开/删除入口、通用跨后端 WAV replay 和回归测试；同时更新并加固 LLM 供应商/请求链路
 - **v0.9.9** — 恢复 Local 及其他 batch ASR 后端的共用录音中 HUD 音量动画；音量条重新亮起并跳动，同时保持 v0.9.3 的云端“先启动采集”顺序不变
 - **v0.9.8** — 统一 CMake/Ninja 发布链路，提供已验证的 Portable 与 MSI 包、MSI 升级/目录选择、便携版数据隔离和开机自启动设置
 - **v0.9.7** — 新增隐私安全、有界轮转的 ASR 诊断日志和结构化 primary/fallback 生命周期事件；流式 primary 在松手前回报失败时会延后到完整 PCM 保存后再决定 fallback，不再绕过已配置的备用后端

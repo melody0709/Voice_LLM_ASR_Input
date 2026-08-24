@@ -1,5 +1,6 @@
 #include "qwen_free_streaming_session.h"
 
+#include "asr_diagnostics.h"
 #include "asr_result.h"
 #include "asr_runtime_log.h"
 #include "asr_streaming_session_base.h"
@@ -135,6 +136,10 @@ public:
         replayPcm_.clear();
         replayPcm_.reserve(kQwenFreeMaxReplayBytes);
         replayComplete_ = true;
+        nextRetryStageIndex_ = 1;
+        replayInProgress_ = false;
+        replayStageIndex_ = 0;
+        primaryDiagnosticCompleted_.store(false);
         running_.store(true);
 
         // UTDID/signing setup, WinHTTP connect and user.session.start can block.
@@ -197,6 +202,58 @@ public:
     const wchar_t* ProviderName() const override { return L"Qwen IME (Free)"; }
 
 private:
+    audio_diagnostics::StageMetadata PrimaryStage(
+        std::wstring reason = {}) const {
+        return asr_diagnostics::MakeStageMetadata(config_, std::move(reason));
+    }
+
+    audio_diagnostics::StageMetadata RetryStage(unsigned index,
+                                                 std::wstring reason) const {
+        return asr_diagnostics::MakeRetryStageMetadata(
+            config_, index, std::move(reason));
+    }
+
+    audio_diagnostics::StageMetadata CurrentStage(
+        std::wstring reason = {}) const {
+        if (replayInProgress_) {
+            return RetryStage(replayStageIndex_, std::move(reason));
+        }
+        return PrimaryStage(std::move(reason));
+    }
+
+    void CompleteCurrentStage(audio_diagnostics::StageTerminal terminal) {
+        if (!replayInProgress_) {
+            if (primaryDiagnosticCompleted_.exchange(true)) return;
+            audio_diagnostics::CompleteStage(
+                config_.asrAttemptId, config_.asrDiagnosticStageKind,
+                config_.asrDiagnosticStageIndex, terminal);
+            return;
+        }
+        const audio_diagnostics::StageMetadata stage =
+            RetryStage(replayStageIndex_, L"replay");
+        audio_diagnostics::CompleteStage(
+            config_.asrAttemptId, stage.kind, stage.index, terminal);
+    }
+
+    void CompletePrimaryErrorIfNeeded(const std::wstring& error) {
+        if (primaryDiagnosticCompleted_.load()) return;
+        audio_diagnostics::StageTerminal terminal =
+            asr_diagnostics::TerminalFromText(QwenErrorText(error));
+        if (error.find(L"timed out") != std::wstring::npos ||
+            error.find(L"timeout") != std::wstring::npos) {
+            terminal.terminal = "timeout";
+        } else if (error.find(L"closed") != std::wstring::npos) {
+            terminal.terminal = "peer_close";
+        } else if (error.find(L"send failed") != std::wstring::npos ||
+                   error.find(L"audio send") != std::wstring::npos) {
+            terminal.terminal = "send_error";
+        } else if (error.find(L"connect") != std::wstring::npos ||
+                   error.find(L"start failed") != std::wstring::npos) {
+            terminal.terminal = "connect_error";
+        }
+        CompleteCurrentStage(terminal);
+    }
+
     void StartReceiver() {
         receiverStop_.store(false);
         receiver_ = std::thread([this]() { ReceiverLoop(); });
@@ -302,6 +359,7 @@ private:
     }
 
     void RecoverAndFinalize(std::wstring error) {
+        CompletePrimaryErrorIfNeeded(error);
         if (!stopped_.load()) {
             NotifyStatus(L"Buffering... Qwen IME (Free)");
         }
@@ -454,6 +512,7 @@ private:
             WaitForRecordingStop();
             streaming_.store(false);
             if (!abort_.load()) {
+                CompletePrimaryErrorIfNeeded(setupError);
                 finalReceived_.store(true);
                 EmitFinal(QwenErrorText(setupError));
             }
@@ -470,6 +529,7 @@ private:
             WaitForRecordingStop();
             streaming_.store(false);
             if (!abort_.load()) {
+                CompletePrimaryErrorIfNeeded(connectError);
                 finalReceived_.store(true);
                 EmitFinal(QwenErrorText(connectError));
             }
@@ -566,6 +626,9 @@ private:
                 if (errorOut) *errorOut = std::move(err);
                 return false;
             }
+            audio_diagnostics::AppendStageInput(
+                config_.asrAttemptId, CurrentStage(),
+                chunk.data(), chunk.size(), chunk.size());
             chunk.clear();
 
             if (pendingAudio_.Overflowed()) {
@@ -624,6 +687,14 @@ private:
             return ReplayRecognitionOutcome::Failed;
         }
 
+        replayStageIndex_ = nextRetryStageIndex_++;
+        replayInProgress_ = true;
+        const ULONGLONG replayStarted = GetTickCount64();
+        auto finishReplay = [this]() {
+            replayInProgress_ = false;
+            replayStageIndex_ = 0;
+        };
+
         const std::wstring originalPartial = lastPartial_;
         lastPartial_.clear();
         lastFrameError_.clear();
@@ -636,6 +707,12 @@ private:
         if (!ConnectProtocolWithRetry(retryError)) {
             lastPartial_ = originalPartial;
             error = retryError.empty() ? error : retryError;
+            audio_diagnostics::StageTerminal terminal =
+                asr_diagnostics::TerminalFromText(QwenErrorText(error));
+            terminal.terminal = "connect_error";
+            terminal.elapsedMs = static_cast<double>(GetTickCount64() - replayStarted);
+            CompleteCurrentStage(terminal);
+            finishReplay();
             return ReplayRecognitionOutcome::Failed;
         }
         StartReceiver();
@@ -649,6 +726,10 @@ private:
                 sendOk = false;
                 break;
             }
+            audio_diagnostics::AppendStageInput(
+                config_.asrAttemptId,
+                CurrentStage(L"replay"),
+                replayPcm_.data() + offset, bytes, bytes);
             offset += bytes;
             // Let the server update partial/final state while replaying.
             // During replay a provider may emit a segment final before all
@@ -679,6 +760,12 @@ private:
                 "[qwen_free] replay succeeded: pcm_bytes=%zu text_wlen=%zu",
                 replayPcm_.size(), text.size());
             StopReceiver();
+            audio_diagnostics::StageTerminal terminal;
+            terminal.terminal = "provider_final";
+            terminal.textChars = text.size();
+            terminal.elapsedMs = static_cast<double>(GetTickCount64() - replayStarted);
+            CompleteCurrentStage(terminal);
+            finishReplay();
             return ReplayRecognitionOutcome::Transcript;
         }
 
@@ -689,6 +776,12 @@ private:
         if (cleanEmptyFinal) {
             StopReceiver();
             lastPartial_ = originalPartial;
+            audio_diagnostics::StageTerminal terminal;
+            terminal.terminal = "provider_final_empty";
+            terminal.reason = "no_speech";
+            terminal.elapsedMs = static_cast<double>(GetTickCount64() - replayStarted);
+            CompleteCurrentStage(terminal);
+            finishReplay();
             return ReplayRecognitionOutcome::EmptyFinal;
         }
 
@@ -702,6 +795,19 @@ private:
         StopReceiver();
         lastPartial_ = originalPartial;
         if (!retryError.empty()) error = retryError;
+        audio_diagnostics::StageTerminal terminal =
+            asr_diagnostics::TerminalFromText(QwenErrorText(error));
+        if (!allAudioSent || !sendOk) {
+            terminal.terminal = "send_error";
+        } else if (error.find(L"timed out") != std::wstring::npos ||
+                   error.find(L"timeout") != std::wstring::npos) {
+            terminal.terminal = "timeout";
+        } else if (error.find(L"closed") != std::wstring::npos) {
+            terminal.terminal = "peer_close";
+        }
+        terminal.elapsedMs = static_cast<double>(GetTickCount64() - replayStarted);
+        CompleteCurrentStage(terminal);
+        finishReplay();
         return ReplayRecognitionOutcome::Failed;
     }
 
@@ -750,6 +856,16 @@ private:
                     lastFrameError_.clear();
                     finalReceived_.store(true);
                     if (!frame.text.empty()) lastPartial_ = frame.text;
+                    {
+                        audio_diagnostics::StageTerminal terminal;
+                        terminal.terminal = frame.text.empty()
+                            ? "provider_final_empty" : "provider_final";
+                        terminal.reason = frame.text.empty() ? "no_speech" : "";
+                        terminal.textChars = frame.text.size();
+                        terminal.elapsedMs = totalStartTick_ == 0 ? 0.0 :
+                            static_cast<double>(GetTickCount64() - totalStartTick_);
+                        CompleteCurrentStage(terminal);
+                    }
                     if (dispatchFinal && !lastPartial_.empty()) {
                         FinalizeWithLlm(lastPartial_);
                     }
@@ -768,12 +884,25 @@ private:
                         lastFrameError_ = QwenErrorText(
                             detail.empty() ? L"server error" : detail);
                     }
+                    {
+                        audio_diagnostics::StageTerminal terminal =
+                            asr_diagnostics::TerminalFromText(lastFrameError_);
+                        terminal.terminal = "provider_error";
+                        terminal.providerCode = WideToUtf8(frame.errorCode);
+                        CompleteCurrentStage(terminal);
+                    }
                     return;
                 case qwen_free_proto_asr::FrameType::Closed:
                     terminalWasFinal_ = false;
                     finalReceived_.store(true);
                     lastFrameError_ = QwenErrorText(
                         L"WebSocket closed before final transcript");
+                    {
+                        audio_diagnostics::StageTerminal terminal =
+                            asr_diagnostics::TerminalFromText(lastFrameError_);
+                        terminal.terminal = "peer_close";
+                        CompleteCurrentStage(terminal);
+                    }
                     return;
                 case qwen_free_proto_asr::FrameType::Timeout:
                     return;  // 无数据，退出 recv 循环
@@ -899,6 +1028,10 @@ private:
     bool terminalTextEmpty_ = false;
     std::vector<BYTE> replayPcm_;
     bool replayComplete_ = true;
+    unsigned nextRetryStageIndex_ = 1;
+    bool replayInProgress_ = false;
+    unsigned replayStageIndex_ = 0;
+    std::atomic<bool> primaryDiagnosticCompleted_{false};
     SelectionContext selection_;
     ULONGLONG totalStartTick_ = 0;
 };
