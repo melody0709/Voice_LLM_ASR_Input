@@ -65,6 +65,7 @@ HWND g_settingsWindow = nullptr;
 HWND g_hudWindow = nullptr;
 HHOOK g_keyboardHook = nullptr;
 HICON g_appIcon = nullptr;
+static UINT g_taskbarCreatedMessage = 0;
 HFONT g_uiFont = nullptr;
 HFONT g_titleFont = nullptr;
 HFONT g_sectionFont = nullptr;
@@ -2002,6 +2003,11 @@ void ShowTrayMenu(HWND hwnd) {
 }
 
 LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (g_taskbarCreatedMessage != 0 && msg == g_taskbarCreatedMessage) {
+        AddTrayIcon(hwnd);
+        return 0;
+    }
+
     switch (msg) {
     case WM_CREATE:
         AddTrayIcon(hwnd);
@@ -2413,6 +2419,7 @@ bool RegisterWindowClasses() {
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     g_instance = instance;
+    g_taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
     InitializeCriticalSection(&g_audioLock);
     InitializeCriticalSection(&g_streamingSessionCs);
     InitCommonControls();

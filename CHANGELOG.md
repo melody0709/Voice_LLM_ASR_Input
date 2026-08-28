@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- **Tray icon recovery**: Re-register the notification-area icon after Explorer broadcasts `TaskbarCreated`, so VoxType remains accessible when Explorer or the Windows shell restarts.
 - **Settings diagnostics layout**: Widened both Diagnostics action buttons and slightly increased the Settings height while reserving a complete footer area, preventing English labels and the bottom Save/Close buttons from being clipped.
 - **Capture-start evidence**: When WASAPI/waveIn cannot produce the first PCM sample, `Failures only` now writes a JSON-only manifest with attempted/terminal capture backend, exact startup phase and error code, plus available device/format metadata; no empty WAV is fabricated.
 - **Diagnostic privacy and shutdown integrity**: Enabling recording diagnostics now activates only the structured runtime lifecycle log, not Qwen/Volcengine verbose files or Volcengine DNS/TCP probes. Diagnostic writers remain joinable, are drained completely on exit, and completed writer handles are reaped between recordings.

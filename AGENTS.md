@@ -9,11 +9,9 @@ Windows 11  语音输入法工具：托盘常驻，按住快捷键录音松开�
 - C:\Program Files\QianwenIME 只读 需要逆向。
 - /reverse-skill 涉及到取证，请采用相关的技能。
 - 获取到相关证据，必须更新 /reverse 目录下的相关文档以及证据，以便后面研究。
-## 构建
 
-```powershell
-.\build.bat
-```
+
+## Command execution
 
 `CMakeLists.txt` 与 `CMakePresets.json` 是唯一编译权威；`build.bat` 负责准备 MSVC、调用 CMake/Ninja 并安装运行载荷。
 

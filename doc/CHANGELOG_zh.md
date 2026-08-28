@@ -20,6 +20,7 @@
 
 ### 修复
 
+- **托盘图标恢复**：Explorer 广播 `TaskbarCreated` 后重新注册通知区域图标，确保 Explorer 或 Windows Shell 重启后仍可从托盘访问 VoxType。
 - **Settings 诊断布局**：加宽 Diagnostics 下的两个操作按钮，并小幅增加 Settings 高度、为 footer 保留完整空间，避免英文按钮文字以及底部 Save/Close 被裁切。
 - **采集启动证据**：WASAPI/waveIn 在首个 PCM 前全部失败时，`Failures only` 会保存 JSON-only manifest，记录尝试/终止采集后端、精确启动阶段、错误码和可用设备/格式信息，不会伪造空 WAV。
 - **诊断隐私与退出完整性**：开启录音诊断只启用结构化 runtime 生命周期日志，不再连带开启 Qwen/火山引擎 verbose 文件或火山 DNS/TCP 探测。诊断 writer 保持可 join，退出时完整 drain，并在录音之间回收已结束的 writer handle。
