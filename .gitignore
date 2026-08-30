@@ -26,5 +26,5 @@ compile_commands.json
 .plan/ref/
 third_party/qwen_free_runtime/
 
-
+.workbuddy/
 .plan/ref/
