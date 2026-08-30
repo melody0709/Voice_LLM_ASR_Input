@@ -2,6 +2,32 @@
 
 > 🇨🇳 [中文版](doc/CHANGELOG_zh.md)
 
+## v0.9.26 (2026-08-30, dev)
+
+### Added
+
+- **Shared cloud-ASR protocol regression suite**: Added `asr_json_protocol_test` to the canonical `build.bat --test` flow, covering strict JSON string/Unicode decoding, Baidu numeric/result parsing and token lifetime bounds, and Volcengine Extra Params validation/escaping without network or microphone access.
+
+### Changed
+
+- **Shared JSON utilities**: Consolidated provider string decoding in `core/utils.h`, with strict document validation, escape/control-character handling, UTF-8 validation, surrogate-pair support, nested-value skipping, and safe length-aware Win32 UTF conversion.
+- **Cloud request bounds**: Baidu recorded requests now use the shared duration-aware timeout policy, reject audio beyond the provider's 60-second short-speech limit locally, and retain the same PCM for one bounded transient retry.
+- **Streaming activation boundary**: Qwen, Qwen IME Free, Doubao IME, and Volcengine now share one audio-lock/session-lock activation path that atomically replays the captured prefix and installs the live session, preventing gaps or duplicate PCM at startup.
+
+### Fixed
+
+- **Baidu token and response correctness**: Token cache entries are bound to the exact API Key/Secret pair, numeric `expires_in` is parsed without exceptions or overflow, short token lifetimes cannot underflow their refresh margin, auth failures refresh the token automatically, and escaped array results are decoded structurally.
+- **Volcengine session reliability**: Initialization now requires a valid server response frame and checks init-send failures; UUIDs use the Windows RPC generator; generated corpus strings and advanced Extra Params are escaped/validated; Settings connection tests send the complete current configuration; and retry/replay cancellation cannot be re-enabled after `Abort()`.
+- **Attempt-safe HUD and Settings results**: Streaming status, partial text, and fallback HUD messages carry their ASR attempt ID, while shared Settings connection-test results carry a generation ID so stale detached workers cannot overwrite a newer or reopened page.
+- **Recording and shutdown races**: A finalizing streaming session is detached before the next capture begins, preventing the new recording's first PCM block from entering the old provider. Model preload and Volcengine prewarm now start only after the main message window exists.
+- **Cross-thread state safety**: Capture activity, ASR timing metrics, VAD metrics/model names, input-context snapshots, and Volcengine connection flags now use atomics or explicit locking where they cross UI/audio/worker threads.
+- **WASAPI lifecycle and diagnostics**: `RPC_E_CHANGED_MODE` no longer produces an unmatched `CoUninitialize`, failed WASAPI starts release their resources before `waveIn` fallback, and capture diagnostics use the privacy-safe runtime logger.
+
+### Tests
+
+- `build.bat --test` now builds and runs `asr_json_protocol_test` alongside the existing Qwen, LLM, and audio-diagnostics regression executables.
+- Verified the canonical `build.bat --test --package` flow: runtime/layout validation passed, every offline regression executable passed, and both the Portable archive and MSI were rebuilt and content-verified.
+
 ## v0.9.25 (2026-08-24, dev)
 
 ### Added

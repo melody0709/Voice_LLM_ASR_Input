@@ -1,5 +1,6 @@
 #include "asr_session.h"
 
+#include "asr_runtime_log.h"
 #include "baidu_asr.h"
 #include "asr_diagnostics.h"
 #include "asr_result.h"
@@ -12,10 +13,12 @@
 #include "qwen_asr.h"
 #include "qwen_audio_http.h"
 #include "qwen_context.h"
+#include "utils.h"
 
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <mutex>
 #include <utility>
 
 namespace {
@@ -93,7 +96,7 @@ public:
             } else {
                 samples = PcmToFloat(pcm_);
                 if (config_.enableDebugMode && !vad.error.empty()) {
-                    printf("[Local diag] VAD trim disabled: %ls\n", vad.error.c_str());
+                    asr_runtime_log::Write("[Local diag] VAD trim disabled: %s", WideToUtf8(vad.error).c_str());
                 }
             }
         } else {
@@ -165,7 +168,7 @@ public:
                 result.vadTrimmedSamples = vad.pcm.size() / sizeof(int16_t);
                 uploadPcm = std::move(vad.pcm);
             } else if (config_.enableDebugMode && !vad.error.empty()) {
-                printf("[Baidu diag] VAD trim disabled: %ls\n", vad.error.c_str());
+                asr_runtime_log::Write("[Baidu diag] VAD trim disabled: %s", WideToUtf8(vad.error).c_str());
             }
         }
 
@@ -241,7 +244,7 @@ public:
                 result.vadTrimmedSamples = vad.pcm.size() / sizeof(int16_t);
                 uploadPcm = std::move(vad.pcm);
             } else if (config_.enableDebugMode && !vad.error.empty()) {
-                printf("[Qwen diag] VAD trim disabled: %ls\n", vad.error.c_str());
+                asr_runtime_log::Write("[Qwen diag] VAD trim disabled: %s", WideToUtf8(vad.error).c_str());
             }
         }
 
@@ -319,7 +322,7 @@ public:
                 result.vadTrimmedSamples = vad.pcm.size() / sizeof(int16_t);
                 uploadPcm = std::move(vad.pcm);
             } else if (config_.enableDebugMode && !vad.error.empty()) {
-                printf("[MiMo diag] VAD trim disabled: %ls\n", vad.error.c_str());
+                asr_runtime_log::Write("[MiMo diag] VAD trim disabled: %s", WideToUtf8(vad.error).c_str());
             }
         }
 
@@ -365,6 +368,8 @@ public:
             if (config_.qwenInputContextSnapshotCaptured) {
                 inputContextText_ = config_.qwenInputContextSnapshot;
             } else {
+                // The worker updates the shared UI-context snapshot under its mutex.
+                std::lock_guard<std::mutex> lk(g_inputContextMutex);
                 inputContextText_ = qwen_context::CaptureInputFieldText(&g_inputContextResult);
             }
         }

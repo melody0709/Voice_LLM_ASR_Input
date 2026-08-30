@@ -8,6 +8,7 @@
 #include <winhttp.h>
 
 #include <algorithm>
+#include <climits>
 #include <cstdint>
 #include <cstdio>
 #include <cwctype>
@@ -16,7 +17,9 @@
 #include <vector>
 
 #include "cloud_http_common.h"
+#include "cloud_asr_common.h"
 #include "audio_diagnostics.h"
+#include "asr_runtime_log.h"
 #include "utils.h"
 
 #pragma comment(lib, "winhttp.lib")
@@ -34,20 +37,34 @@ struct BaiduConfig {
 };
 
 inline int ExtractJsonInt(const std::string& json, const std::string& key, int fallback = 0) {
-    std::string search = "\"" + key + "\"";
-    size_t pos = json.find(search);
-    if (pos == std::string::npos) return fallback;
-    pos = json.find(':', pos + search.size());
-    if (pos == std::string::npos) return fallback;
-    pos++;
-    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) pos++;
-    if (pos >= json.size()) return fallback;
-    std::string numStr;
-    while (pos < json.size() && (json[pos] == '-' || (json[pos] >= '0' && json[pos] <= '9'))) {
-        numStr += json[pos++];
+    if (!json_detail::IsValidDocument(json)) return fallback;
+    size_t pos = json_detail::FindValueForKey(json, key);
+    if (pos == std::string::npos || pos >= json.size()) return fallback;
+
+    bool negative = false;
+    if (json[pos] == '-') {
+        negative = true;
+        ++pos;
     }
-    if (numStr.empty()) return fallback;
-    return std::stoi(numStr);
+    if (pos >= json.size() || json[pos] < '0' || json[pos] > '9') return fallback;
+
+    const uint64_t limit = negative
+        ? static_cast<uint64_t>(INT_MAX) + 1ULL
+        : static_cast<uint64_t>(INT_MAX);
+    uint64_t value = 0;
+    while (pos < json.size() && json[pos] >= '0' && json[pos] <= '9') {
+        const unsigned digit = static_cast<unsigned>(json[pos] - '0');
+        if (value > (limit - digit) / 10ULL) return fallback;
+        value = value * 10ULL + digit;
+        ++pos;
+    }
+    json_detail::SkipWhitespace(json, pos);
+    if (pos < json.size() && json[pos] != ',' && json[pos] != '}' && json[pos] != ']') {
+        return fallback;  // Reject fractions/exponents instead of truncating them.
+    }
+    if (negative && value == static_cast<uint64_t>(INT_MAX) + 1ULL) return INT_MIN;
+    const int signedValue = static_cast<int>(value);
+    return negative ? -signedValue : signedValue;
 }
 
 inline std::wstring GetMachineCuid() {
@@ -114,6 +131,16 @@ inline std::wstring& CachedToken() {
     return s_cachedToken;
 }
 
+inline std::wstring& CachedTokenApiKey() {
+    static std::wstring s_cachedApiKey;
+    return s_cachedApiKey;
+}
+
+inline std::wstring& CachedTokenSecretKey() {
+    static std::wstring s_cachedSecretKey;
+    return s_cachedSecretKey;
+}
+
 inline ULONGLONG& CachedTokenExpiresAt() {
     static ULONGLONG s_tokenExpiresAt = 0;
     return s_tokenExpiresAt;
@@ -122,17 +149,33 @@ inline ULONGLONG& CachedTokenExpiresAt() {
 inline void ClearCachedToken() {
     std::lock_guard<std::mutex> lk(TokenMutex());
     CachedToken().clear();
+    CachedTokenApiKey().clear();
+    CachedTokenSecretKey().clear();
     CachedTokenExpiresAt() = 0;
+}
+
+inline ULONGLONG TokenCacheLifetimeMs(int expiresIn) {
+    const int effectiveExpiresIn = expiresIn > 0 ? expiresIn : 2592000;
+    const ULONGLONG lifetimeMs = static_cast<ULONGLONG>(effectiveExpiresIn) * 1000ULL;
+    const ULONGLONG refreshMarginMs = (std::min)(60000ULL, lifetimeMs / 10ULL);
+    return lifetimeMs - refreshMarginMs;
 }
 
 inline std::wstring GetAccessToken(const BaiduConfig& cfg) {
     std::lock_guard<std::mutex> lk(TokenMutex());
 
     std::wstring& cachedToken = CachedToken();
+    std::wstring& cachedApiKey = CachedTokenApiKey();
+    std::wstring& cachedSecretKey = CachedTokenSecretKey();
     ULONGLONG& tokenExpiresAt = CachedTokenExpiresAt();
 
+    // 缓存与凭据绑定：Key/Secret 一变更立即失效旧 token。
+    // Settings 测试按钮直接用未保存的输入框值发起请求，不走 SaveConfig，
+    // 因此不能依赖"保存时清缓存"。分别保存两个字段也避免拼接分隔符歧义。
+
     ULONGLONG now = GetTickCount64();
-    if (!cachedToken.empty() && now < tokenExpiresAt) {
+    if (!cachedToken.empty() && now < tokenExpiresAt &&
+        cachedApiKey == cfg.apiKey && cachedSecretKey == cfg.secretKey) {
         return cachedToken;
     }
 
@@ -145,28 +188,34 @@ inline std::wstring GetAccessToken(const BaiduConfig& cfg) {
                                     INTERNET_DEFAULT_HTTPS_PORT, true);
     if (response.empty()) {
         cachedToken.clear();
+        cachedApiKey.clear();
+        cachedSecretKey.clear();
         tokenExpiresAt = 0;
         return L"";
     }
 
     std::string respUtf8 = WideToUtf8(response);
-    std::wstring token = ExtractJsonStr(respUtf8, "access_token");
-    std::wstring expiresInStr = ExtractJsonStr(respUtf8, "expires_in");
+    std::wstring token = ExtractJsonStringDecoded(respUtf8, "access_token");
+    // expires_in 是数字（无引号），必须走整数解析，避免永远落回
+    // 30 天默认值（防未来有效期变化）。
+    const int expiresIn = ExtractJsonInt(respUtf8, "expires_in", -1);
 
     if (token.empty()) {
         cachedToken.clear();
+        cachedApiKey.clear();
+        cachedSecretKey.clear();
         tokenExpiresAt = 0;
         return L"";
     }
 
-    int expiresIn = 2592000;
-    if (!expiresInStr.empty()) {
-        expiresIn = _wtoi(expiresInStr.c_str());
-        if (expiresIn <= 0) expiresIn = 2592000;
-    }
+    // 长 token 最多提前一分钟刷新；短 token 提前 10%，避免 expires_in < 60
+    // 时无符号减法下溢成一个几乎永久有效的缓存时间。
+    const ULONGLONG cacheLifetimeMs = TokenCacheLifetimeMs(expiresIn);
 
     cachedToken = token;
-    tokenExpiresAt = now + static_cast<ULONGLONG>(expiresIn) * 1000 - 60000; // 提前1分钟刷新
+    cachedApiKey = cfg.apiKey;
+    cachedSecretKey = cfg.secretKey;
+    tokenExpiresAt = now + cacheLifetimeMs;
     return token;
 }
 
@@ -187,25 +236,13 @@ inline bool IsTokenError(int errNo, const std::wstring& errMsg) {
 }
 
 inline std::wstring ExtractBaiduResultText(const std::string& responseBody) {
-    std::wstring resultText = ExtractJsonStr(responseBody, "result");
-    if (resultText.empty()) {
-        size_t arrPos = responseBody.find("\"result\"");
-        if (arrPos != std::string::npos) {
-            size_t bracketPos = responseBody.find('[', arrPos);
-            if (bracketPos != std::string::npos) {
-                size_t quotePos = responseBody.find('"', bracketPos + 1);
-                if (quotePos != std::string::npos) {
-                    size_t endQuotePos = responseBody.find('"', quotePos + 1);
-                    if (endQuotePos != std::string::npos) {
-                        resultText = Utf8ToWide(responseBody.substr(quotePos + 1, endQuotePos - quotePos - 1));
-                    }
-                }
-            }
-        }
-    }
+    // 百度 result 是字符串数组，用转义感知的数组解析，
+    // 不再落回裸 find('"') 的手工解析（后者遇文本内 \" 会截断）。
+    std::wstring resultText = ExtractJsonArrayFirstStringDecoded(responseBody, "result");
 
     if (resultText.empty()) {
-        printf("[Baidu diag] err_no=0 but result empty, body (%zu bytes): %s\n", responseBody.size(), responseBody.c_str());
+        // Do not persist recognition text in the runtime log; record only size.
+        asr_runtime_log::Write("[Baidu] err_no=0 but result empty (body %zu bytes)", responseBody.size());
     }
 
     return resultText;
@@ -239,7 +276,7 @@ inline BaiduRecognizeAttempt RecognizeOnce(const std::vector<BYTE>& pcm,
     req.headers = L"Content-Type: audio/pcm;rate=16000\r\n";
     req.body = pcm;
     req.useSsl = true;
-    req.timeoutMs = 8000;
+    req.timeoutMs = ComputeCloudAsrRecordedRequestTimeoutMs(0.0, pcm.size());
 
     CloudHttpResponse response = SendCloudHttpRequest(req);
     if (!response.ok) {
@@ -252,8 +289,8 @@ inline BaiduRecognizeAttempt RecognizeOnce(const std::vector<BYTE>& pcm,
     if (response.statusCode < 200 || response.statusCode >= 300) {
         result.retryable = IsRetryableCloudHttpStatus(response.statusCode);
         result.errorText = L"Baidu ASR error: HTTP " + std::to_wstring(response.statusCode);
-        printf("[Baidu diag] HTTP status=%lu body (%zu bytes): %s\n",
-               response.statusCode, response.body.size(), response.body.c_str());
+        asr_runtime_log::Write("[Baidu] HTTP status=%lu (body %zu bytes)",
+                               response.statusCode, response.body.size());
         return result;
     }
 
@@ -262,18 +299,18 @@ inline BaiduRecognizeAttempt RecognizeOnce(const std::vector<BYTE>& pcm,
     if (errNo < 0) {
         result.retryable = response.body.empty();
         result.errorText = L"Baidu ASR error: Empty response";
-        printf("[Baidu diag] Empty/parse error response body (%zu bytes): %s\n",
-               response.body.size(), response.body.c_str());
+        asr_runtime_log::Write("[Baidu] Empty/parse error response (body %zu bytes)",
+                               response.body.size());
         return result;
     }
 
     if (errNo != 0) {
-        std::wstring errMsg = ExtractJsonStr(response.body, "err_msg");
+        std::wstring errMsg = ExtractJsonStringDecoded(response.body, "err_msg");
         result.tokenError = IsTokenError(errNo, errMsg);
         result.errorText = L"Baidu ASR error " + std::to_wstring(errNo) +
             L": " + (errMsg.empty() ? L"unknown" : errMsg);
-        printf("[Baidu diag] err_no=%d err_msg='%ls' dev_pid=%d body: %s\n",
-               errNo, errMsg.c_str(), cfg.devPid, response.body.c_str());
+        asr_runtime_log::Write("[Baidu] err_no=%d err_msg='%s' dev_pid=%d",
+                               errNo, WideToUtf8(errMsg).c_str(), cfg.devPid);
         return result;
     }
 
@@ -285,6 +322,12 @@ inline BaiduRecognizeAttempt RecognizeOnce(const std::vector<BYTE>& pcm,
 inline std::wstring Recognize(const std::vector<BYTE>& pcm, const BaiduConfig& cfg) {
     if (pcm.empty() || cfg.apiKey.empty() || cfg.secretKey.empty()) {
         return L"";
+    }
+    // 百度短语音接口官方上限 60 s（16 kHz / 16 bit 单声道 = 32 B/ms），
+    // 超限本地提前拒绝，避免白传流量再被服务端拒绝。
+    constexpr size_t kBaiduMaxPcmBytes = 60u * 1000u * 32u;
+    if (pcm.size() > kBaiduMaxPcmBytes) {
+        return L"Baidu ASR error: audio exceeds the 60s limit";
     }
 
     std::wstring lastError;
@@ -353,7 +396,8 @@ inline std::wstring Recognize(const std::vector<BYTE>& pcm, const BaiduConfig& c
 
         if (r.retryable && !retriedTransient) {
             retriedTransient = true;
-            printf("[Baidu diag] retrying same PCM after transient failure: %ls\n", lastError.c_str());
+            asr_runtime_log::Write("[Baidu] retrying same PCM after transient failure: %s",
+                                   WideToUtf8(lastError).c_str());
             SleepCloudHttpRetryBackoff(attempt);
             continue;
         }
@@ -427,7 +471,7 @@ inline TestResult TestConnection(const BaiduConfig& cfg) {
         res.ok = true;
         res.message = L"Connection OK. Token valid, API reachable.";
     } else {
-        std::wstring errMsg = ExtractJsonStr(response.body, "err_msg");
+        std::wstring errMsg = ExtractJsonStringDecoded(response.body, "err_msg");
         res.message = L"API error " + std::to_wstring(errNo) + L": " +
             (errMsg.empty() ? L"unknown" : errMsg);
     }

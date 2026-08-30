@@ -147,7 +147,7 @@ call :write_layout_readme
 
 if "!VOXTYPE_TEST_MODE!"=="1" (
     echo Building offline protocol/request regression tests...
-    "%CMAKE_EXE%" --build --preset x64-release --target qwen_free_protocol_test qwen_audio_json_test llm_refine_test audio_diagnostics_test
+    "%CMAKE_EXE%" --build --preset x64-release --target qwen_free_protocol_test qwen_audio_json_test llm_refine_test audio_diagnostics_test asr_json_protocol_test
     if errorlevel 1 exit /b !ERRORLEVEL!
     set "VOXTYPE_TEST_EXE=%BUILD_ROOT%\artifacts\tests\qwen_free_protocol_test.exe"
     if not exist "!VOXTYPE_TEST_EXE!" (
@@ -180,6 +180,14 @@ if "!VOXTYPE_TEST_MODE!"=="1" (
     )
     echo Running audio diagnostics regression tests...
     "!VOXTYPE_AUDIO_DIAGNOSTICS_TEST_EXE!"
+    if errorlevel 1 exit /b !ERRORLEVEL!
+    set "VOXTYPE_ASR_JSON_PROTOCOL_TEST_EXE=%BUILD_ROOT%\artifacts\tests\asr_json_protocol_test.exe"
+    if not exist "!VOXTYPE_ASR_JSON_PROTOCOL_TEST_EXE!" (
+        echo ERROR: ASR JSON protocol test executable was not produced: !VOXTYPE_ASR_JSON_PROTOCOL_TEST_EXE!
+        exit /b 1
+    )
+    echo Running ASR JSON protocol regression tests...
+    "!VOXTYPE_ASR_JSON_PROTOCOL_TEST_EXE!"
     if errorlevel 1 exit /b !ERRORLEVEL!
 )
 

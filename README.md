@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  Current version: <code>v0.9.25</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
+  Current version: <code>v0.9.26</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -53,9 +53,9 @@ Interactive menu for model selection, auto-downloads and extracts to `models/` d
 
 Requires Visual Studio 2022 (C++ desktop development workload).
 
-To run the offline protocol/request regression tests (Qwen protocol handling,
-LLM request/response policy, and diagnostic WAV/metrics/privacy/retention;
-no network or microphone required):
+To run the offline protocol/request regression tests (Qwen and shared cloud-ASR
+JSON/protocol handling, LLM request/response policy, and diagnostic
+WAV/metrics/privacy/retention; no network or microphone required):
 
 ```powershell
 .\build.bat --test
@@ -270,6 +270,7 @@ CHANGELOG.md        — Version change log
 See [CHANGELOG.md](CHANGELOG.md)
 
 **Recent Updates:**
+- **v0.9.26** — Hardened shared cloud-ASR JSON parsing, Baidu token/retry/timeout handling, Volcengine initialization and cancellation, streaming session activation, Settings test result isolation, and cross-thread audio/diagnostic state; added offline ASR protocol coverage
 - **v0.9.25** — Added shared failure/audio diagnostics for every ASR stage, bounded local WAV/JSON retention, Settings folder/delete controls, generic cross-backend WAV replay, and regression coverage; also refreshed and hardened the LLM provider/request pipeline
 - **v0.9.9** — Restored the shared active-recording HUD animation for Local and other batch ASR backends, so their input-level bar lights up and moves again without changing the v0.9.3 capture-first cloud startup order
 - **v0.9.8** — Canonical CMake/Ninja release pipeline with verified Portable and MSI packages, MSI upgrade/folder-selection support, portable data isolation, and Start with Windows setting

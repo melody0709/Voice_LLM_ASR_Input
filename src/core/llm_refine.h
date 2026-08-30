@@ -22,6 +22,8 @@
 
 namespace llm {
 
+// Explicit re-export for existing short llm:: utility call sites. Do not add
+// same-named functions in this namespace because they would hide these aliases.
 using ::WideToUtf8;
 using ::Utf8ToWide;
 using ::EscapeJson;

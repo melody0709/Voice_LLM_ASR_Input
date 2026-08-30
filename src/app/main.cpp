@@ -94,7 +94,7 @@ WAVEHDR g_waveHeaders[4] = {};
 std::vector<std::vector<BYTE>> g_waveBuffers;
 std::vector<BYTE> g_audioData;
 CRITICAL_SECTION g_audioLock;
-bool g_captureActive = false;
+std::atomic<bool> g_captureActive{false};
 std::atomic<uint64_t> g_audioCaptureGeneration{0};
 std::atomic<bool> g_audioCaptureFailurePending{false};
 std::atomic<DWORD> g_audioCaptureFailureCode{0};
@@ -135,16 +135,18 @@ HWND g_cloudAsrHintControl = nullptr;
 
 
 InputContextResult g_inputContextResult;
+std::mutex g_inputContextMutex;
 
 static ULONGLONG g_sessionStartTick = 0;
 static double g_recordingMs = 0.0;
-double g_vadMs = 0.0;
-double g_asrDecodeMs = 0.0;
-double g_punctMs = 0.0;
-double g_cloudApiMs = 0.0;
-double g_llmMs = 0.0;
+std::atomic<double> g_vadMs{0.0};
+std::atomic<double> g_asrDecodeMs{0.0};
+std::atomic<double> g_punctMs{0.0};
+std::atomic<double> g_cloudApiMs{0.0};
+std::atomic<double> g_llmMs{0.0};
 std::wstring g_vadModelName;
-size_t g_vadTrimmedSamples = 0;
+std::mutex g_vadMetricsMutex;
+std::atomic<size_t> g_vadTrimmedSamples{0};
 std::vector<float> g_streamingVadSamples;
 std::atomic<bool> g_streamingVadReady{false};
 static std::wstring g_lastRawAsrText;
@@ -218,7 +220,12 @@ static void DebugPrintTextLine(const wchar_t* prefix, const std::wstring& text) 
 
 static void DebugPrintInputContext() {
     if (g_config.volcEnableInputContext || g_config.qwenEnableInputContext) {
-        auto& ic = g_inputContextResult;
+        // Copy the worker-owned context snapshot while holding its mutex.
+        InputContextResult ic;
+        {
+            std::lock_guard<std::mutex> lk(g_inputContextMutex);
+            ic = g_inputContextResult;
+        }
         printf("  Context: %s %.0fms", input_context::LayerName(ic.successLayer), ic.elapsedMs);
         if (!ic.focusWindowClass.empty())
             printf(" class=%s", ic.focusWindowClass.c_str());
@@ -251,6 +258,11 @@ static void DebugPrintVadTrimLine(size_t rawBytes, size_t trimmedSamples) {
            rawBytes > 0 ? 100.0 * trimBytes / rawBytes : 0.0);
 }
 
+static std::wstring VadModelNameSnapshot() {
+    std::lock_guard<std::mutex> lk(g_vadMetricsMutex);
+    return g_vadModelName;
+}
+
 static void DebugPrintCloudVadTrim(const Config& config) {
     if (IsStreamingCloudBackend(config) &&
         g_streamingVadTrimmer && g_streamingVadTrimmer->IsActive()) {
@@ -270,19 +282,23 @@ static void DebugPrintCloudVadTrim(const Config& config) {
         return;
     }
 
+    const double vadMs = g_vadMs.load(std::memory_order_relaxed);
+    const size_t trimmedSamples = g_vadTrimmedSamples.load(std::memory_order_relaxed);
     if ((config.asrBackend == L"baidu" || config.asrBackend == L"qwen" || config.asrBackend == L"mimo") &&
-        g_vadMs > 0 && g_vadTrimmedSamples > 0) {
+        vadMs > 0 && trimmedSamples > 0) {
         size_t rawBytes = g_lastPcmBytes > 0 ? g_lastPcmBytes
             : static_cast<size_t>(g_recordingMs * 32.0);
-        DebugPrintVadTrimLine(rawBytes, g_vadTrimmedSamples);
+        DebugPrintVadTrimLine(rawBytes, trimmedSamples);
     }
 }
 
 static void DebugPrintBatchVadTrim() {
-    if (g_vadMs > 0 && g_vadTrimmedSamples > 0) {
+    const double vadMs = g_vadMs.load(std::memory_order_relaxed);
+    const size_t trimmedSamples = g_vadTrimmedSamples.load(std::memory_order_relaxed);
+    if (vadMs > 0 && trimmedSamples > 0) {
         size_t rawBytes = g_lastPcmBytes > 0 ? g_lastPcmBytes
             : static_cast<size_t>(g_recordingMs * 32.0);
-        DebugPrintVadTrimLine(rawBytes, g_vadTrimmedSamples);
+        DebugPrintVadTrimLine(rawBytes, trimmedSamples);
     }
 }
 
@@ -360,6 +376,7 @@ static void ApplyBatchResultMetrics(const Config& config, const AsrSessionResult
     if (config.enableDebugMode && result.vadTrimmedSamples > 0) {
         g_vadTrimmedSamples = result.vadTrimmedSamples;
         g_vadMs = result.vadMs;
+        std::lock_guard<std::mutex> lk(g_vadMetricsMutex);
         g_vadModelName = result.vadModelName;
     }
 }
@@ -532,9 +549,10 @@ static AsrSessionResult RunConfiguredAsrOnce(
     return RunBatchAsrOnce(config, pcm, std::move(localStreamingVadSamples));
 }
 
-static void PostFallbackHud(const Config& fallbackConfig) {
+static void PostFallbackHud(uint64_t attemptId, const Config& fallbackConfig) {
     auto* text = new std::wstring(L"Fallback... " + AsrBackendDisplayName(fallbackConfig));
-    if (!PostMessageW(g_mainWindow, kHudUpdateMessage, 0,
+    if (!PostMessageW(g_mainWindow, kHudUpdateMessage,
+                      static_cast<WPARAM>(attemptId),
                       reinterpret_cast<LPARAM>(text))) {
         delete text;
     }
@@ -603,7 +621,7 @@ void RecognizeAsync(const std::vector<BYTE>& pcm,
                 AsrBackendLogName(fallbackConfig.asrBackend),
                 AsrFailureReasonDebugName(primaryClassification.reason),
                 pcm.size());
-            PostFallbackHud(fallbackConfig);
+            PostFallbackHud(attemptId, fallbackConfig);
             const ULONGLONG fallbackStartTick = GetTickCount64();
             AsrSessionResult fallbackResult = RunConfiguredAsrOnce(fallbackConfig, pcm, {});
             metadata.usedFallback = true;
@@ -705,15 +723,18 @@ static uint64_t BeginAsrAttempt(const Config& config,
         (config.qwenModel == qwen_audio_profile::kHttpModel ||
          config.qwenModel == qwen_audio_profile::kStreamingModel)) {
         attemptConfig.qwenInputContextSnapshotCaptured = true;
-        attemptConfig.qwenInputContextSnapshot =
-            qwen_context::CaptureInputFieldText(&g_inputContextResult);
-        asr_runtime_log::Write(
-            "event=input_context_snapshot captured=%d chars=%zu layer=%d timed_out=%d password=%d",
-            attemptConfig.qwenInputContextSnapshot.empty() ? 0 : 1,
-            attemptConfig.qwenInputContextSnapshot.size(),
-            g_inputContextResult.successLayer,
-            g_inputContextResult.timedOut ? 1 : 0,
-            g_inputContextResult.isPassword ? 1 : 0);
+        {
+            std::lock_guard<std::mutex> lk(g_inputContextMutex);
+            attemptConfig.qwenInputContextSnapshot =
+                qwen_context::CaptureInputFieldText(&g_inputContextResult);
+            asr_runtime_log::Write(
+                "event=input_context_snapshot captured=%d chars=%zu layer=%d timed_out=%d password=%d",
+                attemptConfig.qwenInputContextSnapshot.empty() ? 0 : 1,
+                attemptConfig.qwenInputContextSnapshot.size(),
+                g_inputContextResult.successLayer,
+                g_inputContextResult.timedOut ? 1 : 0,
+                g_inputContextResult.isPassword ? 1 : 0);
+        }
     }
     const audio_diagnostics::AttemptMetadata diagnosticMetadata =
         asr_diagnostics::MakeAttemptMetadata(attemptConfig);
@@ -1015,7 +1036,7 @@ static void DispatchStreamingFallbackAsync(uint64_t attemptId,
         AsrBackendLogName(fallbackConfig.asrBackend),
         AsrFailureReasonDebugName(primaryClassification.reason),
         pcm ? pcm->size() : 0);
-    PostFallbackHud(fallbackConfig);
+    PostFallbackHud(attemptId, fallbackConfig);
     std::thread([attemptId, primaryConfig, fallbackConfig, pcm,
                  primaryError = std::move(primaryError),
                  allowCancelledAttempt]() {
@@ -1198,6 +1219,7 @@ static void HandleStreamingSessionStartFailure(uint64_t attemptId,
 }
 
 struct HudUpdateWithOptionsMessage {
+    uint64_t attemptId = 0;
     std::wstring statusLine;
     std::wstring text;
     float maxWidthDip = 0.0f;
@@ -1209,6 +1231,7 @@ struct HudUpdateWithOptionsMessage {
 
 struct StreamingPartialHudCallbackContext {
     const wchar_t* statusLine = nullptr;
+    uint64_t attemptId = 0;
 };
 
 struct StreamingPartialHudState {
@@ -1371,6 +1394,7 @@ static void StreamingPartialHudCallback(const std::wstring& text, bool, void* us
     if (text.empty()) return;
     const auto* ctx = static_cast<const StreamingPartialHudCallbackContext*>(userData);
     auto* msg = new HudUpdateWithOptionsMessage;
+    msg->attemptId = ctx ? ctx->attemptId : 0;
     msg->statusLine = (ctx && ctx->statusLine) ? ctx->statusLine : L"Listening...";
     msg->text = text;
     msg->maxWidthDip = kStreamingPartialHudMaxWidthDip;
@@ -1447,51 +1471,54 @@ static bool StreamingVadTrimSawNoSpeech() {
            !g_streamingVadTrimmer->DetectedSpeech();
 }
 
-static void ReplayPreCapturedAudio(IStreamingAsrSession* session) {
-    if (!session) return;
-    std::vector<BYTE> preCaptured;
-    EnterCriticalSection(&g_audioLock);
-    preCaptured = g_audioData;
-    LeaveCriticalSection(&g_audioLock);
-    if (preCaptured.empty()) return;
-    if (g_streamingVadTrimmer && g_streamingVadTrimmer->IsActive()) {
-        std::vector<std::vector<BYTE>> streamingOutputs;
-        g_streamingVadTrimmer->ProcessPcm16(preCaptured.data(), preCaptured.size(), streamingOutputs);
-        for (const auto& chunk : streamingOutputs) {
-            if (!chunk.empty()) {
-                session->EnqueuePcmChunk(chunk.data(), chunk.size());
-            }
-        }
-        return;
-    }
-    session->EnqueuePcmChunk(preCaptured.data(), preCaptured.size());
-}
-
-// Qwen-free is started after capture so the keyboard hook never waits on
-// UTDID/signing/WinHTTP setup.  Activate the session and replay the already
-// captured prefix while holding both locks used by the capture callback.  A
-// callback that arrives during this window therefore waits until the session
-// is visible and cannot leave a gap between the copied prefix and live PCM.
-static void ActivateQwenFreeStreamingSession(
-    std::unique_ptr<IStreamingAsrSession> session) {
+// 所有流式后端共用：与两条采集回调保持相同的
+// g_audioLock -> g_streamingSessionCs 锁顺序，使"回放已有 PCM + 安装 session"
+// 与"记录新 PCM + 实时入队"互斥。每个回调块因此只会走回放或实时入队之一。
+// useVadTrimmer=false 表示回放原样 PCM（qwen_free 服务端自带 VAD；doubao 无本地 trimmer）。
+static void ActivateStreamingSession(std::unique_ptr<IStreamingAsrSession> session,
+                                     bool useVadTrimmer) {
     if (!session) return;
 
     EnterCriticalSection(&g_audioLock);
     EnterCriticalSection(&g_streamingSessionCs);
 
-    if (!g_audioData.empty() &&
-        !session->EnqueuePcmChunk(g_audioData.data(), g_audioData.size())) {
-        asr_runtime_log::Write(
-            "event=qwen_free_initial_audio_enqueue_failed pcm_bytes=%zu",
-            g_audioData.size());
+    if (!g_audioData.empty()) {
+        if (useVadTrimmer && g_streamingVadTrimmer && g_streamingVadTrimmer->IsActive()) {
+            std::vector<std::vector<BYTE>> streamingOutputs;
+            g_streamingVadTrimmer->ProcessPcm16(g_audioData.data(), g_audioData.size(),
+                                                streamingOutputs);
+            for (const auto& chunk : streamingOutputs) {
+                if (!chunk.empty() && !session->EnqueuePcmChunk(chunk.data(), chunk.size())) {
+                    asr_runtime_log::Write(
+                        "event=streaming_initial_audio_enqueue_failed pcm_bytes=%zu",
+                        chunk.size());
+                }
+            }
+        } else if (!session->EnqueuePcmChunk(g_audioData.data(), g_audioData.size())) {
+            asr_runtime_log::Write(
+                "event=streaming_initial_audio_enqueue_failed pcm_bytes=%zu",
+                g_audioData.size());
+        }
     }
+
     g_activeStreamingSession = std::move(session);
-    // Qwen-free intentionally sends the complete PCM stream and does not use
-    // the shared local streaming VAD trimmer.
-    g_streamingVadReady = false;
+    g_streamingVadReady = useVadTrimmer && g_streamingVadTrimmer &&
+                          g_streamingVadTrimmer->IsActive();
 
     LeaveCriticalSection(&g_streamingSessionCs);
     LeaveCriticalSection(&g_audioLock);
+}
+
+// Shared HUD/watchdog tail for all streaming backends.
+static void StartStreamingWatchdog(const wchar_t* listeningText) {
+    ShowHud(listeningText);
+    DWORD watchdogMs = 18000;
+    EnterCriticalSection(&g_streamingSessionCs);
+    if (g_activeStreamingSession) {
+        watchdogMs = g_activeStreamingSession->CurrentWatchdogMs();
+    }
+    LeaveCriticalSection(&g_streamingSessionCs);
+    SetTimer(g_mainWindow, kStreamingWatchdogTimer, watchdogMs, nullptr);
 }
 
 static std::wstring AudioCaptureFailureHudText(bool wasapi, DWORD code) {
@@ -1580,9 +1607,22 @@ void StartRecordingSession() {
     std::wstring name = AsrBackendDisplayName(g_config);
     ShowHud(L"Listening... " + name);
 
+    // Detach a previous finalizing provider before the new capture starts, so
+    // no callback can route the first PCM block of this recording into the old
+    // session. Abort/join remains deferred until after capture is active; the
+    // microphone can buffer new PCM while that worker exits.
+    const uint64_t supersededAttemptId = ActiveAsrAttemptId();
+    CancelActiveAsrAttempt(supersededAttemptId, true);
+    auto supersededStreamingSession = TakeActiveStreamingSession();
+    ResetStreamingVadTrimmerState();
+
     std::wstring error;
     AudioCaptureStartFailure captureFailure;
     if (!StartAudioCapture(error, &captureFailure)) {
+        if (supersededStreamingSession) {
+            supersededStreamingSession->Abort();
+            supersededStreamingSession.reset();
+        }
         const uint64_t attemptId = RecordCaptureStartFailure(
             g_config, captureFailure);
         asr_runtime_log::Write(
@@ -1600,6 +1640,7 @@ void StartRecordingSession() {
     }
     g_sessionStartTick = GetTickCount64();
     g_recording = true;
+
     // Preserve the capture-first startup order introduced for streaming head
     // audio reliability. The initial HUD call happened before g_recording was
     // set, so arm only its shared animation timer once recording is active.
@@ -1630,8 +1671,10 @@ void StartRecordingSession() {
     }
 
     const uint64_t attemptId = BeginAsrAttempt(g_config, selection);
-    AbortAndResetActiveStreamingSession();
-    ResetStreamingVadTrimmerState();
+    if (supersededStreamingSession) {
+        supersededStreamingSession->Abort();
+        supersededStreamingSession.reset();
+    }
     ResetStreamingPartialHudState();
     const Config attemptConfig = ActiveAsrAttemptConfig();
 
@@ -1639,6 +1682,7 @@ void StartRecordingSession() {
         auto session = (attemptConfig.qwenModel == L"qwen-audio-3.0-asr-flash-streaming")
             ? CreateQwenAudioStreamingSession(attemptConfig, g_mainWindow, RefineWithLlmAsync, &g_lastRawAsrText)
             : CreateQwenStreamingSession(attemptConfig, g_mainWindow, RefineWithLlmAsync, &g_lastRawAsrText);
+        g_qwenPartialHudContext.attemptId = attemptId;
         session->SetPartialCallback(StreamingPartialHudCallback, &g_qwenPartialHudContext);
         session->SetFinalCallback(StreamingFinalCallback, reinterpret_cast<void*>(static_cast<UINT_PTR>(attemptId)));
 
@@ -1652,26 +1696,15 @@ void StartRecordingSession() {
         }
 
         StartStreamingVadTrimmerForCloud(attemptConfig, L"Qwen thread", false);
-        ReplayPreCapturedAudio(session.get());
+        ActivateStreamingSession(std::move(session), /*useVadTrimmer=*/true);
 
-        EnterCriticalSection(&g_streamingSessionCs);
-        g_activeStreamingSession = std::move(session);
-        g_streamingVadReady = g_streamingVadTrimmer && g_streamingVadTrimmer->IsActive();
-        LeaveCriticalSection(&g_streamingSessionCs);
-
-        ShowHud(L"Listening... Qwen ASR");
-        DWORD watchdogMs = 18000;
-        EnterCriticalSection(&g_streamingSessionCs);
-        if (g_activeStreamingSession) {
-            watchdogMs = g_activeStreamingSession->CurrentWatchdogMs();
-        }
-        LeaveCriticalSection(&g_streamingSessionCs);
-        SetTimer(g_mainWindow, kStreamingWatchdogTimer, watchdogMs, nullptr);
+        StartStreamingWatchdog(L"Listening... Qwen ASR");
         return;
     }
 
     if (attemptConfig.asrBackend == L"doubao_ime") {
         auto session = CreateDoubaoImeStreamingSession(attemptConfig, g_mainWindow, RefineWithLlmAsync, &g_lastRawAsrText);
+        g_doubaoImePartialHudContext.attemptId = attemptId;
         session->SetPartialCallback(StreamingPartialHudCallback, &g_doubaoImePartialHudContext);
         session->SetFinalCallback(StreamingFinalCallback, reinterpret_cast<void*>(static_cast<UINT_PTR>(attemptId)));
 
@@ -1684,20 +1717,9 @@ void StartRecordingSession() {
             return;
         }
 
-        ReplayPreCapturedAudio(session.get());
+        ActivateStreamingSession(std::move(session), /*useVadTrimmer=*/false);
 
-        EnterCriticalSection(&g_streamingSessionCs);
-        g_activeStreamingSession = std::move(session);
-        LeaveCriticalSection(&g_streamingSessionCs);
-
-        ShowHud(L"Listening... Doubao IME");
-        DWORD watchdogMs = 18000;
-        EnterCriticalSection(&g_streamingSessionCs);
-        if (g_activeStreamingSession) {
-            watchdogMs = g_activeStreamingSession->CurrentWatchdogMs();
-        }
-        LeaveCriticalSection(&g_streamingSessionCs);
-        SetTimer(g_mainWindow, kStreamingWatchdogTimer, watchdogMs, nullptr);
+        StartStreamingWatchdog(L"Listening... Doubao IME");
         return;
     }
 
@@ -1709,6 +1731,7 @@ void StartRecordingSession() {
         //     失败后保留完整录音并进入统一 fallback。
         auto session = CreateQwenFreeStreamingSession(
             attemptConfig, g_mainWindow, RefineWithLlmAsync, &g_lastRawAsrText, selection);
+        g_qwenFreePartialHudContext.attemptId = attemptId;
         session->SetPartialCallback(StreamingPartialHudCallback, &g_qwenFreePartialHudContext);
         session->SetFinalCallback(StreamingFinalCallback, reinterpret_cast<void*>(static_cast<UINT_PTR>(attemptId)));
 
@@ -1728,16 +1751,9 @@ void StartRecordingSession() {
         // turns a valid recording into the generic "No speech detected" HUD.
         // Keep the full 16 kHz PCM stream for this protocol backend.
         ResetStreamingVadTrimmerState();
-        ActivateQwenFreeStreamingSession(std::move(session));
+        ActivateStreamingSession(std::move(session), /*useVadTrimmer=*/false);
 
-        ShowHud(L"Listening... Qwen IME (Free)");
-        DWORD watchdogMs = 18000;
-        EnterCriticalSection(&g_streamingSessionCs);
-        if (g_activeStreamingSession) {
-            watchdogMs = g_activeStreamingSession->CurrentWatchdogMs();
-        }
-        LeaveCriticalSection(&g_streamingSessionCs);
-        SetTimer(g_mainWindow, kStreamingWatchdogTimer, watchdogMs, nullptr);
+        StartStreamingWatchdog(L"Listening... Qwen IME (Free)");
         return;
     }
 
@@ -1745,6 +1761,7 @@ void StartRecordingSession() {
         VolcengineResetForNewSession();
 
         auto session = CreateVolcengineStreamingSession(attemptConfig, g_mainWindow, RefineWithLlmAsync, &g_lastRawAsrText);
+        g_volcenginePartialHudContext.attemptId = attemptId;
         session->SetPartialCallback(StreamingPartialHudCallback, &g_volcenginePartialHudContext);
         session->SetFinalCallback(StreamingFinalCallback, reinterpret_cast<void*>(static_cast<UINT_PTR>(attemptId)));
 
@@ -1758,21 +1775,9 @@ void StartRecordingSession() {
         }
 
         StartStreamingVadTrimmerForCloud(attemptConfig, L"Volc thread", false);
-        ReplayPreCapturedAudio(session.get());
+        ActivateStreamingSession(std::move(session), /*useVadTrimmer=*/true);
 
-        EnterCriticalSection(&g_streamingSessionCs);
-        g_activeStreamingSession = std::move(session);
-        g_streamingVadReady = g_streamingVadTrimmer && g_streamingVadTrimmer->IsActive();
-        LeaveCriticalSection(&g_streamingSessionCs);
-
-        ShowHud(L"Listening... Volcano Engine");
-        DWORD watchdogMs = 18000;
-        EnterCriticalSection(&g_streamingSessionCs);
-        if (g_activeStreamingSession) {
-            watchdogMs = g_activeStreamingSession->CurrentWatchdogMs();
-        }
-        LeaveCriticalSection(&g_streamingSessionCs);
-        SetTimer(g_mainWindow, kStreamingWatchdogTimer, watchdogMs, nullptr);
+        StartStreamingWatchdog(L"Listening... Volcano Engine");
         return;
     }
 
@@ -1815,7 +1820,10 @@ void StopRecordingSession() {
     g_punctMs = 0.0;
     g_cloudApiMs = 0.0;
     g_llmMs = 0.0;
-    g_vadModelName.clear();
+    {
+        std::lock_guard<std::mutex> lk(g_vadMetricsMutex);
+        g_vadModelName.clear();
+    }
     g_vadTrimmedSamples = 0;
     g_lastRawAsrText.clear();
     const uint64_t attemptId = ActiveAsrAttemptId();
@@ -1950,6 +1958,7 @@ void StopRecordingSession() {
         double ms = tVad.ElapsedMs();
         if (recordingConfig.enableDebugMode) {
             g_vadMs = ms;
+            std::lock_guard<std::mutex> lk(g_vadMetricsMutex);
             g_vadModelName = (recordingConfig.vadModel == L"firered")
                 ? L"FireRed" : L"Silero";
         }
@@ -2035,6 +2044,11 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     case kHudUpdateMessage: {
         std::unique_ptr<std::wstring> text(reinterpret_cast<std::wstring*>(lParam));
+        const uint64_t attemptId = static_cast<uint64_t>(wParam);
+        // Watchdog recovery deliberately marks the current attempt cancelled
+        // while still allowing its fallback path. Accept status text for that
+        // current attempt, but continue rejecting invalidated/superseded ones.
+        if (attemptId != 0 && !IsActiveAsrAttempt(attemptId, true)) return 0;
         if (text) ShowHud(*text);
         return 0;
     }
@@ -2061,7 +2075,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     case kHudUpdateWithOptionsMessage: {
         std::unique_ptr<HudUpdateWithOptionsMessage> msg(
             reinterpret_cast<HudUpdateWithOptionsMessage*>(lParam));
-        if (msg) {
+        if (msg && (msg->attemptId == 0 || IsActiveAsrAttempt(msg->attemptId))) {
             const std::wstring text = msg->streamingPartial
                 ? FormatStreamingPartialHudText(msg->statusLine, msg->text)
                 : msg->text;
@@ -2161,22 +2175,30 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                         DebugPrintTextLine(L"Primary failed", result->primaryError);
                     }
 
+                    const double vadMs = g_vadMs.load(std::memory_order_relaxed);
+                    const double asrDecodeMs = g_asrDecodeMs.load(std::memory_order_relaxed);
+                    const double punctMs = g_punctMs.load(std::memory_order_relaxed);
+                    const double cloudApiMs = g_cloudApiMs.load(std::memory_order_relaxed);
+                    const size_t trimmedSamples =
+                        g_vadTrimmedSamples.load(std::memory_order_relaxed);
+                    const std::wstring vadModelName = VadModelNameSnapshot();
+
                     if (resultConfig.asrBackend == L"local") {
                         printf("  Pipeline: ");
-                        if (g_vadMs > 0) printf("VAD(%ls) %.0f | ", g_vadModelName.c_str(), g_vadMs);
-                        printf("ASR %.0f", g_asrDecodeMs);
-                        if (g_punctMs > 0) printf(" | Punct %.0f", g_punctMs);
+                        if (vadMs > 0) printf("VAD(%ls) %.0f | ", vadModelName.c_str(), vadMs);
+                        printf("ASR %.0f", asrDecodeMs);
+                        if (punctMs > 0) printf(" | Punct %.0f", punctMs);
                         printf(" | Paste %.0f = Total %.0fms\n", pasteMs,
-                               g_vadMs + g_asrDecodeMs + g_punctMs + pasteMs);
-                        if (g_vadMs > 0 && g_vadTrimmedSamples > 0) {
+                               vadMs + asrDecodeMs + punctMs + pasteMs);
+                        if (vadMs > 0 && trimmedSamples > 0) {
                             size_t rawBytes = g_lastPcmBytes > 0 ? g_lastPcmBytes
                                 : static_cast<size_t>(g_recordingMs * 32.0);
-                            DebugPrintVadTrimLine(rawBytes, g_vadTrimmedSamples);
+                            DebugPrintVadTrimLine(rawBytes, trimmedSamples);
                         }
                     } else {
                         const char* backend = AsrBackendDebugName(resultConfig.asrBackend);
                         printf("  Pipeline: %s %.0f | Paste %.0f = Total %.0fms\n",
-                               backend, g_cloudApiMs, pasteMs, g_cloudApiMs + pasteMs);
+                               backend, cloudApiMs, pasteMs, cloudApiMs + pasteMs);
                         if (result && result->usedFallback) {
                             DebugPrintBatchVadTrim();
                         } else {
@@ -2235,19 +2257,26 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     DebugPrintTextLine(L"Primary failed", result->primaryError);
                 }
 
+                const double vadMs = g_vadMs.load(std::memory_order_relaxed);
+                const double asrDecodeMs = g_asrDecodeMs.load(std::memory_order_relaxed);
+                const double punctMs = g_punctMs.load(std::memory_order_relaxed);
+                const double cloudApiMs = g_cloudApiMs.load(std::memory_order_relaxed);
+                const double llmMs = g_llmMs.load(std::memory_order_relaxed);
+                const std::wstring vadModelName = VadModelNameSnapshot();
+
                 if (resultConfig.asrBackend == L"local") {
                     printf("  Pipeline: ");
-                    if (g_vadMs > 0) printf("VAD(%ls) %.0f | ", g_vadModelName.c_str(), g_vadMs);
-                    printf("ASR %.0f", g_asrDecodeMs);
-                    if (g_punctMs > 0) printf(" | Punct %.0f", g_punctMs);
+                    if (vadMs > 0) printf("VAD(%ls) %.0f | ", vadModelName.c_str(), vadMs);
+                    printf("ASR %.0f", asrDecodeMs);
+                    if (punctMs > 0) printf(" | Punct %.0f", punctMs);
                     printf(" | LLM %.0f | Paste %.0f = Total %.0fms\n",
-                           g_llmMs, pasteMs,
-                           g_vadMs + g_asrDecodeMs + g_punctMs + g_llmMs + pasteMs);
+                           llmMs, pasteMs,
+                           vadMs + asrDecodeMs + punctMs + llmMs + pasteMs);
                 } else {
                     const char* backend = AsrBackendDebugName(resultConfig.asrBackend);
                     printf("  Pipeline: %s %.0f | LLM %.0f | Paste %.0f = Total %.0fms\n",
-                           backend, g_cloudApiMs, g_llmMs, pasteMs,
-                           g_cloudApiMs + g_llmMs + pasteMs);
+                           backend, cloudApiMs, llmMs, pasteMs,
+                           cloudApiMs + llmMs + pasteMs);
                     if (result && result->usedFallback) {
                         DebugPrintBatchVadTrim();
                     } else {
@@ -2418,6 +2447,20 @@ bool RegisterWindowClasses() {
 }
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
+    // Create the single-instance mutex before config loading, model preload or prewarm,
+    // 之前就拒绝第二个实例，避免白加载几百 MB 模型与多余的网络建连。
+    // 创建失败（返回 NULL 且非 ALREADY_EXISTS）同样直接退出，保持防御。
+    HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\VoxType.SingleInstance");
+    if (!mutex) {
+        MessageBoxW(nullptr, L"Failed to create single-instance mutex.", kAppName, MB_OK | MB_ICONERROR);
+        return 0;
+    }
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        MessageBoxW(nullptr, L"VoxType is already running.", kAppName, MB_OK | MB_ICONINFORMATION);
+        CloseHandle(mutex);
+        return 0;
+    }
+
     g_instance = instance;
     g_taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
     InitializeCriticalSection(&g_audioLock);
@@ -2437,36 +2480,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         DebugModeOpenConsole();
     }
 
-    if (ShouldPreloadLocalAsr(g_config)) {
-        const Config localConfig = LocalPreloadConfig(g_config);
-        const std::wstring modelDir = localConfig.modelDir.empty() ? DefaultModelDir(localConfig.modelId) : localConfig.modelDir;
-        if (ModelDirExists(modelDir)) {
-            const Config cfg = localConfig;
-            std::thread([cfg]() {
-                PreloadAsrEngine(cfg);
-                PostMessageW(g_mainWindow, kPreloadDoneMessage, 0, 0);
-            }).detach();
-        }
-    }
-
-    if (g_config.asrBackend == L"volcengine" && !g_config.volcApiKey.empty()) {
-        std::thread([]() {
-            VolcenginePrewarmConnection();
-        }).detach();
-    }
-
-    HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\VoxType.SingleInstance");
-    if (mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
-        MessageBoxW(nullptr, L"VoxType is already running.", kAppName, MB_OK | MB_ICONINFORMATION);
-        CloseHandle(mutex);
-        DeleteUiResources();
-        DeleteCriticalSection(&g_audioLock);
-        DeleteCriticalSection(&g_streamingSessionCs);
-        return 0;
-    }
-
     if (!RegisterWindowClasses()) {
         MessageBoxW(nullptr, L"Failed to register window classes.", kAppName, MB_OK | MB_ICONERROR);
+        CloseHandle(mutex);
         DeleteUiResources();
         DeleteCriticalSection(&g_audioLock);
         DeleteCriticalSection(&g_streamingSessionCs);
@@ -2489,10 +2505,32 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     if (!g_mainWindow) {
         MessageBoxW(nullptr, L"Failed to create main window.", kAppName, MB_OK | MB_ICONERROR);
+        CloseHandle(mutex);
         DeleteUiResources();
         DeleteCriticalSection(&g_audioLock);
         DeleteCriticalSection(&g_streamingSessionCs);
         return 1;
+    }
+
+    // Start detached background work only after the message target exists.
+    // This also keeps early window-creation failure paths free of workers that
+    // could race with critical-section/UI-resource cleanup during return.
+    if (ShouldPreloadLocalAsr(g_config)) {
+        const Config localConfig = LocalPreloadConfig(g_config);
+        const std::wstring modelDir = localConfig.modelDir.empty() ? DefaultModelDir(localConfig.modelId) : localConfig.modelDir;
+        if (ModelDirExists(modelDir)) {
+            const Config cfg = localConfig;
+            std::thread([cfg]() {
+                PreloadAsrEngine(cfg);
+                PostMessageW(g_mainWindow, kPreloadDoneMessage, 0, 0);
+            }).detach();
+        }
+    }
+
+    if (g_config.asrBackend == L"volcengine" && !g_config.volcApiKey.empty()) {
+        std::thread([]() {
+            VolcenginePrewarmConnection();
+        }).detach();
     }
 
     MSG msg;

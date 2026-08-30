@@ -108,6 +108,7 @@ target_link_libraries(VoxType PRIVATE
     ws2_32
     crypt32
     bcrypt
+    rpcrt4
     mmdevapi
     imm32
     delayimp
@@ -202,6 +203,25 @@ set_target_properties(audio_diagnostics_test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/../../artifacts/tests"
 )
 add_test(NAME audio_diagnostics_test COMMAND audio_diagnostics_test)
+
+# Offline protocol regression tests for shared JSON, Baidu and Volcengine helpers.
+add_executable(asr_json_protocol_test
+    tests/asr_json_protocol_test.cpp
+)
+target_compile_definitions(asr_json_protocol_test PRIVATE UNICODE _UNICODE)
+target_include_directories(asr_json_protocol_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/core"
+    "${CMAKE_SOURCE_DIR}/src/asr"
+    "${CMAKE_SOURCE_DIR}/src/audio"
+)
+if(MSVC)
+    target_compile_options(asr_json_protocol_test PRIVATE /O2 /EHsc /utf-8)
+endif()
+target_link_libraries(asr_json_protocol_test PRIVATE winhttp crypt32 rpcrt4)
+set_target_properties(asr_json_protocol_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/../../artifacts/tests"
+)
+add_test(NAME asr_json_protocol_test COMMAND asr_json_protocol_test)
 
 # Developer-only diagnostic replay utility. It reuses the production ASR
 # sessions but remains outside the canonical runtime payload and normal build.

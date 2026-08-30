@@ -444,6 +444,22 @@ struct DoubaoImeTestMessage {
 std::atomic<uint64_t> g_doubaoImeTestGeneration{0};
 constexpr UINT kDoubaoImeTestResultMessage = WM_APP + 11;
 
+// WM_APP+10 测试结果通道被 LLM/百度/火山/Qwen/MiMo 共用，
+// 用代次控制丢弃旧发起的结果（wParam = generation << 1 | failed）。
+std::atomic<uint64_t> g_sharedTestGeneration{0};
+constexpr UINT kSharedTestResultMessage = WM_APP + 10;
+
+void PostSharedTestResult(HWND hwnd, uint64_t generation, bool ok,
+                          std::wstring message) {
+    auto* payload = new std::wstring(std::move(message));
+    const WPARAM packed = static_cast<WPARAM>(
+        (generation << 1) | (ok ? 0ULL : 1ULL));
+    if (!PostMessageW(hwnd, kSharedTestResultMessage, packed,
+                      reinterpret_cast<LPARAM>(payload))) {
+        delete payload;
+    }
+}
+
 struct QwenFreeTestMessage {
     qwen_free_proto_asr::TestResult result;
     uint64_t generation = 0;
@@ -1107,9 +1123,11 @@ void LayoutSettingsWindow(HWND hwnd) {
 
 void HideSettingsWindow(HWND hwnd) {
     // Detached status/test workers may finish after the Settings page is
-    // hidden or reopened. Invalidate both generations before changing the
-    // visible window state so stale results cannot re-enable controls or
-    // overwrite a newer page.
+    // hidden or reopened. Invalidate every Settings-owned result channel
+    // before changing the visible state so stale results cannot overwrite a
+    // newer page or re-enable its controls.
+    g_doubaoImeTestGeneration.fetch_add(1, std::memory_order_relaxed);
+    g_sharedTestGeneration.fetch_add(1, std::memory_order_relaxed);
     g_qwenFreeTestGeneration.fetch_add(1, std::memory_order_relaxed);
     g_qwenFreeStatusGeneration.fetch_add(1, std::memory_order_relaxed);
     EnableWindow(GetDlgItem(hwnd, IDC_QWEN_FREE_TEST), TRUE);
@@ -1895,10 +1913,10 @@ void TestLlmConnection(HWND hwnd) {
     cfg.apiKey = apiKey;
     cfg.model = model;
     cfg.extraParams = extraParams;
-    std::thread([hwnd, cfg]() {
+    const uint64_t testGen = g_sharedTestGeneration.fetch_add(1) + 1;
+    std::thread([hwnd, cfg, testGen]() {
         llm::TestResult result = llm::TestConnection(cfg);
-        PostMessageW(hwnd, WM_APP + 10, result.ok ? 0 : 1,
-            reinterpret_cast<LPARAM>(new std::wstring(result.message)));
+        PostSharedTestResult(hwnd, testGen, result.ok, std::move(result.message));
     }).detach();
 }
 
@@ -3636,10 +3654,10 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             int pids[] = {1537, 1737, 1637, 1837};
             if (devPidIdx >= 0 && devPidIdx < 4) bcfg.devPid = pids[devPidIdx];
             SetStatus(hwnd, L"Testing Baidu ASR connection...");
-            std::thread([hwnd, bcfg]() {
+            const uint64_t testGen = g_sharedTestGeneration.fetch_add(1) + 1;
+            std::thread([hwnd, bcfg, testGen]() {
                 baidu_asr::TestResult result = baidu_asr::TestConnection(bcfg);
-                PostMessageW(hwnd, WM_APP + 10, result.ok ? 0 : 1,
-                    reinterpret_cast<LPARAM>(new std::wstring(result.message)));
+                PostSharedTestResult(hwnd, testGen, result.ok, std::move(result.message));
             }).detach();
             return 0;
         }
@@ -3656,8 +3674,25 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             if (resIdx >= 0 && resIdx < 4) vcfg.resourceId = kVolcResources[resIdx].resourceId;
             int langIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_VOLC_LANGUAGE));
             if (langIdx >= 0 && langIdx < 9) vcfg.language = kVolcLanguages[langIdx];
+            vcfg.enableNonstream = Button_GetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_NONSTREAM)) == BST_CHECKED;
+            vcfg.enableDdc = Button_GetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_DDC)) == BST_CHECKED;
             vcfg.enableMusicFc = Button_GetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_MUSIC_FC)) == BST_CHECKED;
             vcfg.enablePoiFc = Button_GetCheck(GetDlgItem(hwnd, IDC_VOLC_ENABLE_POI_FC)) == BST_CHECKED;
+            {
+                wchar_t value[32] = {};
+                GetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_END_WINDOW_SIZE), value, 32);
+                const int parsed = _wtoi(value);
+                vcfg.endWindowSize = parsed > 0 ? parsed : 800;
+            }
+            {
+                wchar_t value[32] = {};
+                GetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_FORCE_TO_SPEECH_TIME), value, 32);
+                const int parsed = _wtoi(value);
+                vcfg.forceToSpeechTime = parsed >= 1 ? parsed : 0;
+            }
+            // The advanced dialog updates this in-memory value immediately,
+            // even before Save. Test the exact fragment the next session would use.
+            vcfg.extraParams = g_config.volcExtraParams;
             {
                 wchar_t hw[512] = {};
                 GetWindowTextW(GetDlgItem(hwnd, IDC_VOLC_HOTWORDS_ID), hw, 512);
@@ -3679,10 +3714,10 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 vcfg.correctTableName = ct;
             }
             SetStatus(hwnd, L"Testing Volcano Engine ASR connection...");
-            std::thread([hwnd, vcfg]() {
+            const uint64_t testGen = g_sharedTestGeneration.fetch_add(1) + 1;
+            std::thread([hwnd, vcfg, testGen]() {
                 volc_asr::TestResult result = volc_asr::TestConnection(vcfg);
-                PostMessageW(hwnd, WM_APP + 10, result.ok ? 0 : 1,
-                    reinterpret_cast<LPARAM>(new std::wstring(result.message)));
+                PostSharedTestResult(hwnd, testGen, result.ok, std::move(result.message));
             }).detach();
             return 0;
         }
@@ -3701,9 +3736,10 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 cfg.vocabularyId = QwenControlText(hwnd, IDC_QWEN_VOCABULARY_ID);
                 cfg.vocabulary = QwenControlText(hwnd, IDC_QWEN_VOCABULARY, 4096);
                 SetStatus(hwnd, L"Testing Qwen Audio HTTP connection...");
-                std::thread([hwnd, cfg]() {
+                const uint64_t testGen = g_sharedTestGeneration.fetch_add(1) + 1;
+                std::thread([hwnd, cfg, testGen]() {
                     auto result = qwen_audio_http::TestConnection(cfg);
-                    PostMessageW(hwnd, WM_APP + 10, result.ok ? 0 : 1, reinterpret_cast<LPARAM>(new std::wstring(result.message)));
+                    PostSharedTestResult(hwnd, testGen, result.ok, std::move(result.message));
                 }).detach();
                 return 0;
             }
@@ -3726,9 +3762,10 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 cfg.specialWordEmptyList = QwenControlText(hwnd, IDC_QWEN_SPECIAL_EMPTY, 8192);
                 cfg.systemReservedFilter = Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_SYSTEM_FILTER)) == BST_CHECKED;
                 SetStatus(hwnd, L"Testing Qwen Audio streaming connection...");
-                std::thread([hwnd, cfg]() {
+                const uint64_t testGen = g_sharedTestGeneration.fetch_add(1) + 1;
+                std::thread([hwnd, cfg, testGen]() {
                     auto result = qwen_audio_streaming::TestConnection(cfg);
-                    PostMessageW(hwnd, WM_APP + 10, result.ok ? 0 : 1, reinterpret_cast<LPARAM>(new std::wstring(result.message)));
+                    PostSharedTestResult(hwnd, testGen, result.ok, std::move(result.message));
                 }).detach();
                 return 0;
             }
@@ -3751,10 +3788,10 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             }
 
             SetStatus(hwnd, L"Testing Qwen ASR connection...");
-            std::thread([hwnd, qcfg]() {
+            const uint64_t testGen = g_sharedTestGeneration.fetch_add(1) + 1;
+            std::thread([hwnd, qcfg, testGen]() {
                 qwen_asr::TestResult result = qwen_asr::TestConnection(qcfg);
-                PostMessageW(hwnd, WM_APP + 10, result.ok ? 0 : 1,
-                    reinterpret_cast<LPARAM>(new std::wstring(result.message)));
+                PostSharedTestResult(hwnd, testGen, result.ok, std::move(result.message));
             }).detach();
             return 0;
         }
@@ -3783,10 +3820,10 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             mcfg.language = MimoLanguageCodeFromIndex(langIdx);
 
             SetStatus(hwnd, L"Testing MiMo ASR connection...");
-            std::thread([hwnd, mcfg]() {
+            const uint64_t testGen = g_sharedTestGeneration.fetch_add(1) + 1;
+            std::thread([hwnd, mcfg, testGen]() {
                 mimo_asr::TestResult result = mimo_asr::TestConnection(mcfg);
-                PostMessageW(hwnd, WM_APP + 10, result.ok ? 0 : 1,
-                    reinterpret_cast<LPARAM>(new std::wstring(result.message)));
+                PostSharedTestResult(hwnd, testGen, result.ok, std::move(result.message));
             }).detach();
             return 0;
         }
@@ -3920,9 +3957,15 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         }
         return 0;
     }
-    case WM_APP + 10: {
+    case kSharedTestResultMessage: {
         std::unique_ptr<std::wstring> msg(reinterpret_cast<std::wstring*>(lParam));
-        if (wParam == 0) {
+        // 只接受最新一次发起的测试结果，旧结果随 unique_ptr 自动释放。
+        const uint64_t generation = static_cast<uint64_t>(wParam) >> 1;
+        if (generation != g_sharedTestGeneration.load(std::memory_order_relaxed)) {
+            return 0;
+        }
+        const bool ok = (static_cast<uint64_t>(wParam) & 1) == 0;
+        if (ok) {
             SetStatus(hwnd, msg ? msg->c_str() : L"OK");
         } else {
             std::wstring shortMsg = L"Connection failed";
@@ -4019,6 +4062,8 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         }
         return 0;
     case WM_DESTROY:
+        g_doubaoImeTestGeneration.fetch_add(1, std::memory_order_relaxed);
+        g_sharedTestGeneration.fetch_add(1, std::memory_order_relaxed);
         g_qwenFreeTestGeneration.fetch_add(1, std::memory_order_relaxed);
         g_qwenFreeStatusGeneration.fetch_add(1, std::memory_order_relaxed);
         s_qwenChunkContextHint = nullptr;

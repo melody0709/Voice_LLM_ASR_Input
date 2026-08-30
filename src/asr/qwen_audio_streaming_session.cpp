@@ -139,23 +139,6 @@ public:
     const wchar_t* ProviderName() const override { return L"Qwen Audio 3 ASR"; }
 
 private:
-    audio_diagnostics::StageMetadata PrimaryStage(
-        std::wstring reason = {}) const {
-        return asr_diagnostics::MakeStageMetadata(config_, std::move(reason));
-    }
-
-    audio_diagnostics::StageMetadata RetryStage(unsigned index,
-                                                 std::wstring reason) const {
-        return asr_diagnostics::MakeRetryStageMetadata(
-            config_, index, std::move(reason));
-    }
-
-    void CompletePrimary(audio_diagnostics::StageTerminal terminal) {
-        audio_diagnostics::CompleteStage(
-            config_.asrAttemptId, config_.asrDiagnosticStageKind,
-            config_.asrDiagnosticStageIndex, terminal);
-    }
-
     void SetActiveClient(qwen_audio_streaming::Client* client) {
         std::lock_guard<std::mutex> lock(clientMutex_);
         activeClient_ = client;

@@ -882,8 +882,10 @@ void CALLBACK WaveInProc(HWAVEIN waveIn, UINT msg, DWORD_PTR, DWORD_PTR param1, 
 
         EnterCriticalSection(&g_audioLock);
         g_audioData.insert(g_audioData.end(), begin, begin + header->dwBytesRecorded);
-        LeaveCriticalSection(&g_audioLock);
-
+        // Keep the audio lock until the same block has either been enqueued or
+        // observed with no active session. ActivateStreamingSession takes the
+        // locks in this order, so replay+install cannot split this operation
+        // and enqueue the same PCM block twice.
         EnterCriticalSection(&g_streamingSessionCs);
         if (g_activeStreamingSession && g_activeStreamingSession->IsRunning()) {
             const bool useStreamingVadTrim = g_streamingVadTrimmer && g_streamingVadTrimmer->IsActive();
@@ -900,6 +902,7 @@ void CALLBACK WaveInProc(HWAVEIN waveIn, UINT msg, DWORD_PTR, DWORD_PTR param1, 
             }
         }
         LeaveCriticalSection(&g_streamingSessionCs);
+        LeaveCriticalSection(&g_audioLock);
     }
 
     if (g_captureActive) {
@@ -982,12 +985,12 @@ bool StartAudioCapture(std::wstring& error,
                 g_captureActive = true;
                 return true;
             }
-            printf("[Audio] WASAPI Start failed: %ls\n", error.c_str());
+            asr_runtime_log::Write("[Audio] WASAPI Start failed: %s", WideToUtf8(error).c_str());
             g_wasapiCapture.Release();
             error.clear();
         } else {
             g_wasapiCapture.Release();
-            printf("[Audio] WASAPI Init failed, falling back to waveIn\n");
+            asr_runtime_log::Write("[Audio] WASAPI Init failed, falling back to waveIn");
         }
     }
 
@@ -1329,6 +1332,7 @@ std::wstring AsrEngine::Recognize(const std::vector<float>& samples, int sampleR
         double ms = tVad.ElapsedMs();
         if (config.enableDebugMode) {
             g_vadMs = ms;
+            std::lock_guard<std::mutex> lk(g_vadMetricsMutex);
             g_vadModelName = (config.vadModel == L"firered") ? L"FireRed" : L"Silero";
         }
         if (!vr.hasSpeech) return L"";

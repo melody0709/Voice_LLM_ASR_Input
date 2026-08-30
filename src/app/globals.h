@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <thread>
@@ -527,7 +528,7 @@ extern WAVEHDR g_waveHeaders[4];
 extern std::vector<std::vector<BYTE>> g_waveBuffers;
 extern std::vector<BYTE> g_audioData;
 extern CRITICAL_SECTION g_audioLock;
-extern bool g_captureActive;
+extern std::atomic<bool> g_captureActive;
 extern std::atomic<uint64_t> g_audioCaptureGeneration;
 extern std::atomic<bool> g_audioCaptureFailurePending;
 extern std::atomic<DWORD> g_audioCaptureFailureCode;
@@ -570,13 +571,17 @@ void StartRecordingSession();
 void StopRecordingSession();
 float ExtractJsonFloat(const std::string& json, const std::string& key, float fallback);
 
-extern double g_vadMs;
-extern double g_asrDecodeMs;
-extern double g_punctMs;
-extern double g_cloudApiMs;
-extern double g_llmMs;
+extern std::atomic<double> g_vadMs;
+extern std::atomic<double> g_asrDecodeMs;
+extern std::atomic<double> g_punctMs;
+extern std::atomic<double> g_cloudApiMs;
+extern std::atomic<double> g_llmMs;
 extern std::wstring g_vadModelName;
-extern size_t g_vadTrimmedSamples;
+extern std::mutex g_vadMetricsMutex;
+extern std::atomic<size_t> g_vadTrimmedSamples;
 extern std::vector<float> g_streamingVadSamples;
 extern std::atomic<bool> g_streamingVadReady;
 extern InputContextResult g_inputContextResult;
+// Protect cross-thread reads and writes of g_inputContextResult:
+// 写方为 UI 线程的取词与 volcengine/asr_session 工作线程，读方为调试打印与日志。
+extern std::mutex g_inputContextMutex;

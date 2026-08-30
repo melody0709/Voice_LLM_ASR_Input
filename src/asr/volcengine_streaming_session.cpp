@@ -73,10 +73,17 @@ std::wstring JsonEscape(const std::wstring& s) {
     return out;
 }
 
+HINTERNET AtomicTakeSessionWebSocket(volc_asr::VolcSession& sess) {
+    return static_cast<HINTERNET>(
+        InterlockedExchangePointer(
+            reinterpret_cast<void* volatile*>(&sess.hWebSocket),
+            nullptr));
+}
+
 void CloseVolcSessionHandles(volc_asr::VolcSession& sess) {
-    if (sess.hWebSocket) {
-        volc_asr::WebSocketCloseGracefully(sess.hWebSocket, &sess);
-        sess.hWebSocket = nullptr;
+    HINTERNET ws = AtomicTakeSessionWebSocket(sess);
+    if (ws) {
+        volc_asr::WebSocketCloseGracefully(ws, &sess);
     }
     if (sess.hConnect) {
         WinHttpCloseHandle(sess.hConnect);
@@ -93,10 +100,7 @@ void CloseVolcSessionHandles(volc_asr::VolcSession& sess) {
 // Only the caller that gets a non-null return value may close the handle.
 // This prevents double-close when Abort() and the worker/drain threads race.
 static HINTERNET AtomicTakeWebSocket() {
-    return static_cast<HINTERNET>(
-        InterlockedExchangePointer(
-            reinterpret_cast<void* volatile*>(&s_volcSession.hWebSocket),
-            nullptr));
+    return AtomicTakeSessionWebSocket(s_volcSession);
 }
 
 struct VolcRetryResult {
@@ -163,12 +167,22 @@ public:
         // Immediately close activeReq to unblock WinHttpSendRequest in OpenSessionImpl.
         // This eliminates the 3-second UI freeze that would otherwise occur while
         // the watchdog timer waits for kHardTimeoutMs before closing hReq.
+        // NOTE: cross-thread close of a synchronous WinHTTP handle is a pragmatic,
+        // empirically effective cancellation idiom, NOT a documented guarantee
+        // for synchronous handles. Long term: async WinHTTP.
         HINTERNET req = s_volcSession.activeReq.exchange(nullptr);
         if (req) WinHttpCloseHandle(req);
         // Atomically take and close the WebSocket handle to unblock any
         // pending WinHTTP operations in the worker / drain threads.
         HINTERNET ws = AtomicTakeWebSocket();
         if (ws) WinHttpCloseHandle(ws);
+        // The replay session has independent handle slots and must be cancelled too:
+        // forceAbort 让三个等待点尽早退出，句柄关闭沿用同一务实语义。
+        retrySess_.forceAbort = true;
+        HINTERNET retryReq = retrySess_.activeReq.exchange(nullptr);
+        if (retryReq) WinHttpCloseHandle(retryReq);
+        HINTERNET retryWs = AtomicTakeRetryWebSocket();
+        if (retryWs) WinHttpCloseHandle(retryWs);
         if (worker_.joinable() && worker_.get_id() != std::this_thread::get_id()) {
             worker_.join();
         }
@@ -193,21 +207,17 @@ public:
     }
 
 private:
-    audio_diagnostics::StageMetadata PrimaryStage(
-        std::wstring reason = {}) const {
-        return asr_diagnostics::MakeStageMetadata(config_, std::move(reason));
-    }
-
-    audio_diagnostics::StageMetadata RetryStage(unsigned index,
-                                                 std::wstring reason) const {
-        return asr_diagnostics::MakeRetryStageMetadata(
-            config_, index, std::move(reason));
-    }
-
-    void CompletePrimary(audio_diagnostics::StageTerminal terminal) {
-        audio_diagnostics::CompleteStage(
-            config_.asrAttemptId, config_.asrDiagnosticStageKind,
-            config_.asrDiagnosticStageIndex, terminal);
+    bool WaitForReconnectDelay(DWORD delayMs,
+                               const volc_asr::VolcSession& sess) const {
+        const ULONGLONG started = GetTickCount64();
+        while (true) {
+            if (abort_.load() || sess.forceAbort.load()) return false;
+            const ULONGLONG elapsed = GetTickCount64() - started;
+            if (elapsed >= delayMs) break;
+            const DWORD remaining = delayMs - static_cast<DWORD>(elapsed);
+            Sleep((std::min)(static_cast<DWORD>(50), remaining));
+        }
+        return !abort_.load() && !sess.forceAbort.load();
     }
 
     std::wstring BuildContextJson(const std::wstring& inputFieldText, bool includeHistory) const {
@@ -261,17 +271,45 @@ private:
         bool asyncMode = (vcfg.mode == L"bigmodel_async");
         bool nostreamMode = (vcfg.mode == L"bigmodel_nostream");
 
-        volc_asr::VolcSession retrySess;
+        // Keep the replay session as a member so Abort() can reach its cancellation state.
+        // 先原子取走并关闭任何遗留句柄，再复位状态。
+        {
+            HINTERNET staleWs = AtomicTakeRetryWebSocket();
+            if (staleWs) WinHttpCloseHandle(staleWs);
+            HINTERNET staleReq = retrySess_.activeReq.exchange(nullptr);
+            if (staleReq) WinHttpCloseHandle(staleReq);
+            if (retrySess_.hConnect) { WinHttpCloseHandle(retrySess_.hConnect); retrySess_.hConnect = nullptr; }
+            if (retrySess_.hSession) { WinHttpCloseHandle(retrySess_.hSession); retrySess_.hSession = nullptr; }
+        }
+        // retrySess_ belongs to this one recording session and starts with
+        // forceAbort=false. Never clear it here: Abort() may set it between a
+        // separate abort_ check and this assignment, which would re-enable a
+        // replay connection while the UI thread is already joining worker_.
+        retrySess_.lastError.clear();
+        retrySess_.connected = false;
+        retrySess_.sequence = 0;
+        volc_asr::VolcSession& retrySess = retrySess_;
+
+        if (abort_.load() || retrySess.forceAbort.load()) {
+            audio_diagnostics::StageTerminal terminal;
+            terminal.terminal = "aborted";
+            terminal.reason = "cancelled";
+            terminal.elapsedMs = static_cast<double>(GetTickCount64() - attemptStarted);
+            audio_diagnostics::CompleteStage(
+                config_.asrAttemptId, diagnostic.kind, diagnostic.index, terminal);
+            return result;
+        }
+
         DWORD openHardTimeoutMs = VolcOpenHardTimeoutForAttempt(0);
         VolcDebugLog("Volc retry: OpenSession attempt 1 starting (hardTimeout=%ums, replay=%zu)",
                      openHardTimeoutMs, pcm.size());
         bool sessionOpened = volc_asr::OpenSession(retrySess, vcfg, openHardTimeoutMs);
         const int retryDelays[] = {500, 1000};
-        for (int i = 0; !sessionOpened && i < 2; i++) {
+        for (int i = 0; !sessionOpened && i < 2 && !abort_.load(); i++) {
             openHardTimeoutMs = VolcOpenHardTimeoutForAttempt(i + 1);
             VolcDebugLog("Volc retry: OpenSession attempt %d failed, retrying in %dms (next hardTimeout=%ums)...",
                          i + 1, retryDelays[i], openHardTimeoutMs);
-            Sleep(retryDelays[i]);
+            if (!WaitForReconnectDelay(static_cast<DWORD>(retryDelays[i]), retrySess)) break;
             volc_asr::RebuildConnection(retrySess);
             VolcDebugLog("Volc retry: OpenSession attempt %d starting (hardTimeout=%ums)",
                          i + 2, openHardTimeoutMs);
@@ -291,7 +329,7 @@ private:
         }
         retrySess.connected = true;
 
-        for (size_t offset = 0; offset < pcm.size();) {
+        for (size_t offset = 0; offset < pcm.size() && !abort_.load();) {
             const size_t take = (std::min)(static_cast<size_t>(kVolcRetryChunkBytes), pcm.size() - offset);
             std::vector<BYTE> chunk(pcm.begin() + static_cast<ptrdiff_t>(offset),
                                     pcm.begin() + static_cast<ptrdiff_t>(offset + take));
@@ -330,7 +368,7 @@ private:
         }
 
         const ULONGLONG drainStart = GetTickCount64();
-        while (retrySess.hWebSocket && !retrySess.forceAbort.load()
+        while (retrySess.hWebSocket && !retrySess.forceAbort.load() && !abort_.load()
                && (GetTickCount64() - drainStart < finalTimeoutMs)) {
             volc_asr::VolcResult vr = volc_asr::ReceiveResult(retrySess.hWebSocket, 1000, &retrySess);
             if (!vr.text.empty()) {
@@ -403,6 +441,8 @@ private:
 
             if (config_.volcEnableInputContext) {
                 HiResTimer tCtx;
+                // Protect the shared input-context snapshot from UI/worker races.
+                std::lock_guard<std::mutex> lk(g_inputContextMutex);
                 g_inputContextResult = input_context::GetInputFieldContext();
                 g_inputContextResult.elapsedMs = tCtx.ElapsedMs();
                 ctxInputText = g_inputContextResult.inputFieldText;
@@ -435,7 +475,7 @@ private:
             VolcDebugLog("Volc thread: attempt %d failed, retrying in %dms (nextAttempt=%d hardTimeout=%ums, streaming=%d, pending=%zu)",
                          openAttempts + 1, delayMs, nextAttempt, openHardTimeoutMs,
                          streaming_.load() ? 1 : 0, pendingAudio_.Size());
-            Sleep(delayMs);
+            if (!WaitForReconnectDelay(static_cast<DWORD>(delayMs), s_volcSession)) break;
             volc_asr::RebuildConnection(s_volcSession);
             openingAttempt_.store(nextAttempt);
             VolcDebugLog("Volc thread: OpenSession attempt %d starting (hardTimeout=%ums, streaming=%d, pending=%zu)",
@@ -812,6 +852,15 @@ private:
     std::atomic<double> recordingMs_{0.0};
     std::atomic<size_t> capturedPcmBytes_{0};
     unsigned nextRetryStageIndex_ = 1;
+
+    // Stable replay-session storage lets Abort() access forceAbort and handles
+    // forceAbort 与句柄；跨线程关闭沿用与 s_volcSession 相同的务实取消语义。
+    volc_asr::VolcSession retrySess_;
+
+    // 原子"取走并关闭"重放 WebSocket 句柄，防止 Abort() 与 worker 双重关闭。
+    HINTERNET AtomicTakeRetryWebSocket() {
+        return AtomicTakeSessionWebSocket(retrySess_);
+    }
 
 };
 
