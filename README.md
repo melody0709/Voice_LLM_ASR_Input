@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  Current version: <code>v0.9.26</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
+  Current version: <code>v0.9.27</code> &nbsp;|&nbsp; 🇨🇳 <a href="doc/README_zh.md">中文版</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -153,7 +153,7 @@ the packager re-extracts and hashes each result before publishing it.
 - `Basic Fix` / `Deep Fix` — Preset buttons, one-click fill for different correction intensity System Prompts
 
 **Cloud ASR tab**
-- `Provider` — Select between `Volcano Engine (Doubao)`, `Baidu Cloud`, `Qwen ASR (DashScope)`, `MiMo ASR (Xiaomi)`, `Doubao IME (Free)`, and `Qwen IME (Free)`, controls below update dynamically
+- `Provider` — Select between `Volcano Engine (Doubao)`, `Baidu Cloud`, `Qwen ASR (DashScope)`, `MiMo ASR (Xiaomi)`, `Microsoft MAI Transcribe 2`, `Doubao IME (Free)`, and `Qwen IME (Free)`, controls below update dynamically
 - **Baidu Cloud**: `API Key` / `Secret Key` (DPAPI encrypted) + `Language Model` (Mandarin/English/Cantonese/Sichuanese) + `Test Connection`
 - **Volcano Engine (Doubao)**: `API Key` (DPAPI encrypted) + `ASR Mode` + `Model Version` + `Language` + `Test Connection`
   - ASR Mode: `bigmodel_nostream` (recommended, highest accuracy) / `bigmodel_async` (best latency) / `bigmodel` (real-time partial)
@@ -169,6 +169,7 @@ the packager re-extracts and hashes each result before publishing it.
 - **MiMo ASR (Xiaomi)**: `API Key` (DPAPI encrypted) + `Base URL` + `Model` + `Language` + `Test Connection`
   - Default Base URL: `https://token-plan-ams.xiaomimimo.com/v1`
   - Default model: `mimo-v2.5-asr`; audio is uploaded as WAV via `/chat/completions`
+- **Microsoft MAI Transcribe 2**: choose `OpenRouter` or `Azure Speech API`, keep both credentials independently DPAPI-encrypted, select `Auto` / Chinese / English / Cantonese, and test the currently selected API. OpenRouter uses `microsoft/mai-transcribe-2`; Azure Fast Transcription uses `MAI-Transcribe-2`. Both upload the complete WAV after release and return final text only; partial transcription is not supported.
 - **Doubao IME (Free)**: no API key field. The experimental provider registers a Doubao IME-style device, stores device credentials with DPAPI-encrypted token, encodes PCM to Opus, and uses the unofficial `frontier-audio-ime-ws.doubao.com` WebSocket protocol. Availability and terms are not guaranteed.
   - Doubao IME bypasses local VAD and relies on the IME service's own segmentation. Partial HUD updates and final text are accumulated across cloud-side segments during one hotkey hold, so long recordings are pasted as one combined result after release. When selected as Fallback, Doubao IME replays the same raw PCM through a recorded request and writes refreshed credentials back to the saved config.
   - Streaming partial HUD for Qwen, Qwen IME Free, Volcano Engine, and Doubao IME is display-only clear-page: it shows live text within three body lines, then clears previous HUD text and restarts from the current last sentence; the new page keeps accumulating until it exceeds three body lines again, while the final paste text stays complete.
@@ -258,7 +259,7 @@ CHANGELOG.md        — Version change log
 <details>
 <summary><strong>Known Limitations</strong></summary>
 
-- Local, Baidu, and MiMo results are finalized after recording; Qwen, Volcano Engine, and Doubao IME can show partial HUD during recording, with final text pasted after release
+- Local, Baidu, MiMo, and MAI results are finalized after recording; Qwen, Volcano Engine, and Doubao IME can show partial HUD during recording, with final text pasted after release
 - Text injection primarily via clipboard + Ctrl+V, admin privilege windows may block
 - Model files are large (~3GB), first load takes a few seconds
 
@@ -270,6 +271,7 @@ CHANGELOG.md        — Version change log
 See [CHANGELOG.md](CHANGELOG.md)
 
 **Recent Updates:**
+- **v0.9.27** — Added Microsoft MAI Transcribe 2 batch ASR through OpenRouter or Azure Speech API, DPAPI-isolated credentials, final-only Settings guidance, retry/fallback/diagnostics/replay integration, and offline request/response regression coverage
 - **v0.9.26** — Hardened shared cloud-ASR JSON parsing, Baidu token/retry/timeout handling, Volcengine initialization and cancellation, streaming session activation, Settings test result isolation, and cross-thread audio/diagnostic state; added offline ASR protocol coverage
 - **v0.9.25** — Added shared failure/audio diagnostics for every ASR stage, bounded local WAV/JSON retention, Settings folder/delete controls, generic cross-backend WAV replay, and regression coverage; also refreshed and hardened the LLM provider/request pipeline
 - **v0.9.9** — Restored the shared active-recording HUD animation for Local and other batch ASR backends, so their input-level bar lights up and moves again without changing the v0.9.3 capture-first cloud startup order

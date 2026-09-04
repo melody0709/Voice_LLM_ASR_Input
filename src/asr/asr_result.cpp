@@ -117,6 +117,7 @@ std::wstring AsrBackendDisplayName(const Config& config) {
     if (config.asrBackend == L"volcengine") return L"Volcano Engine";
     if (config.asrBackend == L"qwen") return L"Qwen ASR";
     if (config.asrBackend == L"mimo") return L"MiMo ASR";
+    if (config.asrBackend == L"mai") return L"Microsoft MAI Transcribe 2";
     if (config.asrBackend == L"doubao_ime") return L"Doubao IME";
     if (config.asrBackend == L"qwen_free") return L"Qwen IME (Free)";
     return ModelDisplayName(config.modelId);
@@ -127,6 +128,7 @@ const char* AsrBackendDebugName(const std::wstring& asrBackend) {
     if (asrBackend == L"volcengine") return "Volcengine";
     if (asrBackend == L"qwen") return "Qwen";
     if (asrBackend == L"mimo") return "MiMo";
+    if (asrBackend == L"mai") return "MAI";
     if (asrBackend == L"doubao_ime") return "DoubaoIME";
     if (asrBackend == L"qwen_free") return "QwenIMEFree";
     return "Local";
@@ -138,6 +140,7 @@ const char* AsrBackendLogName(const std::wstring& asrBackend) {
     if (asrBackend == L"volcengine") return "volcengine";
     if (asrBackend == L"qwen") return "qwen";
     if (asrBackend == L"mimo") return "mimo";
+    if (asrBackend == L"mai") return "mai";
     if (asrBackend == L"doubao_ime") return "doubao_ime";
     if (asrBackend == L"qwen_free") return "qwen_free";
     if (asrBackend == L"none" || asrBackend.empty()) return "none";
@@ -147,7 +150,8 @@ const char* AsrBackendLogName(const std::wstring& asrBackend) {
 bool IsSupportedFallbackBackend(const std::wstring& backend) {
     return backend == L"local" || backend == L"baidu" ||
            backend == L"qwen" || backend == L"mimo" ||
-           backend == L"doubao_ime" || backend == L"qwen_free";
+           backend == L"mai" || backend == L"doubao_ime" ||
+           backend == L"qwen_free";
 }
 
 bool IsFallbackAsrEnabled(const Config& config) {

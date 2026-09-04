@@ -6,6 +6,7 @@
 #include "engine.h"
 #include "hotkey.h"
 #include "hud.h"
+#include "mai_transcribe.h"
 #include "startup_registration.h"
 #include "doubao_ime_asr.h"
 #include "mimo_asr.h"
@@ -436,6 +437,98 @@ const wchar_t* MimoLanguageCodeFromIndex(int index) {
     return mimo_asr::kDefaultLanguage;
 }
 
+struct MaiLanguageOption {
+    const wchar_t* label;
+    const wchar_t* code;
+};
+
+constexpr MaiLanguageOption kMaiLanguages[] = {
+    {L"Auto", L"auto"},
+    {L"Chinese (zh)", L"zh"},
+    {L"English (en)", L"en"},
+    {L"Cantonese (yue)", L"yue"},
+};
+
+constexpr int kMaiCloudProviderIndex = 6;
+
+int MaiLanguageIndexFromCode(const std::wstring& code) {
+    constexpr int count =
+        static_cast<int>(sizeof(kMaiLanguages) / sizeof(kMaiLanguages[0]));
+    for (int i = 0; i < count; ++i) {
+        if (code == kMaiLanguages[i].code) return i;
+    }
+    return 0;
+}
+
+const wchar_t* MaiLanguageCodeFromIndex(int index) {
+    constexpr int count =
+        static_cast<int>(sizeof(kMaiLanguages) / sizeof(kMaiLanguages[0]));
+    return index >= 0 && index < count ? kMaiLanguages[index].code : L"auto";
+}
+
+mai_transcribe::Config MaiConfigFromControls(HWND hwnd) {
+    mai_transcribe::Config config;
+    const int provider = ComboBox_GetCurSel(
+        GetDlgItem(hwnd, IDC_MAI_API_PROVIDER));
+    config.apiProvider = provider == 1
+        ? mai_transcribe::ApiProvider::AzureSpeech
+        : mai_transcribe::ApiProvider::OpenRouter;
+    config.apiKey = QwenControlText(
+        hwnd,
+        provider == 1 ? IDC_MAI_AZURE_API_KEY : IDC_MAI_OPENROUTER_API_KEY,
+        1024);
+    config.azureEndpoint = QwenControlText(
+        hwnd, IDC_MAI_AZURE_ENDPOINT, 2048);
+    config.language = MaiLanguageCodeFromIndex(ComboBox_GetCurSel(
+        GetDlgItem(hwnd, IDC_MAI_LANGUAGE)));
+    return config;
+}
+
+void ShowMaiApiSubPage(HWND hwnd) {
+    const bool visible = g_cloudProviderIdx == kMaiCloudProviderIndex;
+    const bool azure = ComboBox_GetCurSel(
+        GetDlgItem(hwnd, IDC_MAI_API_PROVIDER)) == 1;
+    for (HWND control : g_maiOpenRouterControls) {
+        ShowWindow(control, visible && !azure ? SW_SHOW : SW_HIDE);
+    }
+    for (HWND control : g_maiAzureControls) {
+        ShowWindow(control, visible && azure ? SW_SHOW : SW_HIDE);
+    }
+    HWND hint = GetDlgItem(hwnd, IDC_MAI_HINT);
+    if (hint) {
+        SetWindowTextW(
+            hint,
+            azure
+                ? L"Azure Fast Transcription sends the complete WAV after key release. Final text only; no partial."
+                : L"OpenRouter sends the complete recording after key release. Final text only; no partial.");
+    }
+}
+
+bool ValidateMaiControls(HWND hwnd, std::wstring& error) {
+    if (ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_CLOUD_PROVIDER)) !=
+        kMaiCloudProviderIndex) {
+        return true;
+    }
+    const mai_transcribe::Config config = MaiConfigFromControls(hwnd);
+    if (Trim(config.apiKey).empty()) {
+        error = config.apiProvider == mai_transcribe::ApiProvider::AzureSpeech
+            ? L"Azure API Key cannot be empty."
+            : L"OpenRouter API Key cannot be empty.";
+        return false;
+    }
+    if (config.apiProvider == mai_transcribe::ApiProvider::AzureSpeech) {
+        if (Trim(config.azureEndpoint).empty()) {
+            error = L"Azure Endpoint cannot be empty.";
+            return false;
+        }
+        if (!mai_transcribe::ValidateAzureEndpointForTest(
+                config.azureEndpoint, error)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 struct DoubaoImeTestMessage {
     doubao_ime_asr::TestResult result;
     uint64_t generation = 0;
@@ -493,6 +586,7 @@ constexpr BackendOption kBackendOptions[] = {
     {L"baidu", L"Baidu Cloud", true, true},
     {L"qwen", L"Qwen ASR", true, true},
     {L"mimo", L"MiMo ASR", true, true},
+    {L"mai", L"Microsoft MAI Transcribe 2", true, true},
     {L"doubao_ime", L"Doubao IME (Free)", true, true},
     {L"qwen_free", L"Qwen IME (Free)", true, true},
 };
@@ -1025,6 +1119,18 @@ void AddMimoControl(HWND hwnd) {
     if (hwnd) g_mimoControls.push_back(hwnd);
 }
 
+void AddMaiControl(HWND hwnd) {
+    if (hwnd) g_maiControls.push_back(hwnd);
+}
+
+void AddMaiOpenRouterControl(HWND hwnd) {
+    if (hwnd) g_maiOpenRouterControls.push_back(hwnd);
+}
+
+void AddMaiAzureControl(HWND hwnd) {
+    if (hwnd) g_maiAzureControls.push_back(hwnd);
+}
+
 void AddDoubaoImeControl(HWND hwnd) {
     if (hwnd) g_doubaoImeControls.push_back(hwnd);
 }
@@ -1060,6 +1166,10 @@ void ShowCloudSubPage(HWND hwnd, int providerIdx) {
     for (HWND c : g_mimoControls) ShowWindow(c, providerIdx == 3 ? SW_SHOW : SW_HIDE);
     for (HWND c : g_doubaoImeControls) ShowWindow(c, providerIdx == 4 ? SW_SHOW : SW_HIDE);
     for (HWND c : g_qwenFreeControls) ShowWindow(c, providerIdx == 5 ? SW_SHOW : SW_HIDE);
+    for (HWND c : g_maiControls) {
+        ShowWindow(c, providerIdx == kMaiCloudProviderIndex ? SW_SHOW : SW_HIDE);
+    }
+    ShowMaiApiSubPage(hwnd);
 }
 
 void ShowSettingsPage(HWND hwnd, int page) {
@@ -1086,6 +1196,9 @@ void ShowSettingsPage(HWND hwnd, int page) {
         for (HWND c : g_qwenControls) ShowWindow(c, SW_HIDE);
         for (HWND c : g_qwenAudio3Controls) ShowWindow(c, SW_HIDE);
         for (HWND c : g_mimoControls) ShowWindow(c, SW_HIDE);
+        for (HWND c : g_maiControls) ShowWindow(c, SW_HIDE);
+        for (HWND c : g_maiOpenRouterControls) ShowWindow(c, SW_HIDE);
+        for (HWND c : g_maiAzureControls) ShowWindow(c, SW_HIDE);
         for (HWND c : g_doubaoImeControls) ShowWindow(c, SW_HIDE);
         for (HWND c : g_qwenFreeControls) ShowWindow(c, SW_HIDE);
     }
@@ -1340,6 +1453,7 @@ void LoadSettingsControls(HWND hwnd) {
     ComboBox_AddString(cloudProviderCombo, L"MiMo ASR (Xiaomi)");
     ComboBox_AddString(cloudProviderCombo, L"Doubao IME (Free)");
     ComboBox_AddString(cloudProviderCombo, L"Qwen IME (Free)");
+    ComboBox_AddString(cloudProviderCombo, L"Microsoft MAI Transcribe 2");
 
     int cloudIdx = 0;
     if (g_config.cloudProvider == L"baidu") cloudIdx = 1;
@@ -1347,6 +1461,7 @@ void LoadSettingsControls(HWND hwnd) {
     else if (g_config.cloudProvider == L"mimo") cloudIdx = 3;
     else if (g_config.cloudProvider == L"doubao_ime") cloudIdx = 4;
     else if (g_config.cloudProvider == L"qwen_free") cloudIdx = 5;
+    else if (g_config.cloudProvider == L"mai") cloudIdx = kMaiCloudProviderIndex;
     ComboBox_SetCurSel(cloudProviderCombo, cloudIdx);
     g_cloudProviderIdx = cloudIdx;
 
@@ -1380,6 +1495,19 @@ void LoadSettingsControls(HWND hwnd) {
     HWND mimoKeyEdit = GetDlgItem(hwnd, IDC_MIMO_API_KEY);
     if (mimoKeyEdit) SendMessageW(mimoKeyEdit, EM_SETPASSWORDCHAR, L'\u25CF', 0);
 
+    g_maiOpenRouterKeyVisible = false;
+    HWND showMaiOpenRouter = GetDlgItem(hwnd, IDC_MAI_SHOW_OPENROUTER_KEY);
+    if (showMaiOpenRouter) SetWindowTextW(showMaiOpenRouter, L"Show");
+    HWND maiOpenRouterKey = GetDlgItem(hwnd, IDC_MAI_OPENROUTER_API_KEY);
+    if (maiOpenRouterKey) {
+        SendMessageW(maiOpenRouterKey, EM_SETPASSWORDCHAR, L'\u25CF', 0);
+    }
+    g_maiAzureKeyVisible = false;
+    HWND showMaiAzure = GetDlgItem(hwnd, IDC_MAI_SHOW_AZURE_KEY);
+    if (showMaiAzure) SetWindowTextW(showMaiAzure, L"Show");
+    HWND maiAzureKey = GetDlgItem(hwnd, IDC_MAI_AZURE_API_KEY);
+    if (maiAzureKey) SendMessageW(maiAzureKey, EM_SETPASSWORDCHAR, L'\u25CF', 0);
+
     SetWindowTextW(GetDlgItem(hwnd, IDC_BAIDU_API_KEY), g_config.baiduApiKey.c_str());
     SetWindowTextW(GetDlgItem(hwnd, IDC_BAIDU_SECRET_KEY), g_config.baiduSecretKey.c_str());
 
@@ -1412,6 +1540,23 @@ void LoadSettingsControls(HWND hwnd) {
     SetWindowTextW(GetDlgItem(hwnd, IDC_MIMO_API_KEY), g_config.mimoApiKey.c_str());
     SetWindowTextW(GetDlgItem(hwnd, IDC_MIMO_BASE_URL), g_config.mimoBaseUrl.c_str());
     SetWindowTextW(GetDlgItem(hwnd, IDC_MIMO_MODEL), g_config.mimoModel.c_str());
+    SetWindowTextW(GetDlgItem(hwnd, IDC_MAI_OPENROUTER_API_KEY),
+                   g_config.maiOpenRouterApiKey.c_str());
+    SetWindowTextW(GetDlgItem(hwnd, IDC_MAI_AZURE_ENDPOINT),
+                   g_config.maiAzureEndpoint.c_str());
+    SetWindowTextW(GetDlgItem(hwnd, IDC_MAI_AZURE_API_KEY),
+                   g_config.maiAzureApiKey.c_str());
+    HWND maiApiProvider = GetDlgItem(hwnd, IDC_MAI_API_PROVIDER);
+    ComboBox_AddString(maiApiProvider, L"OpenRouter");
+    ComboBox_AddString(maiApiProvider, L"Azure Speech API");
+    ComboBox_SetCurSel(maiApiProvider, g_config.maiApiProvider == L"azure" ? 1 : 0);
+    HWND maiLanguage = GetDlgItem(hwnd, IDC_MAI_LANGUAGE);
+    for (const auto& language : kMaiLanguages) {
+        ComboBox_AddString(maiLanguage, language.label);
+    }
+    ComboBox_SetCurSel(
+        maiLanguage, MaiLanguageIndexFromCode(g_config.maiLanguage));
+    ShowMaiApiSubPage(hwnd);
     RefreshDoubaoImeStatus(hwnd);
     // QwenFree 回填
     SetWindowTextW(GetDlgItem(hwnd, IDC_QWEN_FREE_SHELL_PATH), g_config.qwenFreeShellPath.c_str());
@@ -1572,6 +1717,13 @@ void SaveSettingsControls(HWND hwnd) {
         MessageBoxW(hwnd, qwenValidationError.c_str(), L"Qwen Settings", MB_OK | MB_ICONERROR);
         return;
     }
+    std::wstring maiValidationError;
+    if (!ValidateMaiControls(hwnd, maiValidationError)) {
+        SetStatus(hwnd, maiValidationError);
+        MessageBoxW(hwnd, maiValidationError.c_str(), L"MAI Settings",
+                    MB_OK | MB_ICONERROR);
+        return;
+    }
     // Keep the registry-backed setting transactional with the normal config:
     // a startup registration failure must not commit any of the UI changes.
     if (!SaveStartupRegistrationControl(hwnd)) return;
@@ -1690,6 +1842,7 @@ void SaveSettingsControls(HWND hwnd) {
         else if (cloudIdx == 3) g_config.cloudProvider = L"mimo";
         else if (cloudIdx == 4) g_config.cloudProvider = L"doubao_ime";
         else if (cloudIdx == 5) g_config.cloudProvider = L"qwen_free";
+        else if (cloudIdx == kMaiCloudProviderIndex) g_config.cloudProvider = L"mai";
         else g_config.cloudProvider = L"volcengine";
     }
     wchar_t baiduApiKey[256] = {};
@@ -1802,6 +1955,23 @@ void SaveSettingsControls(HWND hwnd) {
         int langIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_MIMO_LANGUAGE));
         g_config.mimoLanguage = MimoLanguageCodeFromIndex(langIdx);
     }
+
+    g_config.maiApiProvider =
+        ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_MAI_API_PROVIDER)) == 1
+            ? L"azure"
+            : L"openrouter";
+    g_config.maiOpenRouterApiKey = QwenControlText(
+        hwnd, IDC_MAI_OPENROUTER_API_KEY, 1024);
+    g_config.maiAzureEndpoint = Trim(QwenControlText(
+        hwnd, IDC_MAI_AZURE_ENDPOINT, 2048));
+    while (g_config.maiAzureEndpoint.size() > 8 &&
+           g_config.maiAzureEndpoint.back() == L'/') {
+        g_config.maiAzureEndpoint.pop_back();
+    }
+    g_config.maiAzureApiKey = QwenControlText(
+        hwnd, IDC_MAI_AZURE_API_KEY, 1024);
+    g_config.maiLanguage = MaiLanguageCodeFromIndex(ComboBox_GetCurSel(
+        GetDlgItem(hwnd, IDC_MAI_LANGUAGE)));
 
     // QwenFree (千问 IME 免费后端，A1 纯协议还原)
     g_config.qwenFreePolishEnabled = Button_GetCheck(GetDlgItem(hwnd, IDC_QWEN_FREE_POLISH)) == BST_CHECKED;
@@ -2639,6 +2809,9 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         s_qwenChunkContextHint = nullptr;
         s_qwenLanguageHintsHint = nullptr;
         g_mimoControls.clear();
+        g_maiControls.clear();
+        g_maiOpenRouterControls.clear();
+        g_maiAzureControls.clear();
         g_doubaoImeControls.clear();
         g_qwenFreeControls.clear();
         g_vadFireredControls.clear();
@@ -3089,6 +3262,71 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         AddMimoControl(CreateCombo(hwnd, IDC_MIMO_LANGUAGE, S(UiStyle::InputLeft), S(UiStyle::RowInputY(4)), S(UiStyle::ComboW), S(UiStyle::ComboH)));
 
         AddMimoControl(CreateButton(hwnd, IDC_MIMO_TEST, S(500), S(UiStyle::RowInputY(0)), S(UiStyle::ActionBtnW), S(UiStyle::ActionBtnH), L"Test Connection"));
+
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(1)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"API");
+        AddMaiControl(control);
+        AddMaiControl(CreateCombo(hwnd, IDC_MAI_API_PROVIDER,
+                                  S(UiStyle::InputLeft), S(UiStyle::RowInputY(1)),
+                                  S(UiStyle::ComboW), S(UiStyle::ComboH)));
+
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(2)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"OpenRouter Key");
+        AddMaiOpenRouterControl(control);
+        HWND maiOpenRouterKey = CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"EDIT", nullptr,
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD,
+            S(UiStyle::InputLeft), S(UiStyle::RowInputY(2)), S(330),
+            S(UiStyle::EditH), hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_MAI_OPENROUTER_API_KEY)),
+            g_instance, nullptr);
+        ApplyUiFont(maiOpenRouterKey);
+        AddMaiOpenRouterControl(maiOpenRouterKey);
+        AddMaiOpenRouterControl(CreateButton(
+            hwnd, IDC_MAI_SHOW_OPENROUTER_KEY, S(UiStyle::SmallBtnX),
+            S(UiStyle::RowInputY(2)) - S(1), S(UiStyle::SmallBtnW),
+            S(UiStyle::BtnH), L"Show"));
+
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(2)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Azure Endpoint");
+        AddMaiAzureControl(control);
+        HWND maiAzureEndpoint = CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"EDIT", nullptr,
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+            S(UiStyle::InputLeft), S(UiStyle::RowInputY(2)),
+            S(UiStyle::InputWFull), S(UiStyle::EditH), hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_MAI_AZURE_ENDPOINT)),
+            g_instance, nullptr);
+        ApplyUiFont(maiAzureEndpoint);
+        AddMaiAzureControl(maiAzureEndpoint);
+
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(3)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Azure API Key");
+        AddMaiAzureControl(control);
+        HWND maiAzureKey = CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"EDIT", nullptr,
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD,
+            S(UiStyle::InputLeft), S(UiStyle::RowInputY(3)), S(330),
+            S(UiStyle::EditH), hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_MAI_AZURE_API_KEY)),
+            g_instance, nullptr);
+        ApplyUiFont(maiAzureKey);
+        AddMaiAzureControl(maiAzureKey);
+        AddMaiAzureControl(CreateButton(
+            hwnd, IDC_MAI_SHOW_AZURE_KEY, S(UiStyle::SmallBtnX),
+            S(UiStyle::RowInputY(3)) - S(1), S(UiStyle::SmallBtnW),
+            S(UiStyle::BtnH), L"Show"));
+
+        control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(4)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Language");
+        AddMaiControl(control);
+        AddMaiControl(CreateCombo(hwnd, IDC_MAI_LANGUAGE,
+                                  S(UiStyle::InputLeft), S(UiStyle::RowInputY(4)),
+                                  S(UiStyle::ComboW), S(UiStyle::ComboH)));
+        HWND maiHint = CreateHint(
+            hwnd, S(UiStyle::InputLeft), S(UiStyle::RowInputY(5)),
+            S(UiStyle::InputWFull), S(UiStyle::QwenHint2LineH), L"");
+        SetWindowLongPtrW(maiHint, GWLP_ID, IDC_MAI_HINT);
+        AddMaiControl(maiHint);
+        AddMaiControl(CreateButton(
+            hwnd, IDC_MAI_TEST, S(500), S(UiStyle::RowInputY(0)),
+            S(UiStyle::ActionBtnW), S(UiStyle::ActionBtnH),
+            L"Test Connection"));
 
         control = CreateLabel(hwnd, S(UiStyle::ContentLeft), S(UiStyle::RowLabelY(1)), S(UiStyle::LabelWidth), S(UiStyle::LabelH), L"Credentials");
         AddDoubaoImeControl(control);
@@ -3558,6 +3796,12 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 return 0;
             }
             break;
+        case IDC_MAI_API_PROVIDER:
+            if (HIWORD(wParam) == CBN_SELCHANGE) {
+                ShowMaiApiSubPage(hwnd);
+                return 0;
+            }
+            break;
         case IDC_VOLC_MODE:
             if (HIWORD(wParam) == CBN_SELCHANGE) {
                 int modeIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_VOLC_MODE));
@@ -3641,6 +3885,36 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             }
             HWND btn = GetDlgItem(hwnd, IDC_MIMO_SHOW_KEY);
             if (btn) SetWindowTextW(btn, g_mimoKeyVisible ? L"Hide" : L"Show");
+            return 0;
+        }
+        case IDC_MAI_SHOW_OPENROUTER_KEY: {
+            g_maiOpenRouterKeyVisible = !g_maiOpenRouterKeyVisible;
+            HWND key = GetDlgItem(hwnd, IDC_MAI_OPENROUTER_API_KEY);
+            if (key) {
+                SendMessageW(key, EM_SETPASSWORDCHAR,
+                             g_maiOpenRouterKeyVisible ? 0 : L'\u25CF', 0);
+                InvalidateRect(key, nullptr, TRUE);
+            }
+            HWND button = GetDlgItem(hwnd, IDC_MAI_SHOW_OPENROUTER_KEY);
+            if (button) {
+                SetWindowTextW(button,
+                               g_maiOpenRouterKeyVisible ? L"Hide" : L"Show");
+            }
+            return 0;
+        }
+        case IDC_MAI_SHOW_AZURE_KEY: {
+            g_maiAzureKeyVisible = !g_maiAzureKeyVisible;
+            HWND key = GetDlgItem(hwnd, IDC_MAI_AZURE_API_KEY);
+            if (key) {
+                SendMessageW(key, EM_SETPASSWORDCHAR,
+                             g_maiAzureKeyVisible ? 0 : L'\u25CF', 0);
+                InvalidateRect(key, nullptr, TRUE);
+            }
+            HWND button = GetDlgItem(hwnd, IDC_MAI_SHOW_AZURE_KEY);
+            if (button) {
+                SetWindowTextW(button,
+                               g_maiAzureKeyVisible ? L"Hide" : L"Show");
+            }
             return 0;
         }
         case IDC_BAIDU_TEST: {
@@ -3824,6 +4098,28 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             std::thread([hwnd, mcfg, testGen]() {
                 mimo_asr::TestResult result = mimo_asr::TestConnection(mcfg);
                 PostSharedTestResult(hwnd, testGen, result.ok, std::move(result.message));
+            }).detach();
+            return 0;
+        }
+        case IDC_MAI_TEST: {
+            const mai_transcribe::Config config = MaiConfigFromControls(hwnd);
+            std::wstring error;
+            if (!ValidateMaiControls(hwnd, error)) {
+                SetStatus(hwnd, error);
+                MessageBoxW(hwnd, error.c_str(), L"MAI Settings",
+                            MB_OK | MB_ICONERROR);
+                return 0;
+            }
+            SetStatus(hwnd,
+                config.apiProvider == mai_transcribe::ApiProvider::AzureSpeech
+                    ? L"Testing Azure MAI-Transcribe-2 connection..."
+                    : L"Testing OpenRouter MAI-Transcribe-2 connection...");
+            const uint64_t testGen = g_sharedTestGeneration.fetch_add(1) + 1;
+            std::thread([hwnd, config, testGen]() {
+                mai_transcribe::TestResult result =
+                    mai_transcribe::TestConnection(config);
+                PostSharedTestResult(hwnd, testGen, result.ok,
+                                     std::move(result.message));
             }).detach();
             return 0;
         }

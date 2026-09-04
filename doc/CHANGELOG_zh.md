@@ -2,6 +2,23 @@
 
 > 🇬🇧 [English](../CHANGELOG.md)
 
+## v0.9.27 (2026-09-04, dev)
+
+### 新增
+
+- **Microsoft MAI Transcribe 2 ASR**：新增统一 `mai` batch 后端，API 通道可选 OpenRouter（`microsoft/mai-transcribe-2`）或 Azure Speech Fast Transcription（`MAI-Transcribe-2`）。Settings 分别 DPAPI 加密保存两套凭据，支持 Auto/中文/英文/粤语，并明确标注两条链路均为 final-only。
+- **共用链路整合**：复用 batch 录音、VAD trim、规范 WAV、WinHTTP 取消/超时、一次 transient retry、结果分类、fallback、诊断、可选 LLM 分发和开发者 ASR replay。
+
+### 变更
+
+- **本地 VAD 所有权**：录音期间的本地 VAD 预处理仅供 Local 后端使用；MAI 等 batch 云端后端只在录音结束后通过共用 `BatchVadTrimmer` 处理一次。
+- **配置 schema**：配置版本升级到 15，新增 MAI 通道、密钥、Azure Endpoint 和语言字段，不改变默认 ASR 后端。
+
+### 测试
+
+- `asr_json_protocol_test` 新增 OpenRouter JSON/Base64、Azure multipart/enhanced mode、响应解析、Unicode 和 Endpoint 校验覆盖。
+- `build.bat --test` 通过；Settings 布局验证覆盖 96/144/192/288 DPI。用户已于 2026-09-04 通过 Settings 验证 OpenRouter 真实 ASR；Azure 仍待凭据验证。
+
 ## v0.9.25 (2026-08-24, dev)
 
 ### 新增

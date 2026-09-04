@@ -13,6 +13,11 @@ std::wstring ModelName(const Config& config) {
     if (config.asrBackend == L"qwen") return config.qwenModel;
     if (config.asrBackend == L"volcengine") return config.volcResourceId;
     if (config.asrBackend == L"mimo") return config.mimoModel;
+    if (config.asrBackend == L"mai") {
+        return config.maiApiProvider == L"azure"
+            ? L"MAI-Transcribe-2"
+            : L"microsoft/mai-transcribe-2";
+    }
     if (config.asrBackend == L"doubao_ime") return L"doubao_ime_asr";
     if (config.asrBackend == L"qwen_free") return L"qwen_ime_free";
     return {};
@@ -32,6 +37,11 @@ std::wstring TransportName(const Config& config) {
         return L"websocket_" + config.volcMode;
     }
     if (config.asrBackend == L"mimo") return L"batch_http_wav_json";
+    if (config.asrBackend == L"mai") {
+        return config.maiApiProvider == L"azure"
+            ? L"batch_http_wav_multipart"
+            : L"batch_http_wav_base64_json";
+    }
     if (config.asrBackend == L"doubao_ime") return L"websocket_opus";
     if (config.asrBackend == L"qwen_free") return L"websocket_protobuf";
     return L"unknown";

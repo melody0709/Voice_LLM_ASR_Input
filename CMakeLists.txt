@@ -50,6 +50,7 @@ add_executable(VoxType WIN32
     src/asr/cloud_http_common.cpp
     src/asr/doubao_ime_asr.cpp
     src/asr/doubao_ime_streaming_session.cpp
+    src/asr/mai_transcribe.cpp
     src/asr/mimo_asr.cpp
     src/asr/qwen_asr.cpp
     src/asr/qwen_audio_http.cpp
@@ -207,9 +208,14 @@ add_test(NAME audio_diagnostics_test COMMAND audio_diagnostics_test)
 # Offline protocol regression tests for shared JSON, Baidu and Volcengine helpers.
 add_executable(asr_json_protocol_test
     tests/asr_json_protocol_test.cpp
+    src/audio/audio_diagnostics.cpp
+    src/asr/cloud_http_common.cpp
+    src/asr/mai_transcribe.cpp
 )
-target_compile_definitions(asr_json_protocol_test PRIVATE UNICODE _UNICODE)
+target_compile_definitions(asr_json_protocol_test PRIVATE
+    UNICODE _UNICODE VOXTYPE_MAI_PROTOCOL_TEST=1)
 target_include_directories(asr_json_protocol_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/app"
     "${CMAKE_SOURCE_DIR}/src/core"
     "${CMAKE_SOURCE_DIR}/src/asr"
     "${CMAKE_SOURCE_DIR}/src/audio"
@@ -217,7 +223,8 @@ target_include_directories(asr_json_protocol_test PRIVATE
 if(MSVC)
     target_compile_options(asr_json_protocol_test PRIVATE /O2 /EHsc /utf-8)
 endif()
-target_link_libraries(asr_json_protocol_test PRIVATE winhttp crypt32 rpcrt4)
+target_link_libraries(asr_json_protocol_test PRIVATE
+    winhttp crypt32 rpcrt4 bcrypt shell32)
 set_target_properties(asr_json_protocol_test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/../../artifacts/tests"
 )
@@ -242,6 +249,7 @@ add_executable(asr_audio_replay EXCLUDE_FROM_ALL
     src/asr/cloud_http_common.cpp
     src/asr/doubao_ime_asr.cpp
     src/asr/doubao_ime_streaming_session.cpp
+    src/asr/mai_transcribe.cpp
     src/asr/mimo_asr.cpp
     src/asr/qwen_asr.cpp
     src/asr/qwen_audio_http.cpp

@@ -27,7 +27,7 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "winmm.lib")
 
-static constexpr int kCurrentConfigVersion = 14;
+static constexpr int kCurrentConfigVersion = 15;
 
 namespace {
 
@@ -547,6 +547,27 @@ void LoadConfig() {
     g_config.baiduDevPid = ExtractJsonInt(json, "baidu_dev_pid", 1537);
     g_config.cloudProvider = Utf8ToWide(ExtractJsonString(json, "cloud_provider", "volcengine"));
     if (g_config.cloudProvider.empty()) g_config.cloudProvider = L"volcengine";
+    g_config.maiApiProvider = Utf8ToWide(
+        ExtractJsonString(json, "mai_api_provider", "openrouter"));
+    if (g_config.maiApiProvider != L"azure") {
+        g_config.maiApiProvider = L"openrouter";
+    }
+    g_config.maiOpenRouterApiKey = llm::DecryptString(Utf8ToWide(
+        ExtractJsonString(json, "mai_openrouter_api_key", "")));
+    g_config.maiAzureEndpoint = Trim(Utf8ToWide(
+        ExtractJsonString(json, "mai_azure_endpoint", "")));
+    while (g_config.maiAzureEndpoint.size() > 8 &&
+           g_config.maiAzureEndpoint.back() == L'/') {
+        g_config.maiAzureEndpoint.pop_back();
+    }
+    g_config.maiAzureApiKey = llm::DecryptString(Utf8ToWide(
+        ExtractJsonString(json, "mai_azure_api_key", "")));
+    g_config.maiLanguage = Utf8ToWide(
+        ExtractJsonString(json, "mai_language", "auto"));
+    if (g_config.maiLanguage != L"zh" && g_config.maiLanguage != L"en" &&
+        g_config.maiLanguage != L"yue") {
+        g_config.maiLanguage = L"auto";
+    }
     g_config.volcApiKey = llm::DecryptString(Utf8ToWide(ExtractJsonString(json, "volc_api_key", "")));
     g_config.volcResourceId = Utf8ToWide(ExtractJsonString(json, "volc_resource_id", "volc.seedasr.sauc.duration"));
     g_config.volcMode = Utf8ToWide(ExtractJsonString(json, "volc_mode", "bigmodel_nostream"));
@@ -780,6 +801,13 @@ void SaveConfig() {
          << "  \"baidu_secret_key\": \"" << EscapeJson(llm::EncryptString(g_config.baiduSecretKey)) << "\",\n"
          << "  \"baidu_dev_pid\": " << g_config.baiduDevPid << ",\n"
          << "  \"cloud_provider\": \"" << EscapeJson(g_config.cloudProvider) << "\",\n"
+         << "  \"mai_api_provider\": \"" << EscapeJson(g_config.maiApiProvider) << "\",\n"
+         << "  \"mai_openrouter_api_key\": \""
+         << EscapeJson(llm::EncryptString(g_config.maiOpenRouterApiKey)) << "\",\n"
+         << "  \"mai_azure_endpoint\": \"" << EscapeJson(g_config.maiAzureEndpoint) << "\",\n"
+         << "  \"mai_azure_api_key\": \""
+         << EscapeJson(llm::EncryptString(g_config.maiAzureApiKey)) << "\",\n"
+         << "  \"mai_language\": \"" << EscapeJson(g_config.maiLanguage) << "\",\n"
          << "  \"volc_api_key\": \"" << EscapeJson(llm::EncryptString(g_config.volcApiKey)) << "\",\n"
          << "  \"volc_resource_id\": \"" << EscapeJson(g_config.volcResourceId) << "\",\n"
          << "  \"volc_mode\": \"" << EscapeJson(g_config.volcMode) << "\",\n"

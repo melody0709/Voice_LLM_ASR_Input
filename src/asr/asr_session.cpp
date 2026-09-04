@@ -9,6 +9,7 @@
 #include "doubao_ime_asr.h"
 #include "doubao_ime_config.h"
 #include "engine.h"
+#include "mai_transcribe.h"
 #include "mimo_asr.h"
 #include "qwen_asr.h"
 #include "qwen_audio_http.h"
@@ -475,6 +476,140 @@ private:
     std::wstring inputContextText_;
 };
 
+class MaiAsrSession final : public BatchAsrSessionBase {
+public:
+    MaiAsrSession(Config config, AsrEngine& engine)
+        : config_(std::move(config)), engine_(engine) {}
+
+    bool Start(std::wstring& error) override {
+        cancellation_.Reset();
+        return BatchAsrSessionBase::Start(error);
+    }
+
+    void Abort() override {
+        aborted_.store(true);
+        cancellation_.Abort();
+    }
+
+    AsrSessionResult Finish() override {
+        AsrSessionResult result;
+        result.backend = AsrSessionBackend::MaiBatch;
+        result.providerName = AsrBackendDisplayName(config_);
+        result.pcmBytes = pcm_.size();
+        if (aborted_) {
+            result.text = L"MAI ASR error: aborted";
+            return result;
+        }
+
+        std::vector<BYTE> uploadPcm = pcm_;
+        audio_diagnostics::StageMetadata diagnostic =
+            asr_diagnostics::MakeStageMetadata(config_);
+        diagnostic.vadInputBytes = pcm_.size();
+        if (config_.enableVad) {
+            BatchVadTrimResult vad = TrimBatchPcm16WithVad(config_, engine_, pcm_);
+            if (vad.active) {
+                diagnostic.vadActive = true;
+                diagnostic.vadDetectedSpeech = vad.detectedSpeech;
+                diagnostic.vadModel = vad.modelName;
+                diagnostic.vadOutputBytes = vad.pcm.size();
+                result.vadMs = vad.elapsedMs;
+                result.vadModelName = vad.modelName;
+                if (!vad.detectedSpeech || vad.pcm.empty()) {
+                    result.text.clear();
+                    CompleteVadNoSpeech(config_, diagnostic);
+                    return result;
+                }
+                result.vadTrimmedSamples = vad.pcm.size() / sizeof(int16_t);
+                uploadPcm = std::move(vad.pcm);
+            } else if (config_.enableDebugMode && !vad.error.empty()) {
+                asr_runtime_log::Write(
+                    "[MAI diag] VAD trim disabled: %s",
+                    WideToUtf8(vad.error).c_str());
+            }
+        }
+        if (diagnostic.vadOutputBytes == 0) {
+            diagnostic.vadOutputBytes = uploadPcm.size();
+        }
+        diagnostic.sentBytes = uploadPcm.size();
+
+        mai_transcribe::Config providerConfig;
+        providerConfig.apiProvider = config_.maiApiProvider == L"azure"
+            ? mai_transcribe::ApiProvider::AzureSpeech
+            : mai_transcribe::ApiProvider::OpenRouter;
+        providerConfig.apiKey = providerConfig.apiProvider ==
+                mai_transcribe::ApiProvider::AzureSpeech
+            ? config_.maiAzureApiKey
+            : config_.maiOpenRouterApiKey;
+        providerConfig.azureEndpoint = config_.maiAzureEndpoint;
+        providerConfig.language = config_.maiLanguage;
+
+        const DWORD timeoutMs =
+            ComputeCloudAsrRecordedRequestTimeoutMs(0.0, uploadPcm.size());
+        const HiResTimer totalTimer;
+        mai_transcribe::Result response;
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            audio_diagnostics::StageMetadata stage = diagnostic;
+            if (attempt > 0) {
+                stage = asr_diagnostics::MakeRetryStageMetadata(
+                    config_, static_cast<unsigned>(attempt),
+                    config_.asrDiagnosticStageKind ==
+                            audio_diagnostics::StageKind::Fallback
+                        ? L"fallback_http_retry"
+                        : L"transient_http_retry");
+                stage.vadEnabled = diagnostic.vadEnabled;
+                stage.vadActive = diagnostic.vadActive;
+                stage.vadDetectedSpeech = diagnostic.vadDetectedSpeech;
+                stage.vadModel = diagnostic.vadModel;
+                stage.vadInputBytes = diagnostic.vadInputBytes;
+                stage.vadOutputBytes = diagnostic.vadOutputBytes;
+                stage.sentBytes = diagnostic.sentBytes;
+            }
+            asr_diagnostics::RegisterInput(config_, uploadPcm, stage);
+            response = mai_transcribe::Recognize(
+                uploadPcm, providerConfig, timeoutMs, &cancellation_);
+            stage.networkBytes = response.networkBytes;
+            audio_diagnostics::UpdateStageMetadata(config_.asrAttemptId, stage);
+
+            const std::wstring stageText = response.ok
+                ? response.text
+                : response.error;
+            audio_diagnostics::StageTerminal terminal =
+                asr_diagnostics::TerminalFromText(
+                    stageText,
+                    response.text.empty() ? "http_success_empty" : "http_success",
+                    response.elapsedMs);
+            terminal.providerCode = response.providerCode.empty()
+                ? std::to_string(static_cast<unsigned long>(response.statusCode))
+                : response.providerCode;
+            audio_diagnostics::CompleteStage(
+                config_.asrAttemptId, stage.kind, stage.index, terminal);
+
+            if (aborted_.load() || response.ok || !response.retryable ||
+                attempt == 1) {
+                break;
+            }
+            SleepCloudHttpRetryBackoff(attempt);
+        }
+
+        result.cloudApiMs = totalTimer.ElapsedMs();
+        result.text = response.ok
+            ? NormalizeAsrText(response.text)
+            : (response.error.empty()
+                ? L"MAI ASR error: request failed"
+                : response.error);
+        return result;
+    }
+
+    const wchar_t* ProviderName() const override {
+        return L"Microsoft MAI Transcribe 2";
+    }
+
+private:
+    Config config_;
+    AsrEngine& engine_;
+    CloudHttpCancellation cancellation_;
+};
+
 class DoubaoImeRecordedSession final : public BatchAsrSessionBase {
 public:
     explicit DoubaoImeRecordedSession(Config config)
@@ -567,6 +702,9 @@ std::unique_ptr<IAsrSession> CreateBatchAsrSession(
     }
     if (config.asrBackend == L"mimo") {
         return std::make_unique<MimoAsrSession>(config, localEngine);
+    }
+    if (config.asrBackend == L"mai") {
+        return std::make_unique<MaiAsrSession>(config, localEngine);
     }
     if (config.asrBackend == L"doubao_ime") {
         return std::make_unique<DoubaoImeRecordedSession>(config);

@@ -2,6 +2,23 @@
 
 > 🇨🇳 [中文版](doc/CHANGELOG_zh.md)
 
+## v0.9.27 (2026-09-04, dev)
+
+### Added
+
+- **Microsoft MAI Transcribe 2 ASR**: Added one `mai` batch backend with selectable OpenRouter (`microsoft/mai-transcribe-2`) and Azure Speech Fast Transcription (`MAI-Transcribe-2`) API channels. Settings stores independent DPAPI-encrypted credentials, exposes Auto/Chinese/English/Cantonese language selection, and labels both paths final-only.
+- **Shared pipeline integration**: MAI reuses batch recording, VAD trim, canonical WAV generation, WinHTTP cancellation/timeouts, one bounded transient retry, result classification, fallback, diagnostics, optional LLM dispatch, and the developer ASR replay tool.
+
+### Changed
+
+- **Local VAD ownership**: Recording-time local VAD preprocessing is now restricted to the Local backend; batch cloud providers, including MAI, use the shared post-recording `BatchVadTrimmer` once.
+- **Configuration schema**: Added OpenRouter/Azure MAI channel, key, endpoint, and language fields under config version 15 without changing the default ASR backend.
+
+### Tests
+
+- Added offline OpenRouter JSON/Base64, Azure multipart/enhanced-mode definition, response parsing, Unicode, and endpoint-validation coverage to `asr_json_protocol_test`.
+- `build.bat --test` passes, including the Settings layout validator at 96/144/192/288 DPI design scales. OpenRouter live ASR was user-verified through Settings on 2026-09-04; Azure remains credential-dependent and was not executed in this workspace.
+
 ## v0.9.26 (2026-08-30, dev)
 
 ### Added

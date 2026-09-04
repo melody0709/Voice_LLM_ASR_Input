@@ -17,6 +17,7 @@ enum class AsrSessionBackend {
     QwenRealtimeBatch,
     QwenAudioBatch,
     MimoBatch,
+    MaiBatch,
     DoubaoImeRecorded,
 };
 

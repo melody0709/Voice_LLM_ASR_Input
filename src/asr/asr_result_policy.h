@@ -23,6 +23,8 @@ inline bool LooksLikeOperationalPrefix(const std::wstring& text) {
         || StartsWith(text, L"Qwen IME rewrite failed:")
         || StartsWith(text, L"MiMo ASR error:")
         || StartsWith(text, L"MiMo ASR failed:")
+        || StartsWith(text, L"MAI ASR error:")
+        || StartsWith(text, L"MAI ASR failed:")
         || StartsWith(text, L"Doubao IME ASR error:")
         || StartsWith(text, L"Doubao IME ASR failed:")
         || StartsWith(text, L"Doubao IME error:")

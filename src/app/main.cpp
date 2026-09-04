@@ -115,6 +115,9 @@ std::vector<HWND> g_qwenControls;
 std::vector<HWND> g_qwenAudio3Controls;
 std::vector<HWND> g_qwenAudioStreamingOnlyControls;
 std::vector<HWND> g_mimoControls;
+std::vector<HWND> g_maiControls;
+std::vector<HWND> g_maiOpenRouterControls;
+std::vector<HWND> g_maiAzureControls;
 std::vector<HWND> g_doubaoImeControls;
 std::vector<HWND> g_qwenFreeControls;
 std::vector<HWND> g_vadFireredControls;
@@ -126,6 +129,8 @@ bool g_baiduApiKeyVisible = false;
 bool g_volcKeyVisible = false;
 bool g_qwenKeyVisible = false;
 bool g_mimoKeyVisible = false;
+bool g_maiOpenRouterKeyVisible = false;
+bool g_maiAzureKeyVisible = false;
 std::unique_ptr<IStreamingAsrSession> g_activeStreamingSession;
 std::unique_ptr<StreamingVadTrimmer> g_streamingVadTrimmer;
 CRITICAL_SECTION g_streamingSessionCs;
@@ -370,6 +375,7 @@ static void ApplyBatchResultMetrics(const Config& config, const AsrSessionResult
         result.backend == AsrSessionBackend::QwenRealtimeBatch ||
         result.backend == AsrSessionBackend::QwenAudioBatch ||
         result.backend == AsrSessionBackend::MimoBatch ||
+        result.backend == AsrSessionBackend::MaiBatch ||
         result.backend == AsrSessionBackend::DoubaoImeRecorded) {
         g_cloudApiMs = result.cloudApiMs;
     }
@@ -589,8 +595,7 @@ void RecognizeAsync(const std::vector<BYTE>& pcm,
                     uint64_t attemptId,
                     Config config) {
     std::vector<float> localStreamingVadSamples;
-    if (config.asrBackend != L"baidu" && !IsStreamingCloudBackend(config) &&
-        config.asrBackend != L"mimo") {
+    if (config.asrBackend == L"local") {
         localStreamingVadSamples = std::move(g_streamingVadSamples);
         g_streamingVadSamples.clear();
     }
@@ -1783,9 +1788,7 @@ void StartRecordingSession() {
 
     g_streamingVadReady = false;
     g_streamingVadSamples.clear();
-    if (attemptConfig.asrBackend != L"baidu" && !IsStreamingCloudBackend(attemptConfig) &&
-        attemptConfig.asrBackend != L"mimo" &&
-        attemptConfig.enableVad) {
+    if (attemptConfig.asrBackend == L"local" && attemptConfig.enableVad) {
         const int threads = ResolveThreads(attemptConfig.threads);
         g_asrEngine.Lock();
         bool ok = g_asrEngine.EnsureVadForConfig(attemptConfig, threads);

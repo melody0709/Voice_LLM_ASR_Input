@@ -54,6 +54,9 @@ $qwenDialogSpecialY = Get-UiInt 'QwenAdvancedDialogSpecialY'
 $qwenDialogSpecialH = Get-UiInt 'QwenAdvancedDialogSpecialH'
 $qwenDialogFooterY = Get-UiInt 'QwenAdvancedDialogFooterY'
 $actionButtonH = Get-UiInt 'ActionBtnH'
+$inputWidthFull = Get-UiInt 'InputWFull'
+$rowHeight = Get-UiInt 'RowHeight'
+$qwenHint2LineHeight = Get-UiInt 'QwenHint2LineH'
 
 $startupY = $firstRowY + $shortcutHeight + $startupGap
 $startupBottom = $startupY + $startupHeight
@@ -101,6 +104,13 @@ if (($qwenDialogSpecialY + $qwenDialogSpecialH) -gt ($qwenDialogFooterY - 8)) {
 if (($qwenDialogFooterY + $actionButtonH) -gt ($qwenDialogClientBottom - $margin)) {
     throw 'Qwen Advanced footer buttons exceed the estimated client area'
 }
+$maiHintBottom = $firstRowY + (5 * $rowHeight) + $qwenHint2LineHeight
+if ($maiHintBottom -gt ($footerMinTop - 4)) {
+    throw 'MAI settings hint reaches the footer'
+}
+if (($inputLeft + $inputWidthFull) -gt ($settingsWindowWidth - $margin)) {
+    throw 'MAI Azure Endpoint field exceeds the Settings design width'
+}
 
 foreach ($dpi in @(96, 144, 192, 288)) {
     $scale = $dpi / 144.0
@@ -122,6 +132,12 @@ foreach ($dpi in @(96, 144, 192, 288)) {
     if ((Scale ($qwenDialogFooterY + $actionButtonH) $scale) -gt (Scale ($qwenDialogClientBottom - $margin) $scale)) {
         throw "Qwen Advanced footer overflows the estimated client area at $dpi DPI"
     }
+    if ((Scale $maiHintBottom $scale) -gt (Scale ($footerMinTop - 4) $scale)) {
+        throw "MAI settings overlap the footer at $dpi DPI"
+    }
+    if ((Scale ($inputLeft + $inputWidthFull) $scale) -gt (Scale ($settingsWindowWidth - $margin) $scale)) {
+        throw "MAI Azure Endpoint field overflows the Settings width at $dpi DPI"
+    }
 }
 
 foreach ($required in @(
@@ -135,7 +151,12 @@ foreach ($required in @(
         'OpenDiagnosticAudioFolder(hwnd)',
         'DeleteDiagnosticAudioFiles(hwnd)',
         'IDC_QWEN_ADVANCED',
-        'ShowQwenAdvancedDialog(hwnd, data)')) {
+        'ShowQwenAdvancedDialog(hwnd, data)',
+        'IDC_MAI_API_PROVIDER',
+        'AddMaiControl(CreateCombo(hwnd, IDC_MAI_API_PROVIDER',
+        'ShowMaiApiSubPage(hwnd)',
+        'g_config.maiOpenRouterApiKey = QwenControlText(',
+        'mai_transcribe::TestConnection(config)')) {
     if (!$globals.Contains($required) -and !$settings.Contains($required)) {
         throw "Startup Settings wiring is missing: $required"
     }

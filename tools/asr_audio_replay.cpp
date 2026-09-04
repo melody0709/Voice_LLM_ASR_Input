@@ -70,7 +70,7 @@ WAVEHDR g_waveHeaders[4] = {};
 std::vector<std::vector<BYTE>> g_waveBuffers;
 std::vector<BYTE> g_audioData;
 CRITICAL_SECTION g_audioLock;
-bool g_captureActive = false;
+std::atomic<bool> g_captureActive{false};
 std::atomic<uint64_t> g_audioCaptureGeneration{0};
 std::atomic<bool> g_audioCaptureFailurePending{false};
 std::atomic<DWORD> g_audioCaptureFailureCode{0};
@@ -91,6 +91,9 @@ std::vector<HWND> g_qwenControls;
 std::vector<HWND> g_qwenAudio3Controls;
 std::vector<HWND> g_qwenAudioStreamingOnlyControls;
 std::vector<HWND> g_mimoControls;
+std::vector<HWND> g_maiControls;
+std::vector<HWND> g_maiOpenRouterControls;
+std::vector<HWND> g_maiAzureControls;
 std::vector<HWND> g_doubaoImeControls;
 std::vector<HWND> g_qwenFreeControls;
 std::vector<HWND> g_vadFireredControls;
@@ -102,22 +105,26 @@ bool g_baiduApiKeyVisible = false;
 bool g_volcKeyVisible = false;
 bool g_qwenKeyVisible = false;
 bool g_mimoKeyVisible = false;
+bool g_maiOpenRouterKeyVisible = false;
+bool g_maiAzureKeyVisible = false;
 std::unique_ptr<IStreamingAsrSession> g_activeStreamingSession;
 std::unique_ptr<StreamingVadTrimmer> g_streamingVadTrimmer;
 CRITICAL_SECTION g_streamingSessionCs;
 AsrEngine g_asrEngine;
 int g_cloudProviderIdx = 0;
 HWND g_cloudAsrHintControl = nullptr;
-double g_vadMs = 0.0;
-double g_asrDecodeMs = 0.0;
-double g_punctMs = 0.0;
-double g_cloudApiMs = 0.0;
-double g_llmMs = 0.0;
+std::atomic<double> g_vadMs{0.0};
+std::atomic<double> g_asrDecodeMs{0.0};
+std::atomic<double> g_punctMs{0.0};
+std::atomic<double> g_cloudApiMs{0.0};
+std::atomic<double> g_llmMs{0.0};
 std::wstring g_vadModelName;
-size_t g_vadTrimmedSamples = 0;
+std::mutex g_vadMetricsMutex;
+std::atomic<size_t> g_vadTrimmedSamples{0};
 std::vector<float> g_streamingVadSamples;
 std::atomic<bool> g_streamingVadReady{false};
 InputContextResult g_inputContextResult;
+std::mutex g_inputContextMutex;
 
 namespace {
 
@@ -358,7 +365,7 @@ void PrintUsage() {
 void PrintBackends() {
     std::cout
         << "Backend IDs:\n"
-        << "  local, configured, fallback, baidu, mimo, qwen, qwen_http,\n"
+        << "  local, configured, fallback, baidu, mimo, mai, qwen, qwen_http,\n"
         << "  qwen_streaming, volcengine, doubao_ime, doubao_ime_batch, qwen_free\n"
         << "The qwen ID uses the model/transport currently selected in VoxType.\n";
 }
@@ -467,7 +474,8 @@ bool ResolveBackend(const Config& loaded,
         request.config.asrBackend = L"doubao_ime";
         request.forceBatch = true;
     } else if (backend == L"local" || backend == L"baidu" ||
-               backend == L"mimo" || backend == L"qwen" ||
+               backend == L"mimo" || backend == L"mai" ||
+               backend == L"qwen" ||
                backend == L"volcengine" || backend == L"doubao_ime" ||
                backend == L"qwen_free") {
         request.config.asrBackend = backend;

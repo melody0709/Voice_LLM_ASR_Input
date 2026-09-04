@@ -1,8 +1,10 @@
 # Microsoft MAI-Transcribe 2 集成计划
 
-> 状态：计划中
+> 状态：已实施；OpenRouter live ASR 已由用户验证，Azure live probe 待凭据验证
 >
 > 创建日期：2026-09-04
+>
+> 实施日期：2026-09-04。`build.bat --test` 已通过；Settings 静态布局验证覆盖 96/144/192/288 DPI；用户已通过 Settings 保存 OpenRouter Key 并完成真实 ASR。Azure 按 2026-09-03 官方 MAI 文档使用 `enhancedMode.enabled=true`，locale 使用 `zh/en/yue`。
 >
 > 目标：在 VoxType 中新增一个 `Microsoft MAI-Transcribe 2` ASR 后端，Settings 可选择 `OpenRouter` 或 `Azure Speech API`；当前优先交付用户已有凭据可用的 OpenRouter batch 路径。
 
@@ -134,7 +136,7 @@ definition  application/json 配置
 
 ```json
 {
-  "locales": ["zh-CN"],
+  "locales": ["zh"],
   "enhancedMode": {
     "enabled": true,
     "model": "MAI-Transcribe-2",
@@ -237,9 +239,9 @@ Language            [Auto ▼]
 | Settings | OpenRouter | Azure |
 |---|---|---|
 | Auto | 省略 `language` | 省略 `locales` |
-| Chinese | `zh` | `zh-CN` |
-| English | `en` | `en-US` |
-| Cantonese | `yue` | `yue-CN`，实施前由 live probe 确认 Azure 接受的 locale |
+| Chinese | `zh` | `zh` |
+| English | `en` | `en` |
+| Cantonese | `yue` | `yue` |
 
 UI 行为：
 
@@ -699,7 +701,7 @@ transport = batch_http_wav_multipart        // Azure
 工作项：
 
 - 验证 API version、model name 和 endpoint path。
-- 验证 `clean`、auto locale、zh-CN/en-US/yue locale。
+- 验证 `clean`、auto locale、zh/en/yue locale。
 - 验证 `combinedPhrases`、silence、401/403/404/429/5xx envelope。
 - 验证 Azure public preview 的地区可用性。
 

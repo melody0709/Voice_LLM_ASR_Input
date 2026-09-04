@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  当前版本：<code>v0.9.25</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
+  当前版本：<code>v0.9.27</code> &nbsp;|&nbsp; 🇬🇧 <a href="../README.md">English</a>
 </p>
 
 https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
@@ -31,7 +31,7 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 - **实时 HUD** — 录音时底部显示悬浮胶囊窗，5 根音量条随声音跳动
 - **双 VAD 可选** — Silero VAD（轻量）/ FireRed VAD（高精度 F1 97.57），智能跳过静音
 - **LLM 纠错（可选）** — 支持 DeepSeek / OpenRouter / SiliconFlow 等多供应商，一键配置
-- **Cloud ASR（可选）** — 支持火山引擎（豆包）、百度智能云、Qwen ASR（旧版 `qwen3-asr-flash-realtime`、Audio 3 HTTP `qwen-audio-3.0-asr-flash`、Audio 3 streaming `qwen-audio-3.0-asr-flash-streaming`）、小米 MiMo ASR（`mimo-v2.5-asr`）、实验性豆包输入法 ASR，以及逆向还原的千问输入法（`qwen_free`，需本机已安装千问 IME）作为替代后端，并支持可选 fallback ASR
+- **Cloud ASR（可选）** — 支持火山引擎（豆包）、百度智能云、Qwen ASR、小米 MiMo ASR、Microsoft MAI Transcribe 2（OpenRouter / Azure）、实验性豆包输入法 ASR，以及逆向还原的千问输入法（`qwen_free`，需本机已安装千问 IME），并支持可选 fallback ASR
 
 ## Quick Start
 
@@ -123,7 +123,7 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 - `Basic Fix` / `Deep Fix` — 预设按钮，一键填入不同纠错力度的 System Prompt
 
 **Cloud ASR tab**
-- `Provider` — 选择 `Volcano Engine (Doubao)` / `Baidu Cloud` / `Qwen ASR (DashScope)` / `MiMo ASR (Xiaomi)` / `Doubao IME (Free)` / `Qwen IME (Free)`，下方控件动态切换
+- `Provider` — 选择 `Volcano Engine (Doubao)` / `Baidu Cloud` / `Qwen ASR (DashScope)` / `MiMo ASR (Xiaomi)` / `Microsoft MAI Transcribe 2` / `Doubao IME (Free)` / `Qwen IME (Free)`，下方控件动态切换
 - **Baidu Cloud**：`API Key` / `Secret Key`（DPAPI 加密）+ `Language Model`（普通话/英语/粤语/四川话）+ `Test Connection`
 - **Volcano Engine (Doubao)**：`API Key`（DPAPI 加密）+ `ASR Mode` + `Model Version` + `Language` + `Test Connection`
   - ASR Mode：`bigmodel_nostream`（推荐，准确率最高）/ `bigmodel_async`（最佳延迟）/ `bigmodel`（实时部分结果）
@@ -139,6 +139,7 @@ https://github.com/user-attachments/assets/36243dc2-cfc8-41fb-b0cf-6e558f02cd5e
 - **MiMo ASR (Xiaomi)**：`API Key`（DPAPI 加密）+ `Base URL` + `Model` + `Language` + `Test Connection`
   - 默认 Base URL：`https://token-plan-ams.xiaomimimo.com/v1`
   - 默认模型：`mimo-v2.5-asr`；音频会封装为 WAV 后通过 `/chat/completions` 上传
+- **Microsoft MAI Transcribe 2**：API 通道可选 `OpenRouter` 或 `Azure Speech API`，两套凭据分别使用 DPAPI 加密保存；支持 Auto/中文/英文/粤语和当前通道连接测试。OpenRouter 固定使用 `microsoft/mai-transcribe-2`，Azure Fast Transcription 固定使用 `MAI-Transcribe-2`。两条链路均在松开按键后上传完整 WAV，只返回 final，不支持 partial。
 - **Doubao IME (Free)**：无 API Key 输入框。实验 provider 会注册豆包输入法风格设备，保存 device id/cdid 和 DPAPI 加密 token，将 PCM 编码为 Opus，并使用非官方 `frontier-audio-ime-ws.doubao.com` WebSocket 协议；可用性、额度和服务条款不做保证。
   - Doubao IME 绕过本地 VAD，依赖输入法服务自己的分段；一次热键按住期间的 partial HUD 和 final 文本会跨云端分段累计，长录音松手后按合并后的整段结果上屏。作为 Fallback 使用时，Doubao IME 会用同一段原始 PCM 发起 recorded request，并把刷新后的凭据写回配置。
   - Qwen、千问 IME Free、火山引擎和 Doubao IME 的 streaming partial HUD 统一为仅影响显示的清屏模式：三行正文内实时显示，超过后清空前文并从当前最后一句重新开始；新页继续累积到再次超过三行，最终上屏文本仍保持完整。
@@ -229,6 +230,7 @@ CHANGELOG.md        — 版本变更记录
 详见 [CHANGELOG.md](CHANGELOG.md)
 
 **最近更新：**
+- **v0.9.27** — 新增 Microsoft MAI Transcribe 2 batch ASR，支持 OpenRouter/Azure 双通道、独立 DPAPI 凭据、final-only Settings 提示、retry/fallback/诊断/replay 共用链路及离线协议回归测试
 - **v0.9.25** — 为全部 ASR stage 增加共用失败录音诊断、有界本地 WAV/JSON 留存、Settings 打开/删除入口、通用跨后端 WAV replay 和回归测试；同时更新并加固 LLM 供应商/请求链路
 - **v0.9.9** — 恢复 Local 及其他 batch ASR 后端的共用录音中 HUD 音量动画；音量条重新亮起并跳动，同时保持 v0.9.3 的云端“先启动采集”顺序不变
 - **v0.9.8** — 统一 CMake/Ninja 发布链路，提供已验证的 Portable 与 MSI 包、MSI 升级/目录选择、便携版数据隔离和开机自启动设置

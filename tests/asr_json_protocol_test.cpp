@@ -2,12 +2,15 @@
 // 无网络、无 WinHTTP 实际调用，只验证纯协议函数。
 
 #include <windows.h>
+#include <algorithm>
 #include <climits>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #include "utils.h"
 #include "baidu_asr.h"       // ExtractJsonInt / ExtractBaiduResultText
+#include "mai_transcribe.h"
 #include "volcengine_asr.h"  // BuildExtraParamsJson
 
 // 离线测试桩：不链接真实日志实现（其依赖 globals.h → sherpa-onnx 等重头文件），
@@ -145,6 +148,89 @@ int wmain() {
               "baidu fractional number rejected");
         CHECK(baidu_asr::ExtractJsonInt("{\"n\":--1}", "n", 7) == 7,
               "baidu malformed number rejected");
+    }
+    // 16) OpenRouter MAI 请求固定模型，Auto 省略 language。
+    {
+        CHECK(mai_transcribe::EncodeBase64ForTest({'a', 'b', 'c'}) == "YWJj",
+              "mai base64 has no line breaks");
+        const std::string automatic =
+            mai_transcribe::BuildOpenRouterJsonForTest("YWJj", L"auto");
+        CHECK(automatic.find("\"model\":\"microsoft/mai-transcribe-2\"") !=
+                  std::string::npos &&
+              automatic.find("\"format\":\"wav\"") != std::string::npos &&
+              automatic.find("\"language\"") == std::string::npos,
+              "mai openrouter automatic request");
+        const std::string cantonese =
+            mai_transcribe::BuildOpenRouterJsonForTest("YWJj", L"yue");
+        CHECK(cantonese.find("\"language\":\"yue\"") != std::string::npos,
+              "mai openrouter language request");
+    }
+    // 17) OpenRouter response 使用共享严格 JSON 解码。
+    {
+        std::wstring expected = L"say \"hi\" ";
+        expected.push_back(0xD83D);
+        expected.push_back(0xDE00);
+        CHECK(mai_transcribe::ParseOpenRouterTextForTest(
+                  "{\"text\":\"say \\\"hi\\\" \\ud83d\\ude00\",\"usage\":{}}") ==
+                  expected,
+              "mai openrouter response decoded");
+        CHECK(mai_transcribe::ParseOpenRouterTextForTest(
+                  "{\"text\":\"partial\"").empty(),
+              "mai openrouter malformed response rejected");
+    }
+    // 18) Azure multipart 使用 enhancedMode、固定模型和原始 WAV。
+    {
+        const std::vector<BYTE> wav = {'R', 'I', 'F', 'F', 0, 1, 2, 3};
+        const std::string boundary = "----VoxTypeTestBoundary";
+        const std::vector<BYTE> multipart =
+            mai_transcribe::BuildAzureMultipartForTest(wav, L"zh", boundary);
+        const std::string body(multipart.begin(), multipart.end());
+        CHECK(body.find("--" + boundary + "\r\n") == 0 &&
+              body.find("\"locales\":[\"zh\"]") != std::string::npos &&
+              body.find("\"enhancedMode\":{\"enabled\":true") !=
+                  std::string::npos &&
+              body.find("\"transcriptionMode\"") == std::string::npos &&
+              body.find("\"model\":\"MAI-Transcribe-2\"") !=
+                  std::string::npos &&
+              body.rfind("--" + boundary + "--\r\n") ==
+                  body.size() - boundary.size() - 6,
+              "mai azure multipart shape");
+        CHECK(std::search(multipart.begin(), multipart.end(),
+                          wav.begin(), wav.end()) != multipart.end(),
+              "mai azure multipart preserves wav bytes");
+        const std::vector<BYTE> automaticMultipart =
+            mai_transcribe::BuildAzureMultipartForTest(wav, L"auto", boundary);
+        const std::string automatic(automaticMultipart.begin(),
+                                    automaticMultipart.end());
+        CHECK(automatic.find("\"locales\"") == std::string::npos,
+              "mai azure automatic omits locales");
+    }
+    // 19) Azure combinedPhrases 多项聚合并严格拒绝畸形 JSON。
+    {
+        const std::string body =
+            "{\"combinedPhrases\":[{\"text\":\"hello\"},{\"text\":\"\\u4e16\\u754c\"}],"
+            "\"phrases\":[]}";
+        CHECK(mai_transcribe::ParseAzureTextForTest(body) == L"hello \u4e16\u754c",
+              "mai azure combined phrases decoded");
+        CHECK(mai_transcribe::ParseAzureTextForTest(
+                  "{\"combinedPhrases\":[{\"text\":1}]}").empty(),
+              "mai azure malformed phrase rejected");
+    }
+    // 20) Azure Endpoint 只接受 HTTPS resource root。
+    {
+        std::wstring error;
+        CHECK(mai_transcribe::ValidateAzureEndpointForTest(
+                  L"https://example.cognitiveservices.azure.com/", error),
+              "mai azure endpoint accepted");
+        CHECK(!mai_transcribe::ValidateAzureEndpointForTest(
+                  L"http://example.test", error),
+              "mai azure http rejected");
+        CHECK(!mai_transcribe::ValidateAzureEndpointForTest(
+                  L"https://example.test/custom/path", error),
+              "mai azure path rejected");
+        CHECK(!mai_transcribe::ValidateAzureEndpointForTest(
+                  L"https://example.test/?api-version=bad", error),
+              "mai azure query rejected");
     }
 
     if (g_failures == 0) {
