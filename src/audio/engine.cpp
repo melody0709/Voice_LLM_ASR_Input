@@ -903,33 +903,40 @@ void CALLBACK WaveInProc(HWAVEIN waveIn, UINT msg, DWORD_PTR, DWORD_PTR param1, 
     auto* header = reinterpret_cast<WAVEHDR*>(param1);
     if (!header) return;
 
-    if (header->dwBytesRecorded > 0) {
+    if (header->dwBytesRecorded > 0 &&
+        !g_captureSuppressed.load(std::memory_order_acquire)) {
         const BYTE* begin = reinterpret_cast<const BYTE*>(header->lpData);
         audio_diagnostics::RecordWaveInPcm16(begin, header->dwBytesRecorded);
         g_audioLevel.store(CalculateAudioLevel(begin, header->dwBytesRecorded));
 
         EnterCriticalSection(&g_audioLock);
-        g_audioData.insert(g_audioData.end(), begin, begin + header->dwBytesRecorded);
-        // Keep the audio lock until the same block has either been enqueued or
-        // observed with no active session. ActivateStreamingSession takes the
-        // locks in this order, so replay+install cannot split this operation
-        // and enqueue the same PCM block twice.
-        EnterCriticalSection(&g_streamingSessionCs);
-        if (g_activeStreamingSession && g_activeStreamingSession->IsRunning()) {
-            const bool useStreamingVadTrim = g_streamingVadTrimmer && g_streamingVadTrimmer->IsActive();
-            if (useStreamingVadTrim) {
-                std::vector<std::vector<BYTE>> streamingOutputs;
-                g_streamingVadTrimmer->ProcessPcm16(begin, header->dwBytesRecorded, streamingOutputs);
-                for (const auto& chunk : streamingOutputs) {
-                    if (!chunk.empty()) {
-                        g_activeStreamingSession->EnqueuePcmChunk(chunk.data(), chunk.size());
+        // Re-check under the lock: StopAudioCapture sets the suppression flag
+        // and hands out g_audioData atomically under this same lock.  A
+        // callback that passed the outer check just before the pause must not
+        // append stale PCM into the cleared buffer.
+        if (!g_captureSuppressed.load(std::memory_order_acquire)) {
+            g_audioData.insert(g_audioData.end(), begin, begin + header->dwBytesRecorded);
+            // Keep the audio lock until the same block has either been enqueued or
+            // observed with no active session. ActivateStreamingSession takes the
+            // locks in this order, so replay+install cannot split this operation
+            // and enqueue the same PCM block twice.
+            EnterCriticalSection(&g_streamingSessionCs);
+            if (g_activeStreamingSession && g_activeStreamingSession->IsRunning()) {
+                const bool useStreamingVadTrim = g_streamingVadTrimmer && g_streamingVadTrimmer->IsActive();
+                if (useStreamingVadTrim) {
+                    std::vector<std::vector<BYTE>> streamingOutputs;
+                    g_streamingVadTrimmer->ProcessPcm16(begin, header->dwBytesRecorded, streamingOutputs);
+                    for (const auto& chunk : streamingOutputs) {
+                        if (!chunk.empty()) {
+                            g_activeStreamingSession->EnqueuePcmChunk(chunk.data(), chunk.size());
+                        }
                     }
+                } else {
+                    g_activeStreamingSession->EnqueuePcmChunk(begin, header->dwBytesRecorded);
                 }
-            } else {
-                g_activeStreamingSession->EnqueuePcmChunk(begin, header->dwBytesRecorded);
             }
+            LeaveCriticalSection(&g_streamingSessionCs);
         }
-        LeaveCriticalSection(&g_streamingSessionCs);
         LeaveCriticalSection(&g_audioLock);
     }
 
@@ -959,7 +966,40 @@ void CALLBACK WaveInProc(HWAVEIN waveIn, UINT msg, DWORD_PTR, DWORD_PTR param1, 
 bool StartAudioCapture(std::wstring& error,
                        AudioCaptureStartFailure* failure) {
     if (failure) *failure = {};
-    if (g_waveIn || g_wasapiCapture.IsInitialized()) return true;
+    // Any capture start cancels a pending keep-alive teardown.
+    if (g_mainWindow) KillTimer(g_mainWindow, kMicKeepAliveTimer);
+
+    const bool deviceOpen = g_waveIn || g_wasapiCapture.IsInitialized();
+    if (deviceOpen && g_audioCaptureFailurePending.load(std::memory_order_acquire)) {
+        // A keep-alive device can fail before its posted UI message is handled.
+        // Do not revive a dead capture thread and then erase its failure state.
+        CloseAudioCapture();
+    } else if (deviceOpen) {
+        // Keep-alive resume: the device is still open from the previous
+        // session.  Skip Init/Start entirely; just re-arm PCM accumulation.
+        if (g_captureSuppressed.load(std::memory_order_acquire)) {
+            if (audio_diagnostics::NormalizeMode(g_config.diagnosticAudioMode) != L"off" ||
+                g_config.enableDebugMode) {
+                audio_diagnostics::ResetCapture();
+            } else {
+                audio_diagnostics::CancelCapture();
+            }
+            g_audioLevel.store(0.0f);
+            g_hudSmoothedLevel = 0.0f;
+            // Clear-then-unsuppress under the audio lock: callbacks append and
+            // re-check the suppression flag under this same lock, so a packet
+            // arriving between the two operations can neither be cleared after
+            // being appended nor appended after being cleared.
+            EnterCriticalSection(&g_audioLock);
+            g_audioData.clear();
+            g_captureSuppressed.store(false, std::memory_order_release);
+            LeaveCriticalSection(&g_audioLock);
+            asr_runtime_log::Write("event=capture_keepalive_resume backend=%s",
+                                   g_wasapiCapture.IsInitialized() ? "wasapi" : "wavein");
+        }
+        return true;
+    }
+    g_captureSuppressed.store(false, std::memory_order_release);
 
     const uint64_t generation =
         g_audioCaptureGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
@@ -1071,7 +1111,10 @@ bool StartAudioCapture(std::wstring& error,
     }
     audio_diagnostics::SetCaptureDeviceInfo(waveInDevice);
 
-    g_waveBuffers.assign(4, std::vector<BYTE>(format.nAvgBytesPerSec / 10));
+    // 20 ms buffers (8 in rotation) bound the in-flight tail residue at pause
+    // time to <=20 ms; with 100 ms buffers up to 100 ms of the stop-delay
+    // padding could sit undelivered inside the driver.
+    g_waveBuffers.assign(8, std::vector<BYTE>(format.nAvgBytesPerSec / 50));
     ZeroMemory(g_waveHeaders, sizeof(g_waveHeaders));
     g_captureActive = true;
 
@@ -1159,6 +1202,28 @@ bool StartAudioCapture(std::wstring& error,
 }
 
 std::vector<BYTE> StopAudioCapture() {
+    // Pause, not teardown: suppress PCM accumulation under the audio lock so
+    // no callback can append after the collected data has been handed out,
+    // then keep the device open for keep-alive reuse.  Capture callbacks
+    // check g_captureSuppressed under the same lock, so this is race-free.
+    std::vector<BYTE> data;
+    EnterCriticalSection(&g_audioLock);
+    g_captureSuppressed.store(true, std::memory_order_release);
+    data = g_audioData;
+    g_audioData.clear();
+    LeaveCriticalSection(&g_audioLock);
+    g_audioLevel.store(0.0f);
+
+    const bool deviceOpen = g_wasapiCapture.IsInitialized() || g_waveIn != nullptr;
+    if (deviceOpen && g_mainWindow) {
+        SetTimer(g_mainWindow, kMicKeepAliveTimer, kMicKeepAliveMs, nullptr);
+    }
+    return data;
+}
+
+void CloseAudioCapture() {
+    if (g_mainWindow) KillTimer(g_mainWindow, kMicKeepAliveTimer);
+    g_captureSuppressed.store(true, std::memory_order_release);
     // Invalidate runtime-failure messages before stopping either capture API.
     // WASAPI and waveIn may still have one callback in flight while their
     // handles are being released; the generation guard prevents that callback
@@ -1179,13 +1244,11 @@ std::vector<BYTE> StopAudioCapture() {
     }
     g_audioLevel.store(0.0f);
 
-    std::vector<BYTE> data;
     EnterCriticalSection(&g_audioLock);
-    data = g_audioData;
     g_audioData.clear();
+    g_captureSuppressed.store(false, std::memory_order_release);
     LeaveCriticalSection(&g_audioLock);
     g_waveBuffers.clear();
-    return data;
 }
 
 int ResolveThreads(const std::wstring& threads) {

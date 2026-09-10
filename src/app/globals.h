@@ -65,12 +65,26 @@ constexpr UINT kWaveInCaptureErrorMessage = WM_APP + 13;
 constexpr WPARAM kHotkeyRecordingStart = 1;
 constexpr WPARAM kHotkeyRecordingStop = 2;
 constexpr WPARAM kHotkeyCapsLockRecordingStop = 3;
+// CapsLock KEYDOWN starts capture immediately (300 ms long-press verdict is
+// deferred); a short press discards the pending capture instead.
+constexpr WPARAM kHotkeyCaptureBegin = 4;
+constexpr WPARAM kHotkeyCaptureDiscard = 5;
 constexpr UINT kTrayId = 1;
 constexpr UINT_PTR kHudHideTimer = 1;
 constexpr UINT_PTR kCapsLockLongPressTimer = 2;
 constexpr UINT_PTR kHudAnimationTimer = 3;
 constexpr UINT_PTR kStreamingWatchdogTimer = 4;
+constexpr UINT_PTR kRecordingStopDelayTimer = 5;
+constexpr UINT_PTR kMicKeepAliveTimer = 6;
 constexpr UINT kCapsLockLongPressMs = 300;
+// Key-up does not stop capture immediately; the short delay keeps the tail of
+// the utterance inside the capture window and lets a quick re-press continue
+// the same recording.
+constexpr UINT kRecordingStopDelayMs = 150;
+// After a recording stops (or a pending capture is discarded), the microphone
+// device stays open this long so back-to-back recordings and CapsLock taps do
+// not pay the device open cost again.
+constexpr UINT kMicKeepAliveMs = 2500;
 // HUD layout constants — all in DIP; convert to physical pixels via DipToPx().
 constexpr float kHudMinWidthDip = 300.0f;
 constexpr float kHudMinHeightDip = 56.0f;
@@ -538,11 +552,14 @@ extern bool g_capsLockLongPressActive;
 extern bool g_capsLockWasOn;
 extern std::wstring g_hudText;
 extern HWAVEIN g_waveIn;
-extern WAVEHDR g_waveHeaders[4];
+extern WAVEHDR g_waveHeaders[8];
 extern std::vector<std::vector<BYTE>> g_waveBuffers;
 extern std::vector<BYTE> g_audioData;
 extern CRITICAL_SECTION g_audioLock;
 extern std::atomic<bool> g_captureActive;
+// Keep-alive: capture pipeline stays hot after a session but incoming PCM is
+// discarded instead of being appended/enqueued.
+extern std::atomic<bool> g_captureSuppressed;
 extern std::atomic<uint64_t> g_audioCaptureGeneration;
 extern std::atomic<bool> g_audioCaptureFailurePending;
 extern std::atomic<DWORD> g_audioCaptureFailureCode;

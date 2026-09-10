@@ -71,7 +71,13 @@ struct AudioCaptureStartFailure {
 
 bool StartAudioCapture(std::wstring& error,
                        AudioCaptureStartFailure* failure = nullptr);
+// Pauses PCM accumulation and returns what was collected.  The device stays
+// open (keep-alive) so a subsequent StartAudioCapture can resume instantly;
+// the device is torn down by CloseAudioCapture once the keep-alive expires.
 std::vector<BYTE> StopAudioCapture();
+// Full teardown of the capture device (keep-alive expiry, capture failure,
+// settings reload, application exit).
+void CloseAudioCapture();
 int ResolveThreads(const std::wstring& threads);
 
 struct HiResTimer {

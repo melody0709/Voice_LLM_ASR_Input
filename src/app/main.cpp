@@ -90,12 +90,27 @@ bool g_capsLockLongPressActive = false;
 bool g_capsLockWasOn = false;
 std::wstring g_hudText = L"Ready";
 HWAVEIN g_waveIn = nullptr;
-WAVEHDR g_waveHeaders[4] = {};
+WAVEHDR g_waveHeaders[8] = {};
 std::vector<std::vector<BYTE>> g_waveBuffers;
 std::vector<BYTE> g_audioData;
 CRITICAL_SECTION g_audioLock;
 std::atomic<bool> g_captureActive{false};
+std::atomic<bool> g_captureSuppressed{false};
 std::atomic<uint64_t> g_audioCaptureGeneration{0};
+// CapsLock capture-only phase: the microphone is already recording PCM while
+// the 300 ms long-press verdict is still pending (main-thread only).
+static bool g_capturePendingOnly = false;
+// Set when a delayed stop came from the CapsLock path and must restore the
+// CapsLock toggle state once the stop-delay timer fires (main-thread only).
+static bool g_stopDelayRestoreCapsLock = false;
+// A stop-delay timer is currently armed (main-thread only).
+static bool g_stopDelayPending = false;
+// A CapsLock re-press interrupted an armed stop-delay and is waiting for its
+// own 300 ms verdict; a tap re-arms the held stop (main-thread only).
+static bool g_stopDelayHeldForRepress = false;
+// Settings were reloaded while capture was busy; the device must be closed
+// (not kept alive) when the current capture ends (main-thread only).
+static bool g_captureConfigStale = false;
 std::atomic<bool> g_audioCaptureFailurePending{false};
 std::atomic<DWORD> g_audioCaptureFailureCode{0};
 std::atomic<bool> g_audioCaptureFailureWasapi{false};
@@ -1580,7 +1595,36 @@ static void HandleAudioCaptureFailure(uint64_t generation,
                                       bool wasapi) {
     const uint64_t currentGeneration =
         g_audioCaptureGeneration.load(std::memory_order_acquire);
-    if (generation == 0 || generation != currentGeneration || !g_recording) {
+    if (generation == 0 || generation != currentGeneration) {
+        asr_runtime_log::Write(
+            "event=capture_runtime_failed_stale generation=%llu current=%llu source=%s code=0x%08lx recording=%d",
+            static_cast<unsigned long long>(generation),
+            static_cast<unsigned long long>(currentGeneration),
+            wasapi ? "wasapi" : "wavein",
+            static_cast<unsigned long>(code),
+            g_recording ? 1 : 0);
+        return;
+    }
+
+    if (!g_recording) {
+        // Failure outside an active recording: the capture-only pending phase
+        // or the keep-alive window.  The device is suspect, so tear it down
+        // silently; the next key press opens a fresh one.
+        if (g_capturePendingOnly || g_captureSuppressed.load(std::memory_order_acquire)) {
+            const bool wasPending = g_capturePendingOnly;
+            const bool wasKeepAlive = g_captureSuppressed.load(std::memory_order_acquire);
+            g_capturePendingOnly = false;
+            g_captureConfigStale = false;
+            asr_runtime_log::Write(
+                "event=capture_idle_failed generation=%llu source=%s code=0x%08lx pending=%d keepalive=%d",
+                static_cast<unsigned long long>(generation),
+                wasapi ? "wasapi" : "wavein",
+                static_cast<unsigned long>(code),
+                wasPending ? 1 : 0,
+                wasKeepAlive ? 1 : 0);
+            CloseAudioCapture();
+            return;
+        }
         asr_runtime_log::Write(
             "event=capture_runtime_failed_stale generation=%llu current=%llu source=%s code=0x%08lx recording=%d",
             static_cast<unsigned long long>(generation),
@@ -1597,14 +1641,91 @@ static void HandleAudioCaptureFailure(uint64_t generation,
 
     // Capture failure is a local input fault, not a partial ASR result.  Stop
     // and discard the active provider session instead of sending incomplete
-    // PCM into fallback or pasting a truncated transcript.
+    // PCM into fallback or pasting a truncated transcript.  A failed device
+    // must not be kept alive, so close it right after collecting the PCM.
     const std::vector<BYTE> pcm = StopAudioCapture();
+    g_captureConfigStale = false;
+    CloseAudioCapture();
     FinishAudioCaptureFailure(generation, code, wasapi, attemptId, recordingMs, pcm);
 }
 
+// CapsLock KEYDOWN starts capture immediately; the ASR session is only built
+// if the key is still held at the 300 ms mark.  A short press discards the
+// pending capture (plain CapsLock toggle), so this phase never shows a HUD,
+// never creates an ASR attempt, and never reports errors to the user.
+static void BeginCaptureOnly() {
+    if (g_recording) {
+        // CapsLock re-press while a stop-delay is armed: hold the stop until
+        // the 300 ms verdict.  The confirm (kHotkeyRecordingStart) keeps the
+        // recording going; a tap re-arms the held stop in DiscardPendingCapture.
+        // Without this the 150 ms stop-delay always fires before the 300 ms
+        // confirm and a quick CapsLock re-press splits the recording.
+        if (g_stopDelayPending) {
+            KillTimer(g_mainWindow, kRecordingStopDelayTimer);
+            g_stopDelayPending = false;
+            g_stopDelayHeldForRepress = true;
+            // A second tap must keep its normal CapsLock toggle; the original
+            // long-press stop no longer has any toggle state to restore.
+            g_stopDelayRestoreCapsLock = false;
+        }
+        return;
+    }
+    if (g_capturePendingOnly) return;
+    std::wstring error;
+    AudioCaptureStartFailure captureFailure;
+    if (!StartAudioCapture(error, &captureFailure)) {
+        // Silent: a short press must not surface mic errors.  If the key is
+        // still held at 300 ms, StartRecordingSession retries the open and
+        // reports through the normal failure path.
+        asr_runtime_log::Write(
+            "event=capture_pending_start_failed capture_backends=%s terminal_backend=%s phase=%s code=%lu",
+            WideToUtf8(captureFailure.attemptedBackends).c_str(),
+            WideToUtf8(captureFailure.terminalBackend).c_str(),
+            WideToUtf8(captureFailure.phase).c_str(),
+            static_cast<unsigned long>(captureFailure.code));
+        return;
+    }
+    g_capturePendingOnly = true;
+    g_sessionStartTick = GetTickCount64();
+}
+
+static void DiscardPendingCapture() {
+    if (!g_capturePendingOnly) {
+        // The re-press that held a stop-delay turned out to be a plain tap:
+        // resume the held stop so the recording still ends.
+        if (g_stopDelayHeldForRepress) {
+            g_stopDelayHeldForRepress = false;
+            g_stopDelayPending = true;
+            SetTimer(g_mainWindow, kRecordingStopDelayTimer, kRecordingStopDelayMs, nullptr);
+        }
+        return;
+    }
+    g_capturePendingOnly = false;
+    // PCM is dropped; the device stays open via the keep-alive window so a
+    // burst of CapsLock taps does not churn the microphone.
+    StopAudioCapture();
+    if (g_captureConfigStale) {
+        g_captureConfigStale = false;
+        CloseAudioCapture();
+    }
+    audio_diagnostics::CancelCapture();
+    asr_runtime_log::Write("event=capture_pending_discarded");
+}
+
 void StartRecordingSession() {
-    if (g_recording) return;
     if (g_hudWindow) KillTimer(g_hudWindow, kHudHideTimer);
+    // A key press inside the stop-delay window continues the current
+    // recording instead of letting the delayed stop fire.
+    KillTimer(g_mainWindow, kRecordingStopDelayTimer);
+    g_stopDelayPending = false;
+    g_stopDelayHeldForRepress = false;
+    g_stopDelayRestoreCapsLock = false;
+    if (g_recording) return;
+
+    // CapsLock path: capture has been running since KEYDOWN and the PCM
+    // collected so far becomes the head of this recording.
+    const bool resumePendingCapture = g_capturePendingOnly;
+    g_capturePendingOnly = false;
 
     g_hudIsRefining = false;
     g_hudHasSpoken = false;
@@ -1621,29 +1742,31 @@ void StartRecordingSession() {
     auto supersededStreamingSession = TakeActiveStreamingSession();
     ResetStreamingVadTrimmerState();
 
-    std::wstring error;
-    AudioCaptureStartFailure captureFailure;
-    if (!StartAudioCapture(error, &captureFailure)) {
-        if (supersededStreamingSession) {
-            supersededStreamingSession->Abort();
-            supersededStreamingSession.reset();
+    if (!resumePendingCapture) {
+        std::wstring error;
+        AudioCaptureStartFailure captureFailure;
+        if (!StartAudioCapture(error, &captureFailure)) {
+            if (supersededStreamingSession) {
+                supersededStreamingSession->Abort();
+                supersededStreamingSession.reset();
+            }
+            const uint64_t attemptId = RecordCaptureStartFailure(
+                g_config, captureFailure);
+            asr_runtime_log::Write(
+                "event=capture_start_failed attempt=%llu primary=%s capture_backends=%s terminal_backend=%s phase=%s code=%lu error_chars=%zu",
+                static_cast<unsigned long long>(attemptId),
+                AsrBackendLogName(g_config.asrBackend),
+                WideToUtf8(captureFailure.attemptedBackends).c_str(),
+                WideToUtf8(captureFailure.terminalBackend).c_str(),
+                WideToUtf8(captureFailure.phase).c_str(),
+                static_cast<unsigned long>(captureFailure.code),
+                error.size());
+            ShowHud(error);
+            if (g_hudWindow) SetTimer(g_hudWindow, kHudHideTimer, 1800, nullptr);
+            return;
         }
-        const uint64_t attemptId = RecordCaptureStartFailure(
-            g_config, captureFailure);
-        asr_runtime_log::Write(
-            "event=capture_start_failed attempt=%llu primary=%s capture_backends=%s terminal_backend=%s phase=%s code=%lu error_chars=%zu",
-            static_cast<unsigned long long>(attemptId),
-            AsrBackendLogName(g_config.asrBackend),
-            WideToUtf8(captureFailure.attemptedBackends).c_str(),
-            WideToUtf8(captureFailure.terminalBackend).c_str(),
-            WideToUtf8(captureFailure.phase).c_str(),
-            static_cast<unsigned long>(captureFailure.code),
-            error.size());
-        ShowHud(error);
-        if (g_hudWindow) SetTimer(g_hudWindow, kHudHideTimer, 1800, nullptr);
-        return;
+        g_sessionStartTick = GetTickCount64();
     }
-    g_sessionStartTick = GetTickCount64();
     g_recording = true;
 
     // Preserve the capture-first startup order introduced for streaming head
@@ -1790,6 +1913,9 @@ void StartRecordingSession() {
     g_streamingVadSamples.clear();
     if (attemptConfig.asrBackend == L"local" && attemptConfig.enableVad) {
         const int threads = ResolveThreads(attemptConfig.threads);
+        // Model load stays OUTSIDE g_audioLock: EnsureVadForConfig can take
+        // hundreds of ms and holding the audio lock across it would stall the
+        // capture callback until the driver buffer overruns.
         g_asrEngine.Lock();
         bool ok = g_asrEngine.EnsureVadForConfig(attemptConfig, threads);
         if (ok) {
@@ -1800,7 +1926,35 @@ void StartRecordingSession() {
             }
         }
         g_asrEngine.Unlock();
-        g_streamingVadReady = ok;
+        if (ok) {
+            // g_audioLock is held across prefix-feed+ready so a capture
+            // callback cannot feed the VAD out of order: callbacks append and
+            // read g_streamingVadReady under the same lock, and no code path
+            // holds the engine lock while waiting on g_audioLock.  The prefix
+            // is at most a few hundred ms of PCM, so this section is fast.
+            EnterCriticalSection(&g_audioLock);
+            g_asrEngine.Lock();
+            // Feed PCM collected during the capture-only pending phase; the
+            // callbacks only start feeding the VAD once g_streamingVadReady
+            // is set, so without this the first <=300 ms would be invisible
+            // to the VAD and could be trimmed as silence at stop time.
+            if (!g_audioData.empty()) {
+                const int16_t* pcm16 = reinterpret_cast<const int16_t*>(g_audioData.data());
+                const size_t frames = g_audioData.size() / sizeof(int16_t);
+                std::vector<float> floatBuf(frames);
+                for (size_t i = 0; i < frames; ++i) {
+                    floatBuf[i] = static_cast<float>(pcm16[i]) / 32768.0f;
+                }
+                if (attemptConfig.vadModel == L"firered") {
+                    g_asrEngine.fireRedVad->Process(floatBuf.data(), static_cast<int>(floatBuf.size()));
+                } else {
+                    g_asrEngine.vad->AcceptWaveform(floatBuf.data(), static_cast<int32_t>(floatBuf.size()));
+                }
+            }
+            g_streamingVadReady = true;
+            g_asrEngine.Unlock();
+            LeaveCriticalSection(&g_audioLock);
+        }
     }
 }
 
@@ -1839,6 +1993,9 @@ void StopRecordingSession() {
         g_audioCaptureGeneration.load(std::memory_order_acquire);
     const std::vector<BYTE> pcm = StopAudioCapture();
     if (g_audioCaptureFailurePending.load(std::memory_order_acquire)) {
+        // The capture failed underneath this stop; do not keep the device.
+        g_captureConfigStale = false;
+        CloseAudioCapture();
         FinishAudioCaptureFailure(
             captureGeneration,
             g_audioCaptureFailureCode.load(std::memory_order_acquire),
@@ -1847,6 +2004,12 @@ void StopRecordingSession() {
             g_recordingMs,
             pcm);
         return;
+    }
+    if (g_captureConfigStale) {
+        // Settings changed while this recording was busy: the device that
+        // StopAudioCapture just kept alive is stale, close it instead.
+        g_captureConfigStale = false;
+        CloseAudioCapture();
     }
 
     if (IsStreamingCloudBackend(recordingConfig) && hasStreamingSession) {
@@ -2035,6 +2198,15 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     case kReloadMessage:
         g_enableDebugMode = g_config.enableDebugMode;
         g_asrEngine.Reload();
+        // Settings may have changed the audio backend/device; drop any
+        // keep-alive device so the next recording reopens with fresh config.
+        // While a capture is busy the device cannot be swapped mid-stream, so
+        // flag it and let the stop path close it instead of keeping it alive.
+        if (!g_recording && !g_capturePendingOnly) {
+            CloseAudioCapture();
+        } else {
+            g_captureConfigStale = true;
+        }
         if (ShouldPreloadLocalAsr(g_config)) {
             const Config cfg = LocalPreloadConfig(g_config);
             std::thread([cfg]() {
@@ -2056,13 +2228,23 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
     case kHotkeyRecordingMessage:
-        if (wParam == kHotkeyRecordingStart) {
+        if (wParam == kHotkeyCaptureBegin) {
+            BeginCaptureOnly();
+        } else if (wParam == kHotkeyCaptureDiscard) {
+            DiscardPendingCapture();
+        } else if (wParam == kHotkeyRecordingStart) {
             StartRecordingSession();
         } else if (wParam == kHotkeyCapsLockRecordingStop) {
-            StopRecordingSession();
-            RestoreCapsLockState();
+            // Key-up starts the stop-delay window; capture keeps running so
+            // the tail of the utterance is collected.  The actual stop (and
+            // CapsLock state restore) happens when the timer fires.
+            g_stopDelayRestoreCapsLock = true;
+            g_stopDelayPending = true;
+            SetTimer(g_mainWindow, kRecordingStopDelayTimer, kRecordingStopDelayMs, nullptr);
         } else if (wParam == kHotkeyRecordingStop) {
-            StopRecordingSession();
+            g_stopDelayRestoreCapsLock = false;
+            g_stopDelayPending = true;
+            SetTimer(g_mainWindow, kRecordingStopDelayTimer, kRecordingStopDelayMs, nullptr);
         }
         return 0;
     case kAudioCaptureErrorMessage:
@@ -2302,6 +2484,24 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             ActivateCapsLockLongPress();
             return 0;
         }
+        if (wParam == kRecordingStopDelayTimer) {
+            KillTimer(hwnd, kRecordingStopDelayTimer);
+            g_stopDelayPending = false;
+            StopRecordingSession();
+            if (g_stopDelayRestoreCapsLock) {
+                g_stopDelayRestoreCapsLock = false;
+                RestoreCapsLockState();
+            }
+            return 0;
+        }
+        if (wParam == kMicKeepAliveTimer) {
+            KillTimer(hwnd, kMicKeepAliveTimer);
+            // Keep-alive expired with no new recording: really close the mic.
+            if (!g_recording && !g_capturePendingOnly) {
+                CloseAudioCapture();
+            }
+            return 0;
+        }
         if (wParam == kStreamingWatchdogTimer) {
             KillTimer(hwnd, kStreamingWatchdogTimer);
             if (g_recording) {
@@ -2393,6 +2593,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     case WM_DESTROY:
         KillTimer(hwnd, kStreamingWatchdogTimer);
+        KillTimer(hwnd, kRecordingStopDelayTimer);
+        KillTimer(hwnd, kMicKeepAliveTimer);
         {
             const uint64_t attemptId = ActiveAsrAttemptId();
             CancelActiveAsrAttempt(attemptId, true);
@@ -2401,8 +2603,9 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         AbortAndResetActiveStreamingSession();
         VolcengineForceAbortAndCloseAll();
+        g_capturePendingOnly = false;
         g_captureActive = false;
-        StopAudioCapture();
+        CloseAudioCapture();
         UninstallKeyboardHook();
         RemoveTrayIcon(hwnd);
         PostQuitMessage(0);

@@ -152,8 +152,20 @@ bool ModifiersMatch(const HotkeyConfig& hotkey) {
     return ctrl == hotkey.ctrl && alt == hotkey.alt && shift == hotkey.shift && win == hotkey.win;
 }
 
+void PostHotkeyRecordingCommand(WPARAM command) {
+    if (g_mainWindow) {
+        PostMessageW(g_mainWindow, kHotkeyRecordingMessage, command, 0);
+    }
+}
+
 void ResetCapsLockHotkeyState() {
     if (g_mainWindow) KillTimer(g_mainWindow, kCapsLockLongPressTimer);
+    if (g_capsLockHotkeyPending) {
+        // The hook is going away mid-press (e.g. settings window opened), so
+        // the 300 ms long-press verdict will never arrive.  Make sure the
+        // capture-only phase started on KEYDOWN cannot be orphaned.
+        PostHotkeyRecordingCommand(kHotkeyCaptureDiscard);
+    }
     g_activeHotkeyKey = 0;
     g_capsLockHotkeyPending = false;
     g_capsLockLongPressActive = false;
@@ -166,12 +178,9 @@ void StartCapsLockHotkeyPress() {
     g_capsLockLongPressActive = false;
     g_capsLockWasOn = IsCapsLockOn();
     if (g_mainWindow) SetTimer(g_mainWindow, kCapsLockLongPressTimer, kCapsLockLongPressMs, nullptr);
-}
-
-void PostHotkeyRecordingCommand(WPARAM command) {
-    if (g_mainWindow) {
-        PostMessageW(g_mainWindow, kHotkeyRecordingMessage, command, 0);
-    }
+    // Capture starts immediately; the 300 ms timer only decides whether the
+    // collected PCM becomes a recording (long press) or is discarded (tap).
+    PostHotkeyRecordingCommand(kHotkeyCaptureBegin);
 }
 
 void ActivateCapsLockLongPress() {
@@ -192,6 +201,9 @@ void FinishCapsLockHotkeyPress() {
     if (wasLongPress) {
         PostHotkeyRecordingCommand(kHotkeyCapsLockRecordingStop);
     } else if (wasShortPress) {
+        // The capture started on KEYDOWN produced nothing useful; have the
+        // main thread discard it, then perform the plain CapsLock toggle.
+        PostHotkeyRecordingCommand(kHotkeyCaptureDiscard);
         SendCapsLockTap();
     }
 }

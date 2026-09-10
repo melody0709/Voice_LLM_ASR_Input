@@ -239,6 +239,23 @@ void WasapiCapture::CaptureThread() {
                 break;
             }
 
+            // Keep-alive: the device stays hot after a session but its PCM is
+            // discarded.  Skip all processing; still release/drain every packet
+            // so the driver queue cannot fill up.
+            if (g_captureSuppressed.load(std::memory_order_acquire)) {
+                hr = m_captureClient->ReleaseBuffer(numFrames);
+                if (FAILED(hr)) {
+                    ReportRuntimeFailure(static_cast<DWORD>(hr));
+                    break;
+                }
+                hr = m_captureClient->GetNextPacketSize(&packetLength);
+                if (FAILED(hr)) {
+                    ReportRuntimeFailure(static_cast<DWORD>(hr));
+                    break;
+                }
+                continue;
+            }
+
             if (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) {
                 audio_diagnostics::RecordCaptureDiscontinuity();
             }
@@ -337,38 +354,49 @@ void WasapiCapture::CaptureThread() {
                     const BYTE* begin = reinterpret_cast<const BYTE*>(out);
                     audio_diagnostics::RecordOutputPcm16(
                         begin, written * sizeof(int16_t));
+                    // Re-check under the lock: StopAudioCapture flips the
+                    // suppression flag and hands out g_audioData atomically
+                    // under this same lock; a packet that passed the early
+                    // check just before the pause must not land in the
+                    // cleared buffer.
                     EnterCriticalSection(&g_audioLock);
-                    g_audioData.insert(g_audioData.end(), begin, begin + written * sizeof(int16_t));
-                    const size_t bytesWritten = written * sizeof(int16_t);
+                    const bool suppressed = g_captureSuppressed.load(std::memory_order_acquire);
+                    bool streamingSessionActive = false;
+                    bool streamingTrimmerActive = false;
+                    bool streamingVadReady = false;
+                    if (!suppressed) {
+                        g_audioData.insert(g_audioData.end(), begin, begin + written * sizeof(int16_t));
+                        const size_t bytesWritten = written * sizeof(int16_t);
 
-                    // Keep insert+enqueue atomic with respect to
-                    // ActivateStreamingSession's replay+install section. Both
-                    // paths use the same audio-lock -> session-lock order.
-                    EnterCriticalSection(&g_streamingSessionCs);
-                    if (g_activeStreamingSession && g_activeStreamingSession->IsRunning()) {
-                        const bool useStreamingVadTrim = g_streamingVadTrimmer && g_streamingVadTrimmer->IsActive();
-                        if (useStreamingVadTrim) {
-                            std::vector<std::vector<BYTE>> streamingOutputs;
-                            g_streamingVadTrimmer->ProcessPcm16(begin, bytesWritten, streamingOutputs);
-                            for (const auto& chunk : streamingOutputs) {
-                                if (!chunk.empty()) {
-                                    g_activeStreamingSession->EnqueuePcmChunk(chunk.data(), chunk.size());
+                        // Keep insert+enqueue atomic with respect to
+                        // ActivateStreamingSession's replay+install section. Both
+                        // paths use the same audio-lock -> session-lock order.
+                        EnterCriticalSection(&g_streamingSessionCs);
+                        if (g_activeStreamingSession && g_activeStreamingSession->IsRunning()) {
+                            const bool useStreamingVadTrim = g_streamingVadTrimmer && g_streamingVadTrimmer->IsActive();
+                            if (useStreamingVadTrim) {
+                                std::vector<std::vector<BYTE>> streamingOutputs;
+                                g_streamingVadTrimmer->ProcessPcm16(begin, bytesWritten, streamingOutputs);
+                                for (const auto& chunk : streamingOutputs) {
+                                    if (!chunk.empty()) {
+                                        g_activeStreamingSession->EnqueuePcmChunk(chunk.data(), chunk.size());
+                                    }
                                 }
+                            } else {
+                                g_activeStreamingSession->EnqueuePcmChunk(begin, bytesWritten);
                             }
-                        } else {
-                            g_activeStreamingSession->EnqueuePcmChunk(begin, bytesWritten);
                         }
+                        // Snapshot the related streaming state under one lock; use only
+                        // the local values after leaving the critical section.
+                        streamingSessionActive = (g_activeStreamingSession != nullptr);
+                        streamingTrimmerActive =
+                            streamingSessionActive && g_streamingVadTrimmer && g_streamingVadTrimmer->IsActive();
+                        streamingVadReady = g_streamingVadReady;
+                        LeaveCriticalSection(&g_streamingSessionCs);
                     }
-                    // Snapshot the related streaming state under one lock; use only
-                    // the local values after leaving the critical section.
-                    const bool streamingSessionActive = (g_activeStreamingSession != nullptr);
-                    const bool streamingTrimmerActive =
-                        streamingSessionActive && g_streamingVadTrimmer && g_streamingVadTrimmer->IsActive();
-                    const bool streamingVadReady = g_streamingVadReady;
-                    LeaveCriticalSection(&g_streamingSessionCs);
                     LeaveCriticalSection(&g_audioLock);
 
-                    if (streamingVadReady && !(streamingSessionActive && streamingTrimmerActive)) {
+                    if (!suppressed && streamingVadReady && !(streamingSessionActive && streamingTrimmerActive)) {
                         std::vector<float> floatBuf(written);
                         for (UINT32 i = 0; i < written; ++i)
                             floatBuf[i] = static_cast<float>(out[i]) / 32768.0f;
